@@ -285,9 +285,11 @@ const MAX_WEAPON_FACTOR = 2; // bazowy DPS broni rośnie z focusem obrażeń naj
 const POWDER_ONLY_WEAPON_FACTOR = 0.1; // broń bez bazowych obrażeń (np. The Specialist) bije tylko powderami
 // Klucze main attacku liczone modelem DPS zamiast liniowych wag (pochodne żywiołowe też).
 const MELEE_KEYS = /^(md(Pct|Raw)|[rnetwfa]Md(Pct|Raw)|atkTier)$/;
-// Obrażenia broni spoza focusu nadal zadają obrażenia, tylko nie korzystają z bonusów % do wybranych żywiołów,
-// więc liczą się w 40%. Dotyczy tylko DPS broni, nie jej bonusów (np. +20% Spell Damage działa na każdy żywioł).
-const WEAPON_FOCUS_FLOOR = 0.4;
+// Obrażenia broni spoza focusu nadal zadają obrażenia (baza, Str/Dex, Spell/Main Attack Damage %), tylko nie korzystają
+// z bonusów % do wybranych żywiołów, więc liczą się w 70% (tyle mniej więcej warte jest obrażenie bez +30-60% żywiołu).
+// Dotyczy tylko DPS broni, nie jej bonusów (np. +20% Spell Damage działa na każdy żywioł). Przy 40% broń tęczowa
+// (np. Lightshow, 20% thunder) przegrywała z dwukrotnie słabszą bronią czysto thunderową.
+const WEAPON_FOCUS_FLOOR = 0.7;
 const STAT_BOOST_BONUS = 1.5; // wybrana statystyka: waga = max(obecna, najwyższa waga archetypu) + ta premia
 // Okno poziomu: "prefer" karze wynik przedmiotów starszych niż okno (LEVEL_GAP_PENALTY za każdy poziom poniżej,
 // nie mniej niż LEVEL_GAP_FLOOR), "only" w ogóle ich nie bierze. Przypięte przedmioty są zawsze dozwolone.
@@ -300,6 +302,17 @@ const LEVEL_WINDOWS = [
 ];
 const LEVEL_GAP_PENALTY = 0.04; // "preferencja", nie zakaz: przedmiot 10 poziomów poza oknem traci 40%, nigdy więcej niż połowę
 const LEVEL_GAP_FLOOR = 0.5;
+const ITEM_TIERS = ["Normal", "Unique", "Rare", "Legendary", "Fabled", "Mythic"];
+// Przedmiot, którego nie da się mieć dwa razy (nagrody z questów są nie do handlu i dostaje się je raz), np. Intensity
+// z The Qira Hive: nie może trafić na oba palce. Przedmioty ze sklepów (np. Zhight Shiny Ring) można kupić dwa razy.
+function singleCopy(item) {
+  return Boolean(item.source && item.source.quest) && item.source.restrict === "untradable";
+}
+function ringsClash(picks, slotId, item) {
+  if (!item || (slotId !== "ring1" && slotId !== "ring2")) return false;
+  const other = picks[slotId === "ring1" ? "ring2" : "ring1"];
+  return Boolean(other && other.item && other.item.name === item.name && singleCopy(item));
+}
 const DEFAULT_OPTIONS = {
   elements: [],
   attackSpeeds: [],
@@ -311,6 +324,7 @@ const DEFAULT_OPTIONS = {
   levelWindow: "prefer10", // any | prefer10 | prefer20 | only10 | only20: przedmioty dużo niższe od poziomu postaci
   locked: {}, // { slotId: nazwa przedmiotu } - przypięte przez gracza, reszta buildu dopasowuje się do nich
   excluded: [], // nazwy przedmiotów, których gracz nie chce
+  excludedTiers: [], // rzadkości wyłączone z puli (np. ["Mythic"] = tańszy build); przypięte przedmioty zostają
   scoring: { weights: {}, tuning: {} }, // zakładka "Score calculation": własne wagi statystyk i stałe wyniku
 };
 const DEFENCE_PREF_SHARE = 0.75; // wybrana obrona: waga = 75% najważniejszej statystyki archetypu
@@ -494,6 +508,7 @@ function normalizeOptions(options = DEFAULT_OPTIONS) {
       SLOTS.filter((slot) => typeof (options.locked || {})[slot.id] === "string").map((slot) => [slot.id, options.locked[slot.id]])
     ),
     excluded: [...new Set((options.excluded || []).filter((name) => typeof name === "string"))].sort(),
+    excludedTiers: ITEM_TIERS.filter((tier) => (options.excludedTiers || []).includes(tier)),
     scoring: normalizeScoring(options.scoring),
   };
 }
@@ -658,14 +673,18 @@ function getArchetypeProfile(archetype, rawOptions = DEFAULT_OPTIONS) {
     return strongestElement > 0 ? elementWeights[element] / strongestElement : 1;
   };
   const prefixElement = { n: "neutral", e: "earth", t: "thunder", w: "water", f: "fire", a: "air" };
+  // Skalibrowana waga wariantu żywiołowego zostaje, ale nigdy nie jest niższa od pochodnej z (podbitej priorytetem)
+  // wagi bazowej - inaczej "Spell Damage" w Extra priorities podnosiło sdRaw, a Elemental Spell Damage (np. Lightshow) nie.
+  const raise = (key, derived) => {
+    if (!derived) return;
+    weights[key] = weights[key] === undefined ? derived : Math.max(weights[key], derived);
+  };
   Object.entries(base).forEach(([suffix, value]) => {
     if (!value) return;
-    if (weights[`r${suffix}`] === undefined) weights[`r${suffix}`] = value * ELEMENTAL_ID_SHARE;
-    Object.entries(prefixElement).forEach(([prefix, element]) => {
-      if (weights[`${prefix}${suffix}`] === undefined) weights[`${prefix}${suffix}`] = value * elementFactor(element);
-    });
+    raise(`r${suffix}`, value * ELEMENTAL_ID_SHARE);
+    Object.entries(prefixElement).forEach(([prefix, element]) => raise(`${prefix}${suffix}`, value * elementFactor(element)));
   });
-  if (weights.damRaw === undefined && base.DamRaw) weights.damRaw = base.DamRaw;
+  raise("damRaw", base.DamRaw);
 
   // Własne wagi z zakładki "Score calculation" nadpisują wszystko powyżej (kalibrację, suwaki, priorytety).
   const overridden = new Set(Object.keys(options.scoring.weights));
@@ -706,6 +725,32 @@ function getArchetypeProfile(archetype, rawOptions = DEFAULT_OPTIONS) {
     weaponWeight: baseWeaponWeight * focusResult.weaponFactor,
   };
   setMeleeModelWeights(profile);
+  return profile;
+}
+
+// Surowe obrażenia (raw) są warte tym więcej, im słabsza broń: obrażenia % skalują się z bazą broni, raw nie.
+// Wagi kalibrowano na buildach endgame, więc na niższych poziomach wagi raw mnożymy przez typowy DPS broni klasy
+// na poziomie 120 / typowy DPS na poziomie gracza (80. percentyl z ostatnich 20 poziomów), najwyżej RAW_BOOST_MAX.
+// To rada z poradnika ("słaba broń → raw spell damage, mocna → %") w liczbach.
+const RAW_BOOST_MAX = 2.5;
+const RAW_KEYS = /(Sd|Md|Dam)Raw$|^damRaw$/;
+function typicalWeaponDps(playerClass, level, allItems = ITEM_DB) {
+  const weaponType = CLASSES[playerClass].weapon;
+  const recent = allItems
+    .filter((item) => item.type === weaponType && item.level <= level && item.level >= level - 20)
+    .map((item) => item.dps || 0)
+    .sort((a, b) => a - b);
+  return recent.length > 0 ? recent[Math.floor(recent.length * 0.8)] || 0 : 0;
+}
+function applyRawBoost(profile, playerClass, level, allItems = ITEM_DB) {
+  const endgame = typicalWeaponDps(playerClass, 120, allItems);
+  const current = typicalWeaponDps(playerClass, level, allItems);
+  const boost = endgame > 0 && current > 0 ? Math.min(RAW_BOOST_MAX, Math.max(1, endgame / current)) : 1;
+  profile.rawBoost = boost;
+  if (boost === 1) return profile;
+  Object.keys(profile.weights).forEach((key) => {
+    if (RAW_KEYS.test(key) && !profile.overriddenKeys.has(key)) profile.weights[key] *= boost;
+  });
   return profile;
 }
 
@@ -907,7 +952,7 @@ function normalizeWynnbuilderItem(raw) {
   return withRolls(prepareItem(item));
 }
 
-// Jaka część DPS broni liczy się do wyniku przy focusie żywiołów. Własny focus: 40% + 60% × udział obrażeń w wybranych
+// Jaka część DPS broni liczy się do wyniku przy focusie żywiołów. Własny focus: 70% + 30% × udział obrażeń w wybranych
 // żywiołach (neutral liczy się tylko, gdy jest zaznaczony: nie dostaje bonusów żywiołów ani Elemental %).
 // Bez własnego focusu: 60% + 40% × udział żywiołów archetypu, neutral liczy się w pełni.
 function weaponElementFactor(item, profile) {
@@ -976,11 +1021,18 @@ function scoreItem(item, profile) {
     });
   }
   const offSkillPenalty = profile.customElements ? profile.tuning.offSkillPenalty / 2 : profile.tuning.offSkillPenalty;
+  let offSkill = 0;
+  const offSkills = [];
   SKILLS.forEach((skill) => {
     if (item.reqs[skill] > 0 && !profile.skills.includes(skill)) {
-      score -= (item.reqs[skill] / 25) * offSkillPenalty;
+      offSkill -= (item.reqs[skill] / 25) * offSkillPenalty;
+      offSkills.push(skill);
     }
   });
+  if (offSkill !== 0) {
+    score += offSkill;
+    contributions.push({ key: "offSkill", value: offSkills.map((skill) => `${item.reqs[skill]} ${SKILL_LABELS[skill]}`).join(", "), contribution: offSkill });
+  }
   // Przedmioty sprawdzone w buildach z poradnika dostają premię (opcja "Prefer items from guide builds").
   const guideCount = profile.guideCounts[item.name] || 0;
   if (guideCount > 0 && score > 0) {
@@ -1230,6 +1282,7 @@ function generateOptimizedBuild(level, playerClass, archetype, allItems = ITEM_D
     .map((item) => item.dps || 0)
     .sort((a, b) => a - b);
   if (recentWeapons.length > 0) profile.refDps = recentWeapons[Math.floor(recentWeapons.length * 0.8)] || profile.refDps;
+  applyRawBoost(profile, playerClass, playerLevel, allItems);
   if (profile.options.attackSpeeds.length > 0) {
     profile.gearHps = profile.options.attackSpeeds.reduce((sum, speed) => sum + HITS_PER_SECOND[speed], 0) / profile.options.attackSpeeds.length;
   }
@@ -1244,10 +1297,12 @@ function generateOptimizedBuild(level, playerClass, archetype, allItems = ITEM_D
 
   // Krok 1: filtrowanie po poziomie (i oknie poziomu w trybie "only"), klasie broni, zaznaczonych szybkościach ataku
   // (brak zaznaczenia = każda) i przedmiotach wykluczonych przez gracza.
+  const excludedTiers = new Set(profile.options.excludedTiers);
   const eligible = allItems.filter((item) => {
     if (item.level > playerLevel) return false;
     if (item.level < minLevel && !lockedNames.has(item.name)) return false;
     if (excludedNames.has(item.name) && !lockedNames.has(item.name)) return false;
+    if (excludedTiers.has(item.tier) && !lockedNames.has(item.name)) return false;
     if (item.category !== "weapon") return true;
     return item.type === classConfig.weapon && (attackSpeeds.length === 0 || attackSpeeds.includes(item.atkSpd));
   });
@@ -1319,6 +1374,7 @@ function generateOptimizedBuild(level, playerClass, archetype, allItems = ITEM_D
       beam.forEach((state) => {
         options.forEach((option, index) => {
           if (ringSymmetry && slotId === "ring2" && index !== 0 && (state.ringIndex === 0 || index < state.ringIndex)) return;
+          if (option && ringsClash(state.picks, slotId, option.item)) return;
           const evaluated = evaluateState({ ...state.picks, [slotId]: option }, available, baseHp, searchProfile);
           next.push({ ...evaluated, ringIndex: slotId === "ring1" ? index : state.ringIndex });
         });
@@ -1487,8 +1543,9 @@ function StatLine({ statKey, value }) {
 // KARTY PRZEDMIOTÓW W STYLU TOOLTIPA Z GRY
 // Ikonki to własne pikselowe placeholdery 16x16 (nie tekstury z gry). Znaki w siatce:
 // o obrys, m/l/d kolor główny/jasny/ciemny, g/G klejnot, y/Y złoto, w/W drewno, x cięciwa.
-const PIXEL_FONT = '"Tiny5", ui-monospace, SFMono-Regular, Menlo, monospace';
-// STYL GUI Z GRY: pikselowa czcionka Tiny5 z cieniem jak w Minecrafcie, panele i przyciski ze skosem (bevel) jak w
+const PIXEL_FONT = '"VCR OSD Mono", "Tiny5", ui-monospace, SFMono-Regular, Menlo, monospace';
+// STYL GUI Z GRY: czcionka VCR OSD Mono (freeware, Riciery Leal) w całym interfejsie i na kartach (znaki spoza niej,
+// np. ✓ × →, biorą się z czcionek zapasowych); małe rozmiary mają obrys 1 px, większe 2 px; panele i przyciski ze skosem (bevel) jak w
 // menu Wynncrafta, złote tytuły, paski jak XP bar, pola tekstowe czarne z szarą ramką. Karty przedmiotów (article)
 // mają własny styl tooltipa z gry i nie dostają cienia tekstu.
 const MC_BG_PATTERN =
@@ -1498,18 +1555,19 @@ const MC_SELECT_ARROW =
 const MC_STYLES = `
 .wbr-mc{font-family:${PIXEL_FONT};color:#E8E8E8;background:#0c0a10 ${MC_BG_PATTERN};text-shadow:-2px -2px 0 #000,-2px -1px 0 #000,-2px 0px 0 #000,-2px 1px 0 #000,-2px 2px 0 #000,-1px -2px 0 #000,-1px -1px 0 #000,-1px 0px 0 #000,-1px 1px 0 #000,-1px 2px 0 #000,0px -2px 0 #000,0px -1px 0 #000,0px 1px 0 #000,0px 2px 0 #000,1px -2px 0 #000,1px -1px 0 #000,1px 0px 0 #000,1px 1px 0 #000,1px 2px 0 #000,2px -2px 0 #000,2px -1px 0 #000,2px 0px 0 #000,2px 1px 0 #000,2px 2px 0 #000}
 .wbr-mc article,.wbr-mc article *{text-shadow:none}
+.wbr-mc .text-xs,.wbr-mc .text-sm{text-shadow:-1px -1px 0 #000,0 -1px 0 #000,1px -1px 0 #000,-1px 0 0 #000,1px 0 0 #000,-1px 1px 0 #000,0 1px 0 #000,1px 1px 0 #000}
 .wbr-mc .text-xs{font-size:14px;line-height:1.3}
-.wbr-mc .text-sm{font-size:16px;line-height:1.35}
-.wbr-mc .text-base{font-size:18px;line-height:1.35}
-.wbr-mc .text-lg{font-size:21px;line-height:1.3}
-.wbr-mc .text-xl{font-size:24px;line-height:1.25}
-.wbr-mc .text-3xl{font-size:36px;line-height:1.1}
-.wbr-mc article .text-xs{font-size:13px;line-height:1.25}
-.wbr-mc article .text-sm{font-size:15px;line-height:1.3}
-.wbr-mc article .text-base{font-size:17px;line-height:1.3}
-.wbr-mc article .text-lg{font-size:20px;line-height:1.25}
-.wbr-mc article .text-xl{font-size:24px;line-height:1.2}
-.wbr-mc article .text-3xl{font-size:34px;line-height:1}
+.wbr-mc .text-sm{font-size:15px;line-height:1.4}
+.wbr-mc .text-base{font-size:17px;line-height:1.35}
+.wbr-mc .text-lg{font-size:20px;line-height:1.3}
+.wbr-mc .text-xl{font-size:23px;line-height:1.25}
+.wbr-mc .text-3xl{font-size:34px;line-height:1.1}
+.wbr-mc article .text-xs{font-size:13px;line-height:1.3}
+.wbr-mc article .text-sm{font-size:14px;line-height:1.35}
+.wbr-mc article .text-base{font-size:16px;line-height:1.3}
+.wbr-mc article .text-lg{font-size:19px;line-height:1.25}
+.wbr-mc article .text-xl{font-size:22px;line-height:1.2}
+.wbr-mc article .text-3xl{font-size:32px;line-height:1}
 .wbr-mc .font-mono{font-family:inherit}
 .wbr-mc .font-bold,.wbr-mc .font-semibold{font-weight:400}
 .wbr-mc .text-zinc-50,.wbr-mc .text-zinc-100{color:#fff}
@@ -1817,7 +1875,7 @@ const ICON_THEME_COLORS = {
 // Kolory tooltipa z gry: granatowe tło, ramka w kolorze rzadkości, jasny tekst; czcionka Pixelify Sans (najbliższa
 // czcionce tooltipów w grze spośród otwartych), reszta interfejsu zostaje w Tiny5.
 const TOOLTIP = { text: "#F2EEFF", muted: "#A9AAC9", good: "#55FF55", bad: "#FF5555", ink: "#101228", bg: "#141A3C", bg2: "#0B0E22" };
-const CARD_FONT = '"Pixelify Sans", "Tiny5", ui-monospace, SFMono-Regular, Menlo, monospace';
+const CARD_FONT = '"VCR OSD Mono", "Pixelify Sans", "Tiny5", ui-monospace, SFMono-Regular, Menlo, monospace';
 
 function mixColor(hex, target, amount) {
   const from = [1, 3, 5].map((index) => parseInt(hex.slice(index, index + 2), 16));
@@ -1880,7 +1938,7 @@ function IconBox({ item, size = 48 }) {
 
 function TooltipBadge({ color, children }) {
   return (
-    <span className="px-1.5 text-xs uppercase leading-5 tracking-wider" style={{ background: color, color: TOOLTIP.ink }}>
+    <span className="px-1.5 text-sm uppercase leading-5" style={{ background: color, color: TOOLTIP.ink }}>
       {children}
     </span>
   );
@@ -2193,6 +2251,8 @@ function contributionLabel(entry, profile = null) {
       };
     case "hpDeficit":
       return { label: "Build health below the class base", math: "health deficit penalty" };
+    case "offSkill":
+      return { label: `Requires ${entry.value} (skills the archetype doesn't use)`, math: `−${formatNumber(Math.round((profile ? profile.tuning.offSkillPenalty : OFF_SKILL_REQ_PENALTY) * SCORE_SCALE * 10) / 10)} per 25 points` };
     case "skillPoints":
       return {
         label: entry.value > 0 ? `Needs ${entry.value} more skill points in this build` : `Frees ${-entry.value} skill points in this build`,
@@ -2582,7 +2642,9 @@ function summaryDeltas(build, slotId, item, currentStats) {
   return DELTA_METRICS.map(([id, label, pick, color]) => ({ id, label, color, delta: Math.round(pick(next) - pick(currentStats)) })).filter((entry) => entry.delta !== 0);
 }
 
-function slotAlternatives(build, slotId, limit = 20) {
+// Ranking kandydatów na slot "w tym buildzie" (inBuildScore) - dla listy "Other picks" i przeglądarki przedmiotów.
+// `candidates` = własna lista (po filtrach); bez niej: wszystkie przedmioty pasujące do slotu i ustawień buildu.
+function slotAlternatives(build, slotId, limit = 20, candidates = null) {
   const slot = SLOTS.find((entry) => entry.id === slotId);
   const classConfig = CLASSES[build.playerClass];
   const { attackSpeeds, excluded } = build.options;
@@ -2590,70 +2652,244 @@ function slotAlternatives(build, slotId, limit = 20) {
   const currentStats = computeBuildStats(build);
   const levelWindow = LEVEL_WINDOWS.find((entry) => entry.id === build.options.levelWindow) || LEVEL_WINDOWS[0];
   const minLevel = levelWindow.strict ? build.level - levelWindow.window : -Infinity;
-  // Ranking "w tym buildzie": każdy kandydat jest oceniany razem z resztą zestawu (dokładny DPS main attacku przy
-  // focusie ponad metą, deficyt HP), a nie tylko po liniowym wyniku - inaczej przedmioty od main attacku
-  // (np. Broken Balance) znikałyby z listy przy wysokim suwaku main attacku.
   const available = build.skillPoints.available;
   const baseHp = 5 * build.level + 5;
   const picks = Object.fromEntries(build.slots.map((entry) => [entry.id, entry.item ? { item: entry.item, ...scoreItem(entry.item, build.profile) } : null]));
   const rank = (item) => inBuildScore(picks, slotId, { item, ...scoreItem(item, build.profile) }, available, baseHp, build.profile);
-  const list = ITEM_DB.filter((item) => {
-    if (item.level > build.level || item.level < minLevel || excluded.includes(item.name) || (current && item.name === current.name)) return false;
-    if (slot.type !== "weapon") return item.type === slot.type;
-    return item.type === classConfig.weapon && (attackSpeeds.length === 0 || attackSpeeds.includes(item.atkSpd));
-  })
+  const excludedTiers = build.options.excludedTiers || [];
+  const pool =
+    candidates ||
+    ITEM_DB.filter((item) => {
+      if (item.level > build.level || item.level < minLevel || excluded.includes(item.name)) return false;
+      if (excludedTiers.includes(item.tier)) return false;
+      if (slot.type !== "weapon") return item.type === slot.type;
+      return item.type === classConfig.weapon && (attackSpeeds.length === 0 || attackSpeeds.includes(item.atkSpd));
+    });
+  const list = pool
+    .filter((item) => !(current && item.name === current.name) && !ringsClash(picks, slotId, item))
     .map((item) => ({ item, ...rank(item) }))
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
     .map((entry) => ({ ...entry, deltas: summaryDeltas(build, slotId, entry.item, currentStats) }));
-  return { list, currentScore: current ? rank(current).score : 0 };
+  return { list, currentScore: current ? rank(current).score : 0, total: pool.length };
 }
 
-function AlternativesDialog({ build, slotId, onClose, onUse }) {
-  const slot = build.slots.find((entry) => entry.id === slotId);
-  const { list: alternatives, currentScore } = useMemo(() => slotAlternatives(build, slotId), [build, slotId]);
+// PRZEGLĄDARKA PRZEDMIOTÓW z filtrami (nazwa, typ, żywioły, rzadkość, poziom, szybkość ataku, DPS, sortowanie).
+// Bez filtrów i z buildem: propozycje na slot wg wyniku "w tym buildzie" (jak Other picks). Z filtrami: pasujące
+// przedmioty (broń tylko klasy), nadal z wynikiem i różnicą w podsumowaniu, gdy jest build. Bez buildu: sortowanie
+// po DPS/poziomie/nazwie. Wybór przypina przedmiot do slotu (pierścień: wolny palec).
+const BROWSE_TYPES = [
+  { id: "weapon", label: "Weapon" },
+  { id: "helmet", label: "Helmet" },
+  { id: "chestplate", label: "Chestplate" },
+  { id: "leggings", label: "Leggings" },
+  { id: "boots", label: "Boots" },
+  { id: "ring", label: "Ring" },
+  { id: "bracelet", label: "Bracelet" },
+  { id: "necklace", label: "Necklace" },
+];
+const BROWSE_SORTS = [
+  { id: "score", label: "Score in this build" },
+  { id: "dps", label: "Weapon DPS" },
+  { id: "level", label: "Level" },
+  { id: "hp", label: "Health" },
+  { id: "name", label: "Name" },
+];
+const BROWSE_LIMIT = 40;
+const BROWSE_SCORE_CAP = 400; // tyle kandydatów (po liniowym wyniku) dostaje dokładny wynik "w tym buildzie"
+
+function itemHasElement(item, element) {
+  if (item.category === "weapon") return (item.damage || {})[element] > 0;
+  return (item.elements || []).includes(element);
+}
+
+function slotForItem(item, locked = {}) {
+  if (item.category === "weapon") return "weapon";
+  if (item.type === "ring") return !locked.ring1 || locked.ring1 === item.name ? "ring1" : "ring2";
+  return item.type;
+}
+
+function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, onPick, onClose, pickLabel = "Use" }) {
+  const slot = slotId ? SLOTS.find((entry) => entry.id === slotId) : null;
+  const weaponType = playerClass ? CLASSES[playerClass].weapon : null;
+  const normalized = normalizeOptions(options);
+  const [query, setQuery] = useState("");
+  const [types, setTypes] = useState(slot ? [slot.type] : []);
+  const [elements, setElements] = useState([]);
+  const [tiers, setTiers] = useState([]);
+  const [speeds, setSpeeds] = useState([]);
+  const [levelMin, setLevelMin] = useState("");
+  const [levelMax, setLevelMax] = useState("");
+  const [minDps, setMinDps] = useState("");
+  const [sort, setSort] = useState(build ? "score" : slot && slot.type === "weapon" ? "dps" : "level");
+  const [showAll, setShowAll] = useState(false);
+  const needle = query.trim().toLowerCase();
+  const filtering = needle.length > 0 || elements.length > 0 || tiers.length > 0 || speeds.length > 0 || levelMin !== "" || levelMax !== "" || minDps !== "" || (!slot && types.length > 0);
+  const weaponsOnly = slot ? slot.type === "weapon" : types.length > 0 && types.every((type) => type === "weapon");
+
+  const results = useMemo(() => {
+    const min = levelMin === "" ? 1 : clampLevel(levelMin);
+    const max = levelMax === "" ? level : Math.min(level, clampLevel(levelMax));
+    const dpsFloor = minDps === "" ? 0 : Number(minDps) || 0;
+    const wantedTypes = slot ? [slot.type] : types;
+    const matches = ITEM_DB.filter((item) => {
+      if (item.level > max || item.level < min) return false;
+      if (item.category === "weapon" && weaponType && item.type !== weaponType) return false;
+      if (item.category === "weapon" && !weaponType) return false;
+      const typeKey = item.category === "weapon" ? "weapon" : item.type;
+      if (wantedTypes.length > 0 && !wantedTypes.includes(typeKey)) return false;
+      if (needle && !item.name.toLowerCase().includes(needle)) return false;
+      if (tiers.length > 0 && !tiers.includes(item.tier)) return false;
+      if (elements.length > 0 && !elements.some((element) => itemHasElement(item, element))) return false;
+      if (speeds.length > 0 && (item.category !== "weapon" || !speeds.includes(item.atkSpd))) return false;
+      if (dpsFloor > 0 && (item.category !== "weapon" || (item.dps || 0) < dpsFloor)) return false;
+      if (normalized.excluded.includes(item.name)) return false;
+      return true;
+    });
+    // Propozycje bez filtrów: ranking na slot jak w "Other picks".
+    if (build && slot && !filtering) {
+      const ranked = slotAlternatives(build, slotId, BROWSE_LIMIT);
+      return { rows: ranked.list, total: ranked.total, currentScore: ranked.currentScore, suggested: true };
+    }
+    if (build && sort === "score") {
+      // Wynik "w tym buildzie": slot z typu przedmiotu; kandydaci ograniczeni do BROWSE_SCORE_CAP po liniowym wyniku.
+      const bySlot = {};
+      matches.forEach((item) => {
+        const target = slot ? slotId : slotForItem(item, normalized.locked);
+        (bySlot[target] || (bySlot[target] = [])).push(item);
+      });
+      let rows = [];
+      Object.entries(bySlot).forEach(([target, items]) => {
+        const capped = items.length > BROWSE_SCORE_CAP ? items.map((item) => ({ item, linear: scoreItem(item, build.profile).score })).sort((a, b) => b.linear - a.linear).slice(0, BROWSE_SCORE_CAP).map((entry) => entry.item) : items;
+        rows = rows.concat(slotAlternatives(build, target, BROWSE_LIMIT, capped).list.map((entry) => ({ ...entry, slotId: target })));
+      });
+      rows.sort((a, b) => b.score - a.score);
+      return { rows: rows.slice(0, BROWSE_LIMIT), total: matches.length, currentScore: null, suggested: false };
+    }
+    const key = {
+      dps: (item) => item.dps || 0,
+      level: (item) => item.level,
+      hp: (item) => (item.stats && item.stats.hp) || 0,
+      name: (item) => item.name,
+    }[sort === "score" ? "level" : sort];
+    const sorted = [...matches].sort((a, b) => (sort === "name" ? key(a).localeCompare(key(b)) : key(b) - key(a)));
+    return { rows: sorted.slice(0, showAll ? 200 : BROWSE_LIMIT).map((item) => ({ item, score: null, contributions: [], deltas: [], overflow: 0 })), total: matches.length, currentScore: null, suggested: false };
+  }, [build, slotId, slot, types, elements, tiers, speeds, levelMin, levelMax, minDps, needle, sort, level, weaponType, filtering, showAll, normalized.excluded, normalized.locked]);
+
+  const current = slot && build ? build.slots.find((entry) => entry.id === slotId).item : null;
+  const chip = (pressed, color, onClick, label, key) => (
+    <ToggleChip key={key} pressed={pressed} color={color} onClick={onClick}>
+      {label}
+    </ToggleChip>
+  );
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black bg-opacity-70 px-4 py-8"
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black bg-opacity-70 px-4 py-6"
       role="dialog"
       aria-modal="true"
-      aria-label={`Other picks for ${slot.label}`}
+      aria-label={slot ? `Other picks for ${slot.label}` : "Browse items"}
       onKeyDown={(event) => event.key === "Escape" && onClose()}
     >
-      <div className="mc-panel flex w-full max-w-3xl flex-col gap-3 p-4">
+      <div className="mc-panel flex w-full max-w-4xl flex-col gap-3 p-4">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <h2 className="mc-title text-lg">Other picks for {slot.label}</h2>
+            <h2 className="mc-title text-lg">{slot ? `Other picks for ${slot.label}` : "Browse items"}</h2>
             <p className="text-sm text-zinc-400">
-              {slot.item ? (
+              {current ? (
                 <>
-                  Current: <span style={{ color: RARITY_COLORS[slot.item.tier] }}>{slot.item.name}</span> (score {formatScore(currentScore)}).{" "}
+                  Current: <span style={{ color: RARITY_COLORS[current.tier] }}>{current.name}</span>
+                  {results.currentScore !== null ? ` (score ${formatScore(results.currentScore)})` : ""}.{" "}
                 </>
               ) : null}
-              Sorted by {build.archetype} score in this build with your settings
-              {build.mainAttack ? " (including each item's share of the real main attack DPS)" : ""}. Using one pins it here and re-fits the other slots around it.
+              {build && slot
+                ? `With nothing typed the list is the ${build.archetype} ranking for the slot; type or filter to search every ${weaponType ? `${weaponType}, ` : ""}armour piece and accessory up to level ${level} - still scored in this build. Using one pins it here and re-fits the other slots around it.`
+                : build
+                  ? `Every ${weaponType ? `${weaponType}, ` : ""}armour piece and accessory up to level ${level}, scored in the current ${build.archetype} build (the arrow shows the slot it would take). Picking one pins it to its slot and re-fits the rest.`
+                  : `Every ${weaponType ? `${weaponType}, ` : ""}armour piece and accessory up to level ${level}${weaponType ? "" : " (weapons appear once you choose a class)"}. Picking one pins it; generate a build to see scores.`}
             </p>
           </div>
-          <button
-            type="button"
-            autoFocus
-            onClick={onClose}
-            className="mc-btn mc-btn-sm"
-          >
+          <button type="button" autoFocus onClick={onClose} className="mc-btn mc-btn-sm">
             Close
           </button>
         </div>
-        {alternatives.length === 0 ? (
-          <p className="text-sm text-zinc-500">No other items fit this slot at level {build.level} with these settings.</p>
+
+        <div className="mc-slot flex flex-col gap-2 p-3 text-sm">
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search by name"
+              className="mc-input min-w-[12rem] flex-1"
+              aria-label="Search items by name"
+              autoComplete="off"
+              spellCheck={false}
+            />
+            <label className="flex items-center gap-2 text-xs text-zinc-300">
+              Sort
+              <select value={sort} onChange={(event) => setSort(event.target.value)} className="mc-input" aria-label="Sort items">
+                {BROWSE_SORTS.filter((entry) => entry.id !== "score" || build).map((entry) => (
+                  <option key={entry.id} value={entry.id}>
+                    {entry.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex items-center gap-1 text-xs text-zinc-300">
+              Lv.
+              <input value={levelMin} onChange={(event) => setLevelMin(event.target.value)} placeholder="1" inputMode="numeric" className="mc-input w-16 text-right" aria-label="Minimum level" />
+              –
+              <input value={levelMax} onChange={(event) => setLevelMax(event.target.value)} placeholder={String(level)} inputMode="numeric" className="mc-input w-16 text-right" aria-label="Maximum level" />
+            </label>
+          </div>
+          {!slot && (
+            <div className="flex flex-wrap gap-2">
+              {BROWSE_TYPES.map((type) => chip(types.includes(type.id), null, () => setTypes(toggleValue(types, type.id)), type.label, type.id))}
+            </div>
+          )}
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs text-zinc-500">Element</span>
+            {DAMAGE_FOCUS_OPTIONS.map((element) =>
+              chip(elements.includes(element), ELEMENT_STYLE[element].color, () => setElements(toggleValue(elements, element)), `${ELEMENT_STYLE[element].symbol} ${ELEMENT_STYLE[element].label}`, element)
+            )}
+            <span className="ml-2 text-xs text-zinc-500">Rarity</span>
+            {ITEM_TIERS.map((tier) => chip(tiers.includes(tier), RARITY_COLORS[tier], () => setTiers(toggleValue(tiers, tier)), tier, tier))}
+          </div>
+          {(weaponsOnly || (!slot && types.length === 0)) && weaponType && (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs text-zinc-500">Attack speed</span>
+              {ATTACK_SPEEDS.map((speed) => chip(speeds.includes(speed), null, () => setSpeeds(toggleValue(speeds, speed)), ATTACK_SPEED_LABELS[speed], speed))}
+              <label className="ml-2 flex items-center gap-1 text-xs text-zinc-300">
+                Min DPS
+                <input value={minDps} onChange={(event) => setMinDps(event.target.value)} placeholder="0" inputMode="numeric" className="mc-input w-20 text-right" aria-label="Minimum weapon DPS" />
+              </label>
+            </div>
+          )}
+          <p className="text-xs text-zinc-500">
+            {results.suggested
+              ? `Top ${results.rows.length} of ${results.total} items for this slot by score. Element = the weapon deals that damage / the item is that element.`
+              : `${results.total} match${results.total === 1 ? "" : "es"}${results.total > results.rows.length ? `, showing ${results.rows.length}` : ""}.`}
+            {!results.suggested && results.total > results.rows.length && sort !== "score" && !showAll && (
+              <button type="button" onClick={() => setShowAll(true)} className="mc-link ml-2">
+                Show up to 200
+              </button>
+            )}
+          </p>
+        </div>
+
+        {results.rows.length === 0 ? (
+          <p className="text-sm text-zinc-500">
+            Nothing matches these filters up to level {level}.{!weaponType && (slot ? slot.type === "weapon" : types.includes("weapon")) ? " Weapons show once you choose a class." : ""}
+          </p>
         ) : (
           <ul className="mc-divide flex flex-col">
-            {alternatives.map((entry) => {
+            {results.rows.map((entry) => {
               const { item } = entry;
-              const delta = entry.score - currentScore;
-              const stats = entry.contributions.filter((c) => c.key !== "dps" && c.contribution > 0 && STAT_META[c.key]).slice(0, 3);
-              const levelGap = entry.contributions.find((c) => c.key === "levelGap");
+              const delta = results.currentScore !== null && entry.score !== null ? entry.score - results.currentScore : null;
+              const stats = (entry.contributions || []).filter((c) => c.key !== "dps" && c.contribution > 0 && STAT_META[c.key]).slice(0, 3);
+              const fallbackStats = stats.length === 0 ? ID_DISPLAY.filter((display) => item.ids[display.key]).slice(0, 3).map((display) => ({ key: display.key, value: item.ids[display.key] })) : [];
+              const levelGap = (entry.contributions || []).find((c) => c.key === "levelGap");
               return (
-                <li key={item.name} className="flex flex-wrap items-center gap-3 py-2">
+                <li key={`${entry.slotId || slotId || item.type}-${item.name}`} className="flex flex-wrap items-center gap-3 py-2">
                   <div className="flex-shrink-0">
                     <PixelIcon item={item} size={32} />
                   </div>
@@ -2662,47 +2898,55 @@ function AlternativesDialog({ build, slotId, onClose, onUse }) {
                       {item.name}
                     </span>
                     <span className="text-xs" style={{ color: TOOLTIP.muted }}>
-                      {item.tier} · Lv. {item.level}
+                      {item.tier} {item.type} · Lv. {item.level}
                       {item.category === "weapon" ? ` · ${ATTACK_SPEED_LABELS[item.atkSpd] || item.atkSpd} · ${formatNumber(item.dps || 0)} DPS` : ""}
                       {item.category === "weapon" && Math.round(weaponMainAttackDps(item)) !== Math.round(item.dps || 0)
                         ? ` → ${formatNumber(Math.round(weaponMainAttackDps(item)))} main attack DPS`
                         : ""}
+                      {item.elements && item.elements.length > 0 ? ` · ${item.elements.map((element) => ELEMENT_STYLE[element].symbol).join(" ")}` : ""}
+                      {entry.slotId && !slot ? ` · → ${SLOTS.find((s) => s.id === entry.slotId).label}` : ""}
                     </span>
                     <span className="text-xs" style={{ color: TOOLTIP.text }}>
                       {stats.map((c) => `${formatStatValue(c.key, c.value)} ${STAT_META[c.key].label}`).join(" · ")}
+                      {fallbackStats.map((c) => `${formatStatValue(c.key, c.value)} ${STAT_META[c.key] ? STAT_META[c.key].label : c.key}`).join(" · ")}
                       {levelGap ? <span style={{ color: "#FFAA00" }}>{stats.length > 0 ? " · " : ""}far below your level ({formatScore(levelGap.contribution)})</span> : null}
                     </span>
-                    <span className="flex flex-wrap gap-x-3 text-xs" title="Change in the build summary if you use this item (without the ability tree)">
-                      {entry.deltas.length === 0 ? (
-                        <span style={{ color: TOOLTIP.muted }}>No change in the summary</span>
-                      ) : (
-                        entry.deltas.slice(0, 6).map((d) => (
-                          <span key={d.id} style={{ color: d.delta > 0 ? "#55FF55" : "#FF5555" }}>
-                            {d.label} {d.delta > 0 ? "+" : ""}
-                            {formatNumber(d.delta)}
-                          </span>
-                        ))
-                      )}
-                    </span>
+                    {entry.score !== null && (
+                      <span className="flex flex-wrap gap-x-3 text-xs" title="Change in the build summary if you use this item (without the ability tree)">
+                        {!entry.deltas || entry.deltas.length === 0 ? (
+                          <span style={{ color: TOOLTIP.muted }}>No change in the summary</span>
+                        ) : (
+                          entry.deltas.slice(0, 6).map((d) => (
+                            <span key={d.id} style={{ color: d.delta > 0 ? "#55FF55" : "#FF5555" }}>
+                              {d.label} {d.delta > 0 ? "+" : ""}
+                              {formatNumber(d.delta)}
+                            </span>
+                          ))
+                        )}
+                      </span>
+                    )}
                   </div>
                   <div className="flex flex-col items-end text-xs">
-                    <span className="tabular-nums text-zinc-200">
-                      score {formatScore(entry.score)}{" "}
-                      <span style={{ color: delta >= 0 ? "#55FF55" : "#FF5555" }}>
-                        ({delta >= 0 ? "+" : ""}
-                        {formatScore(delta)})
+                    {entry.score !== null && (
+                      <span className="tabular-nums text-zinc-200">
+                        score {formatScore(entry.score)}
+                        {delta !== null ? (
+                          <span style={{ color: delta >= 0 ? "#55FF55" : "#FF5555" }}>
+                            {" "}
+                            ({delta >= 0 ? "+" : ""}
+                            {formatScore(delta)})
+                          </span>
+                        ) : null}
                       </span>
-                    </span>
-                    <span style={{ color: entry.overflow === 0 ? "#55FF55" : "#FFAA00" }}>
-                      {entry.overflow === 0 ? "✓ fits your skill points" : `✗ ${entry.overflow} SP short, other slots get re-fitted`}
-                    </span>
+                    )}
+                    {entry.score !== null && (
+                      <span style={{ color: entry.overflow === 0 ? "#55FF55" : "#FFAA00" }}>
+                        {entry.overflow === 0 ? "✓ fits your skill points" : `✗ ${entry.overflow} SP short, other slots get re-fitted`}
+                      </span>
+                    )}
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => onUse(slotId, item.name)}
-                    className="mc-btn mc-btn-sm mc-btn-primary"
-                  >
-                    Use
+                  <button type="button" onClick={() => onPick(item, entry.slotId || slotId || slotForItem(item, normalized.locked))} className="mc-btn mc-btn-sm mc-btn-primary">
+                    {pickLabel}
                   </button>
                 </li>
               );
@@ -4291,6 +4535,7 @@ function describeOptions(rawOptions) {
     if (options.focus[group.id] !== undefined) parts.push(`${group.label} ${options.focus[group.id]}%`);
   });
   if (options.levelWindow !== "prefer10") parts.push(LEVEL_WINDOWS.find((entry) => entry.id === options.levelWindow).label.toLowerCase());
+  if (options.excludedTiers.length > 0) parts.push(`no ${options.excludedTiers.join("/")} items`);
   const overrides = Object.keys(options.scoring.weights).length + Object.keys(options.scoring.tuning).length;
   if (overrides > 0) parts.push(`${overrides} custom score weight${overrides === 1 ? "" : "s"}`);
   if (!options.preferGuideItems) parts.push("guide items not preferred");
@@ -4422,10 +4667,78 @@ function FocusSliders({ options, onChange, archetype }) {
   );
 }
 
-function CustomStats({ options, onChange, archetype, weaponType, weaponCounts }) {
-  const archetypeElements = ARCHETYPES[archetype].elements.map((element) => ELEMENT_STYLE[element].label).join(" + ");
+// "Build around an item": wyszukiwarka nazw (broń klasy, pancerz, akcesoria do poziomu gracza); wybór przypina przedmiot
+// do jego slotu (pierścień: wolny palec) - to, co w praktyce robi 99% graczy: build wokół konkretnej broni.
+function PinItemSearch({ options, onChange, weaponType, level, onBrowse = null }) {
+  const [query, setQuery] = useState("");
+  const needle = query.trim().toLowerCase();
+  const matches =
+    needle.length < 2
+      ? []
+      : ITEM_DB.filter((item) => item.level <= level && (item.category !== "weapon" || !weaponType || item.type === weaponType) && item.name.toLowerCase().includes(needle))
+          .sort((a, b) => (a.name.toLowerCase().startsWith(needle) === b.name.toLowerCase().startsWith(needle) ? b.level - a.level : a.name.toLowerCase().startsWith(needle) ? -1 : 1))
+          .slice(0, 8);
+  const pin = (item) => {
+    const locked = { ...(options.locked || {}) };
+    let slotId = item.category === "weapon" ? "weapon" : item.type;
+    if (item.type === "ring") slotId = !locked.ring1 || locked.ring1 === item.name ? "ring1" : "ring2";
+    locked[slotId] = item.name;
+    onChange({ ...options, locked, excluded: (options.excluded || []).filter((name) => name !== item.name) });
+    setQuery("");
+  };
+  return (
+    <div className="flex flex-col gap-2">
+      <label htmlFor="pin-search" className="text-xs text-zinc-300">
+        Build around an item
+      </label>
+      <div className="flex flex-wrap gap-2">
+        <input
+          id="pin-search"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder={`e.g. a ${weaponType || "weapon"} name - pins it, the rest fits around it`}
+          className="mc-input min-w-[11rem] flex-1"
+          autoComplete="off"
+          spellCheck={false}
+        />
+        {onBrowse && (
+          <button type="button" onClick={onBrowse} className="mc-btn mc-btn-sm whitespace-nowrap" title="Browse every item with filters: type, element, rarity, level, attack speed, DPS">
+            Browse items…
+          </button>
+        )}
+      </div>
+      {needle.length >= 2 && (
+        <ul className="mc-well flex max-h-64 flex-col overflow-y-auto">
+          {matches.length === 0 ? (
+            <li className="px-2 py-1 text-xs text-zinc-500">No {weaponType || "weapon"}, armour or accessory up to level {level} matches.</li>
+          ) : (
+            matches.map((item) => (
+              <li key={item.name}>
+                <button type="button" onClick={() => pin(item)} className="flex w-full items-center justify-between gap-2 px-2 py-1 text-left text-sm hover:bg-zinc-800">
+                  <span style={{ color: RARITY_COLORS[item.tier] || RARITY_COLORS.Normal }}>{item.name}</span>
+                  <span className="whitespace-nowrap text-xs text-zinc-500">
+                    {item.tier} {item.type} · Lv. {item.level}
+                    {item.category === "weapon" ? ` · ${formatNumber(item.dps || 0)} DPS` : ""}
+                  </span>
+                </button>
+              </li>
+            ))
+          )}
+        </ul>
+      )}
+      <p className="text-xs text-zinc-500">
+        Type a name, or open <span className="text-zinc-300">Browse items…</span> to filter by type, element, rarity, level, attack speed and DPS. Pinned items show below and always stay in the build.
+      </p>
+    </div>
+  );
+}
+
+function CustomStats({ options, onChange, archetype, weaponType, weaponCounts, level, onBrowse }) {
+  const archetypeConfig = ARCHETYPES[archetype] || null;
+  const archetypeElements = archetypeConfig ? archetypeConfig.elements.map((element) => ELEMENT_STYLE[element].label).join(" + ") : "";
   const totalWeapons = Object.values(weaponCounts).reduce((sum, count) => sum + count, 0);
   const isDefault = sameOptions({ ...options, scoring: DEFAULT_OPTIONS.scoring }, DEFAULT_OPTIONS);
+  const excludedTiers = normalizeOptions(options).excludedTiers;
   return (
     <div className="mc-hr flex flex-col gap-4 pt-4">
       <div className="flex items-center justify-between">
@@ -4441,7 +4754,32 @@ function CustomStats({ options, onChange, archetype, weaponType, weaponCounts })
         )}
       </div>
 
-      <FocusSliders options={options} onChange={onChange} archetype={archetype} />
+      <PinItemSearch options={options} onChange={onChange} weaponType={weaponType} level={level} onBrowse={onBrowse} />
+
+      {archetypeConfig ? (
+        <FocusSliders options={options} onChange={onChange} archetype={archetype} />
+      ) : (
+        <p className="text-xs text-zinc-500">Build focus sliders (main attack / spell / EHP) appear once you choose an archetype.</p>
+      )}
+
+      <fieldset className="flex flex-col gap-2">
+        <legend className="mb-2 text-xs text-zinc-300">Allowed rarities</legend>
+        <div className="flex flex-wrap gap-2">
+          {ITEM_TIERS.map((tier) => (
+            <ToggleChip
+              key={tier}
+              pressed={!excludedTiers.includes(tier)}
+              color={RARITY_COLORS[tier]}
+              onClick={() => onChange({ ...options, excludedTiers: toggleValue(excludedTiers, tier) })}
+            >
+              {tier}
+            </ToggleChip>
+          ))}
+        </div>
+        <p className="text-xs text-zinc-500">
+          {excludedTiers.length > 0 ? `Without ${excludedTiers.join(", ")} items - a cheaper build. ` : ""}Turn off Mythic (or Fabled) for a build you can actually afford; pinned items always stay.
+        </p>
+      </fieldset>
 
       <div className="flex flex-col gap-2">
         <label htmlFor="level-window" className="text-xs text-zinc-300">
@@ -4476,7 +4814,9 @@ function CustomStats({ options, onChange, archetype, weaponType, weaponCounts })
         <p className="text-xs text-zinc-500">
           {options.elements.length > 0
             ? "A weapon of any damage type can still be picked, but ones dealing the checked damage get priority. Items boosting it do too, and skill points follow it."
-            : `Following ${archetype}: ${archetypeElements}. Pick elements to override.`}
+            : archetypeConfig
+              ? `Following ${archetype}: ${archetypeElements}. Pick elements to override.`
+              : "Nothing picked: the archetype's usual elements will be used."}
         </p>
       </fieldset>
 
@@ -4603,7 +4943,7 @@ function CustomStats({ options, onChange, archetype, weaponType, weaponCounts })
         <span>
           Prefer items from guide builds
           <span className="block text-zinc-500">
-            {ARCHETYPES[archetype].guideBuilds} {archetype} build{ARCHETYPES[archetype].guideBuilds === 1 ? "" : "s"} in The Ultimate Build Guide.
+            {archetypeConfig ? `${archetypeConfig.guideBuilds} ${archetype} build${archetypeConfig.guideBuilds === 1 ? "" : "s"} in The Ultimate Build Guide.` : "126 builds from The Ultimate Build Guide, per archetype."}
           </span>
         </span>
       </label>
@@ -4747,8 +5087,8 @@ function formatWeight(value) {
 
 function ScoreWeightsPanel({ archetype, playerClass, level, options, onChange, outdated, onGenerate }) {
   const scoring = normalizeScoring(options.scoring);
-  const profile = getArchetypeProfile(archetype, options);
-  const baseline = getArchetypeProfile(archetype, { ...options, scoring: { weights: {}, tuning: scoring.tuning } });
+  const profile = applyRawBoost(getArchetypeProfile(archetype, options), playerClass, level);
+  const baseline = applyRawBoost(getArchetypeProfile(archetype, { ...options, scoring: { weights: {}, tuning: scoring.tuning } }), playerClass, level);
   const [showDerived, setShowDerived] = useState(false);
   const [query, setQuery] = useState("");
   const covered = new Set(SCORE_GROUPS.flatMap((group) => group.keys));
@@ -4849,6 +5189,7 @@ function ScoreWeightsPanel({ archetype, playerClass, level, options, onChange, o
         </label>
         <span className="text-xs text-zinc-500">
           Unit column = how much of the stat gives weight × 10 points. Weights of 0 mean the stat is ignored. IDs not listed here (XP bonus, poison, thorns…) never count.
+          {profile.rawBoost > 1 ? ` Raw damage weights are ×${profile.rawBoost.toFixed(2)} at level ${level}: weapons here deal ${Math.round(100 / profile.rawBoost)}% of endgame damage, so flat raw damage is worth that much more than % (an override replaces the boosted value).` : ""}
         </span>
       </div>
 
@@ -5589,10 +5930,114 @@ function TreeNodeButton({ node, state, archetypeColor, onToggle, onFocus }) {
   );
 }
 
+// KOD DRZEWKA WYNNBUILDERA ("Copy Tree" / "Paste Tree" w wynnbuilder.github.io/builder): przejście drzewa od głowy
+// (węzeł bez rodziców) po dzieciach w kolejności węzłów w danych; każde nieodwiedzone dziecko to jeden bit:
+// 1 = aktywne (i schodzimy w nie), 0 = nieaktywne. Bity zapisane w base64 Wynnbuildera (6 bitów na znak,
+// najmłodszy bit pierwszy). Port encodeAtree/decodeAtree z build_encode_decode.js i BitVector z utils.js.
+const WB_B64 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz+-";
+const WB_TREE_CACHE = {};
+function wbTreeShape(playerClass) {
+  if (WB_TREE_CACHE[playerClass]) return WB_TREE_CACHE[playerClass];
+  const nodes = Object.values(TREE_DATA.classes[playerClass] || {});
+  const children = new Map(nodes.map((node) => [node.id, []]));
+  nodes.forEach((node) => node.parents.forEach((parentId) => children.get(parentId).push(node)));
+  const head = nodes.find((node) => node.parents.length === 0);
+  return (WB_TREE_CACHE[playerClass] = { head, children });
+}
+function encodeTreeHash(playerClass, selectedIds) {
+  const { head, children } = wbTreeShape(playerClass);
+  if (!head) return "";
+  const active = new Set(selectedIds);
+  const visited = new Set();
+  const bits = [];
+  const traverse = (node) => {
+    children.get(node.id).forEach((child) => {
+      if (visited.has(child.id)) return;
+      visited.add(child.id);
+      if (active.has(child.id)) {
+        bits.push(1);
+        traverse(child);
+      } else bits.push(0);
+    });
+  };
+  traverse(head);
+  let out = "";
+  for (let i = 0; i < bits.length; i += 6) {
+    let value = 0;
+    for (let j = 0; j < 6; j++) value |= (bits[i + j] || 0) << j;
+    out += WB_B64[value];
+  }
+  return out;
+}
+function decodeTreeHash(playerClass, text) {
+  const { head, children } = wbTreeShape(playerClass);
+  const code = String(text || "").trim();
+  if (!head || code.length === 0) return null;
+  const bits = [];
+  for (const char of code) {
+    const value = WB_B64.indexOf(char);
+    if (value < 0) return null;
+    for (let j = 0; j < 6; j++) bits.push((value >> j) & 1);
+  }
+  let index = 0;
+  const ids = [head.id];
+  const visited = new Set();
+  const traverse = (node) => {
+    children.get(node.id).forEach((child) => {
+      if (visited.has(child.id)) return;
+      visited.add(child.id);
+      if (bits[index] === 1) {
+        index += 1;
+        ids.push(child.id);
+        traverse(child);
+      } else index += 1;
+    });
+  };
+  traverse(head);
+  return ids;
+}
+
 function AbilityTree({ playerClass, level, rank, selected, onChange, buildArchetype, onUseArchetype }) {
   const tree = TREE_INDEX[playerClass];
   const [focused, setFocused] = useState(null);
   const [message, setMessage] = useState("");
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [pasteText, setPasteText] = useState("");
+  const applyTreeCode = (text) => {
+    const ids = decodeTreeHash(playerClass, text);
+    if (!ids) {
+      setMessage("That doesn't look like a Wynnbuilder tree code (letters, digits, + and - only).");
+      return;
+    }
+    const next = resolveTree(tree, ids);
+    onChange([...next.reachable]);
+    setPasteOpen(false);
+    setPasteText("");
+    setMessage(`Loaded ${next.reachable.size} abilities (${next.points} AP) from the Wynnbuilder tree code${next.reachable.size < ids.length ? `; ${ids.length - next.reachable.size} couldn't be placed - the code may be for another class or data version` : ""}.`);
+  };
+  const copyTree = async () => {
+    const code = encodeTreeHash(playerClass, selected);
+    try {
+      await navigator.clipboard.writeText(code);
+      setMessage(`Copied the tree code (${code.length} characters). In Wynnbuilder's Ability Tree tab press "Paste Tree".`);
+    } catch (error) {
+      setPasteText(code);
+      setPasteOpen(true);
+      setMessage("Clipboard is blocked here - copy the code from the box below.");
+    }
+  };
+  const pasteTree = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text && decodeTreeHash(playerClass, text)) {
+        applyTreeCode(text);
+        return;
+      }
+    } catch (error) {
+      // brak dostępu do schowka (np. w ramce) - pole tekstowe niżej
+    }
+    setPasteOpen(true);
+  };
   const resolved = resolveTree(tree, selected);
   const loan = (RANKS.find((entry) => entry.id === rank) || RANKS[0]).loan;
   const baseCap = abilityPointCap(level);
@@ -5653,6 +6098,12 @@ function AbilityTree({ playerClass, level, rank, selected, onChange, buildArchet
               {arch} {resolved.archetypeCount[arch] || 0}
             </span>
           ))}
+          <button type="button" onClick={copyTree} className="mc-btn mc-btn-sm" title="Copy this tree as a Wynnbuilder tree code (Paste Tree in Wynnbuilder)">
+            Copy tree
+          </button>
+          <button type="button" onClick={pasteTree} className="mc-btn mc-btn-sm" title="Load a tree copied with Wynnbuilder's Copy Tree button">
+            Paste tree
+          </button>
           <button
             type="button"
             onClick={() => {
@@ -5665,6 +6116,29 @@ function AbilityTree({ playerClass, level, rank, selected, onChange, buildArchet
           </button>
         </div>
       </div>
+      {pasteOpen && (
+        <div className="mc-slot flex flex-wrap items-center gap-2 px-3 py-2 text-sm">
+          <label htmlFor="tree-code" className="text-zinc-300">
+            Wynnbuilder tree code
+          </label>
+          <input
+            id="tree-code"
+            value={pasteText}
+            onChange={(event) => setPasteText(event.target.value)}
+            onKeyDown={(event) => event.key === "Enter" && applyTreeCode(pasteText)}
+            placeholder="e.g. 3Q7Yx0… from Wynnbuilder's Copy Tree"
+            className="mc-input min-w-0 flex-1 font-mono"
+            spellCheck={false}
+          />
+          <button type="button" onClick={() => applyTreeCode(pasteText)} className="mc-btn mc-btn-sm mc-btn-primary">
+            Load
+          </button>
+          <button type="button" onClick={() => setPasteOpen(false)} className="mc-btn mc-btn-sm">
+            Close
+          </button>
+          <span className="w-full text-xs text-zinc-500">Same format as Wynnbuilder's Copy Tree / Paste Tree buttons (wynnbuilder.github.io/builder, Ability Tree tab). Codes are per class.</span>
+        </div>
+      )}
 
       {dominant && dominant[0] !== buildArchetype && (
         <div className="mc-slot flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-sm">
@@ -6036,7 +6510,7 @@ function solveBuilds(level, solver, rawOptions = DEFAULT_OPTIONS) {
   const options = normalizeOptions(rawOptions);
   // Dopasowanie do archetypu: wagi archetypu (jak w zwykłym wyszukiwaniu) liczone obok celów solvera.
   const fit = Math.min(100, Math.max(0, Number(solver.archetypeFit) || 0)) / 100;
-  const archetypeProfile = fit > 0 ? getArchetypeProfile(archetype, { ...DEFAULT_OPTIONS, locked: options.locked, excluded: options.excluded, scoring: options.scoring }) : null;
+  const archetypeProfile = fit > 0 ? applyRawBoost(getArchetypeProfile(archetype, { ...DEFAULT_OPTIONS, locked: options.locked, excluded: options.excluded, scoring: options.scoring }), playerClass, playerLevel) : null;
   const available = availableSkillPoints(playerLevel);
   const minLevel = Math.max(1, Math.min(playerLevel, solverNumber(solver.minLevel) === null ? playerLevel - 10 : Number(solver.minLevel)));
   const excludedNames = new Set(options.excluded);
@@ -6105,6 +6579,7 @@ function solveBuilds(level, solver, rawOptions = DEFAULT_OPTIONS) {
     beam.forEach((state) => {
       choices.forEach((option, index) => {
         if (ringSymmetry && slotId === "ring2" && index !== 0 && (state.ringIndex === 0 || index < state.ringIndex)) return;
+        if (option && ringsClash(state.picks, slotId, option.item)) return;
         evaluated += 1;
         next.push({ ...evaluate({ ...state.picks, [slotId]: option }), ringIndex: slotId === "ring1" ? index : state.ringIndex });
       });
@@ -6472,20 +6947,37 @@ function GuideBuilds({ archetype, activeUrl, onShow }) {
 
 const fieldClass = "mc-input w-full";
 
+// Podpowiedź na zakładce, która potrzebuje klasy/archetypu/buildu, zanim gracz je wybierze.
+function NeedsPick({ what, why, onGenerate = null }) {
+  return (
+    <section className="mc-panel flex flex-col gap-2 p-6">
+      <h2 className="mc-title text-lg">Pick {what} first</h2>
+      <p className="text-sm text-zinc-400">{why} Use the form on the left.</p>
+      {onGenerate && (
+        <button type="button" onClick={onGenerate} className="mc-btn mc-btn-primary self-start">
+          Generate Build
+        </button>
+      )}
+    </section>
+  );
+}
+
 export default function BuildRecommender() {
   const [savedRank] = useState(loadSavedRank);
   const [rank, setRank] = useState(savedRank || "none");
   const [rankConfirmed, setRankConfirmed] = useState(Boolean(savedRank));
-  const [levelInput, setLevelInput] = useState("106");
-  const [playerClass, setPlayerClass] = useState("Mage");
-  const [archetype, setArchetype] = useState("Riftwalker");
+  // Start "na czysto": bez poziomu, klasy, archetypu i bez wygenerowanego buildu - gracz wybiera wszystko sam.
+  const [levelInput, setLevelInput] = useState("");
+  const [playerClass, setPlayerClass] = useState("");
+  const [archetype, setArchetype] = useState("");
   const [initialOptions] = useState(() => ({ ...DEFAULT_OPTIONS, scoring: loadSavedScoring() }));
   const [options, setOptions] = useState(initialOptions);
-  const [result, setResult] = useState(() => timedBuild(106, "Mage", "Riftwalker", initialOptions, 1));
+  const [result, setResult] = useState(null);
   const [buildError, setBuildError] = useState(null);
   const [guideView, setGuideView] = useState(null);
   const [tab, setTab] = useState("build");
   const [alternativesFor, setAlternativesFor] = useState(null);
+  const [browseOpen, setBrowseOpen] = useState(false); // przeglądarka przedmiotów z Custom stats ("Browse items")
   const [savedTree] = useState(loadSavedTree);
   const [treeSelections, setTreeSelections] = useState(savedTree.selections);
   const [treeEffects, setTreeEffects] = useState(savedTree.effects); // { klasa: { toggles: {}, sliders: {} } }
@@ -6502,17 +6994,19 @@ export default function BuildRecommender() {
   const [solverRunning, setSolverRunning] = useState(false);
   const [solverView, setSolverView] = useState(null); // kandydat solvera pokazany w siatce
 
-  const generated = result.build;
+  const generated = result ? result.build : null;
   const guideResult = useMemo(() => (guideView ? guideBuildResult(guideView) : null), [guideView]);
   const solverBuild = useMemo(() => (solverView ? solverBuildResult(solverView.candidate, solverView.solved, solverView.archetype) : null), [solverView]);
   const viewed = guideResult || solverBuild;
-  const build = useMemo(() => applyBuildRolls(viewed || generated, rolls), [viewed, generated, rolls]);
+  const build = useMemo(() => (viewed || generated ? applyBuildRolls(viewed || generated, rolls) : null), [viewed, generated, rolls]);
+  const buildClass = build ? build.playerClass : "";
   const buildTreeSettings = useMemo(
-    () => ({ selected: treeSelections[build.playerClass] || [], ...(treeEffects[build.playerClass] || {}) }),
-    [build.playerClass, treeSelections, treeEffects]
+    () => ({ selected: treeSelections[buildClass] || [], ...(treeEffects[buildClass] || {}) }),
+    [buildClass, treeSelections, treeEffects]
   );
-  const buildStats = useMemo(() => computeBuildStats(build, buildTreeSettings), [build, buildTreeSettings]);
+  const buildStats = useMemo(() => (build ? computeBuildStats(build, buildTreeSettings) : null), [build, buildTreeSettings]);
   const powderBySlot = useMemo(() => {
+    if (!build) return {};
     const plan = recommendPowders(build, buildStats);
     const map = {};
     if (plan.weapon) map[plan.weapon.slot.id] = plan.weapon.element;
@@ -6521,31 +7015,34 @@ export default function BuildRecommender() {
     });
     return map;
   }, [build, buildStats]);
-  const classTreeState = useMemo(() => treeStateFor(playerClass, treeSelections[playerClass] || []), [playerClass, treeSelections]);
+  const classTreeState = useMemo(() => (playerClass ? treeStateFor(playerClass, treeSelections[playerClass] || []) : null), [playerClass, treeSelections]);
   const setClassTreeEffects = (cls) => (next) =>
     setTreeEffects((current) => ({ ...current, [cls]: typeof next === "function" ? next(current[cls]) : next }));
-  const level = clampLevel(levelInput);
-  const profile = getArchetypeProfile(archetype, options);
-  const weaponType = CLASSES[playerClass].weapon;
-  const outdated =
-    generated.level !== level ||
-    generated.playerClass !== playerClass ||
-    generated.archetype !== archetype ||
-    !sameOptions(generated.options, options);
-  const customSummary = viewed ? "" : describeOptions(build.options);
+  const level = levelInput === "" ? null : clampLevel(levelInput);
+  const effectiveLevel = level ?? 120; // drzewko, solver i lista przedmiotów bez wpisanego poziomu zakładają 120
+  const archetypeValid = Boolean(playerClass && archetype && CLASSES[playerClass].archetypes.includes(archetype));
+  const profile = archetypeValid ? getArchetypeProfile(archetype, options) : null;
+  const weaponType = playerClass ? CLASSES[playerClass].weapon : null;
+  const ready = Boolean(level && archetypeValid);
+  const outdated = Boolean(
+    generated &&
+      (generated.level !== level || generated.playerClass !== playerClass || generated.archetype !== archetype || !sameOptions(generated.options, options))
+  );
+  const customSummary = viewed || !build ? "" : describeOptions(build.options);
 
   const weaponCounts = useMemo(() => {
     const counts = {};
+    if (!weaponType) return counts;
     ITEM_DB.forEach((item) => {
-      if (item.type === weaponType && item.level <= level) counts[item.atkSpd] = (counts[item.atkSpd] || 0) + 1;
+      if (item.type === weaponType && item.level <= effectiveLevel) counts[item.atkSpd] = (counts[item.atkSpd] || 0) + 1;
     });
     return counts;
-  }, [weaponType, level]);
+  }, [weaponType, effectiveLevel]);
 
   function handleClassChange(event) {
     const nextClass = event.target.value;
     setPlayerClass(nextClass);
-    setArchetype(CLASSES[nextClass].archetypes[0]);
+    setArchetype("");
     // Przypięta broń należy do starej klasy.
     setOptions((current) => {
       const locked = { ...current.locked };
@@ -6557,8 +7054,12 @@ export default function BuildRecommender() {
   // Przypinanie / wykluczanie z kart od razu przelicza build z nowymi opcjami.
   function regenerate(nextOptions) {
     setOptions(nextOptions);
+    if (!ready) {
+      setBuildError("Pick your level, class and archetype first.");
+      return;
+    }
     try {
-      setResult(timedBuild(level, playerClass, archetype, nextOptions, result.run + 1));
+      setResult(timedBuild(level, playerClass, archetype, nextOptions, (result ? result.run : 0) + 1));
       setGuideView(null);
       setSolverView(null);
       setTab("build");
@@ -6572,7 +7073,7 @@ export default function BuildRecommender() {
   const cardActions = viewed
     ? { lockedSlots: new Set(), onRolls: (slotId) => setRollsFor(slotId) }
     : {
-        lockedSlots: new Set(generated.lockedSlots || []),
+        lockedSlots: new Set((generated && generated.lockedSlots) || []),
         onAlternatives: (slotId) => setAlternativesFor(slotId),
         onRolls: (slotId) => setRollsFor(slotId),
         onExclude: (name) =>
@@ -6593,10 +7094,22 @@ export default function BuildRecommender() {
     regenerate({ ...options, locked: { ...options.locked, [slotId]: name }, excluded: options.excluded.filter((entry) => entry !== name) });
   }
 
+  // Przypięcie z przeglądarki (Custom stats): bez kompletu poziom/klasa/archetyp tylko zapisuje wybór w opcjach.
+  function pinFromBrowser(item, slotId) {
+    setBrowseOpen(false);
+    const next = { ...options, locked: { ...options.locked, [slotId]: item.name }, excluded: options.excluded.filter((entry) => entry !== item.name) };
+    if (ready) regenerate(next);
+    else setOptions(next);
+  }
+
   // Zwykły onClick zamiast <form onSubmit>: piaskownica artifactów blokuje wysyłanie formularzy.
   function handleGenerate() {
+    if (!ready) {
+      setBuildError(!level ? "Type your level (1-120) first." : !playerClass ? "Choose a class first." : "Choose an archetype first.");
+      return;
+    }
     try {
-      setResult(timedBuild(level, playerClass, archetype, options, result.run + 1));
+      setResult(timedBuild(level, playerClass, archetype, options, (result ? result.run : 0) + 1));
       setGuideView(null);
       setSolverView(null);
       setTab("build");
@@ -6619,7 +7132,7 @@ export default function BuildRecommender() {
     setSolverRunning(true);
     setTimeout(() => {
       try {
-        setSolverResult(solveBuilds(level, solver, options));
+        setSolverResult(solveBuilds(effectiveLevel, solver, options));
         setBuildError(null);
       } catch (error) {
         setBuildError(error.message);
@@ -6679,7 +7192,9 @@ export default function BuildRecommender() {
                 </select>
                 <p className={`text-xs ${rankConfirmed ? "text-zinc-500" : "text-amber-300"}`}>
                   {rankConfirmed
-                    ? `${abilityPointCap(level, (RANKS.find((entry) => entry.id === rank) || RANKS[0]).loan)} ability points at this level.`
+                    ? level
+                      ? `${abilityPointCap(level, (RANKS.find((entry) => entry.id === rank) || RANKS[0]).loan)} ability points at this level.`
+                      : "Ability points depend on your level."
                     : "Pick your rank first: VIP+ and higher get ability points early. Your choice is remembered on this device."}
                 </p>
               </div>
@@ -6694,8 +7209,9 @@ export default function BuildRecommender() {
                   min={1}
                   max={120}
                   value={levelInput}
+                  placeholder="1-120"
                   onChange={(event) => setLevelInput(event.target.value)}
-                  onBlur={() => setLevelInput(String(level))}
+                  onBlur={() => levelInput !== "" && setLevelInput(String(level))}
                   onKeyDown={handleLevelKeyDown}
                   className={`${fieldClass} tabular-nums`}
                 />
@@ -6703,13 +7219,13 @@ export default function BuildRecommender() {
                   id="level-slider"
                   min={1}
                   max={120}
-                  value={level}
+                  value={level ?? 1}
                   onChange={(event) => setLevelInput(event.target.value)}
                   className="w-full"
                   accent="#7FE828"
                   aria-label="Level slider"
                 />
-                <p className="text-xs text-zinc-500">{availableSkillPoints(level)} skill points available at this level.</p>
+                <p className="text-xs text-zinc-500">{level ? `${availableSkillPoints(level)} skill points available at this level.` : "Type your combat level or drag the slider."}</p>
               </div>
 
               <div className="flex flex-col gap-2">
@@ -6717,6 +7233,7 @@ export default function BuildRecommender() {
                   Class
                 </label>
                 <select id="class" value={playerClass} onChange={handleClassChange} className={fieldClass}>
+                  <option value="">Choose a class</option>
                   {Object.keys(CLASSES).map((name) => (
                     <option key={name} value={name}>
                       {name} ({capitalize(CLASSES[name].weapon)})
@@ -6729,14 +7246,15 @@ export default function BuildRecommender() {
                 <label htmlFor="archetype" className="mc-title text-xs uppercase">
                   Archetype
                 </label>
-                <select id="archetype" value={archetype} onChange={(event) => setArchetype(event.target.value)} className={fieldClass}>
-                  {CLASSES[playerClass].archetypes.map((name) => (
+                <select id="archetype" value={archetype} onChange={(event) => setArchetype(event.target.value)} className={fieldClass} disabled={!playerClass}>
+                  <option value="">{playerClass ? "Choose an archetype" : "Choose a class first"}</option>
+                  {(playerClass ? CLASSES[playerClass].archetypes : []).map((name) => (
                     <option key={name} value={name}>
                       {name}
                     </option>
                   ))}
                 </select>
-                <p className="text-xs text-zinc-400">{profile.focus}</p>
+                <p className="text-xs text-zinc-400">{profile ? profile.focus : "The archetype is the branch of the ability tree you play (e.g. Mage → Riftwalker)."}</p>
               </div>
 
               <CustomStats
@@ -6745,22 +7263,28 @@ export default function BuildRecommender() {
                 archetype={archetype}
                 weaponType={weaponType}
                 weaponCounts={weaponCounts}
+                level={effectiveLevel}
+                onBrowse={() => setBrowseOpen(true)}
               />
 
               <button
                 type="button"
                 onClick={handleGenerate}
                 className="mc-btn mc-btn-primary w-full py-3 text-lg"
+                style={ready ? undefined : { opacity: 0.55 }}
+                title={ready ? undefined : "Type your level and choose a class and archetype first"}
               >
                 Generate Build
               </button>
               {outdated ? (
                 <p className="text-xs text-amber-400">Settings changed. Press Generate Build to update.</p>
-              ) : (
+              ) : result ? (
                 <p className="text-xs text-zinc-500">
                   Build #{result.run} generated in <span className="tabular-nums">{result.ms}</span> ms at{" "}
                   <span className="tabular-nums">{result.at.toLocaleTimeString("en-GB")}</span>
                 </p>
+              ) : (
+                <p className="text-xs text-zinc-500">{ready ? "Ready - press Generate Build." : "Level, class and archetype are needed for a build."}</p>
               )}
               {buildError && <p className="text-xs text-red-400">{buildError}</p>}
             </section>
@@ -6792,10 +7316,10 @@ export default function BuildRecommender() {
             <div className="mc-hr-bottom flex flex-wrap gap-2 pb-3" role="tablist">
               {[
                 ["build", guideView ? "Guide build" : solverView ? "Solver build" : "Build"],
-                ["tree", `Ability tree · ${playerClass}`],
-                ["guides", `Guide builds · ${archetype}`],
+                ["tree", playerClass ? `Ability tree · ${playerClass}` : "Ability tree"],
+                ["guides", archetype ? `Guide builds · ${archetype}` : "Guide builds"],
                 ["solver", "Build Solver"],
-                ["info", `Build info · ${build.archetype}`],
+                ["info", build ? `Build info · ${build.archetype}` : archetype ? `Build info · ${archetype}` : "Build info"],
                 ["score", "Score calculation"],
               ].map(([id, label]) => (
                 <button
@@ -6811,10 +7335,11 @@ export default function BuildRecommender() {
               ))}
             </div>
 
-            {tab === "tree" && (
+            {tab === "tree" && !playerClass && <NeedsPick what="a class" why="The ability tree is per class." />}
+            {tab === "tree" && playerClass && (
               <AbilityTree
                 playerClass={playerClass}
-                level={level}
+                level={effectiveLevel}
                 rank={rank}
                 selected={treeSelections[playerClass] || []}
                 onChange={(ids) => setTreeSelections((current) => ({ ...current, [playerClass]: ids }))}
@@ -6822,7 +7347,7 @@ export default function BuildRecommender() {
                 onUseArchetype={(arch) => setArchetype(arch)}
               />
             )}
-            {tab === "tree" && (
+            {tab === "tree" && playerClass && (
               <TreeEffectsPanel
                 playerClass={playerClass}
                 state={classTreeState}
@@ -6831,8 +7356,12 @@ export default function BuildRecommender() {
               />
             )}
 
-            {tab === "guides" && <GuideBuilds archetype={archetype} activeUrl={guideView ? guideView.url : null} onShow={showGuideBuild} />}
-            {tab === "info" && (
+            {tab === "guides" && !archetypeValid && <NeedsPick what="a class and archetype" why="Guide builds are listed per archetype." />}
+            {tab === "guides" && archetypeValid && <GuideBuilds archetype={archetype} activeUrl={guideView ? guideView.url : null} onShow={showGuideBuild} />}
+            {tab === "info" && !build && (
+              <NeedsPick what={ready ? "a generated build" : "your level, class and archetype, then a generated build"} why="Build info uses the build's spells, tree and powders." onGenerate={ready ? handleGenerate : null} />
+            )}
+            {tab === "info" && build && (
               <BuildInfoPanel
                 playerClass={build.playerClass}
                 archetype={build.archetype}
@@ -6842,14 +7371,15 @@ export default function BuildRecommender() {
                 onOpenTree={() => setTab("tree")}
               />
             )}
-            {tab === "score" && (
-              <ScoreWeightsPanel archetype={archetype} playerClass={playerClass} level={level} options={options} onChange={setOptions} outdated={outdated} onGenerate={handleGenerate} />
+            {tab === "score" && !archetypeValid && <NeedsPick what="a class and archetype" why="The weights depend on the archetype." />}
+            {tab === "score" && archetypeValid && (
+              <ScoreWeightsPanel archetype={archetype} playerClass={playerClass} level={effectiveLevel} options={options} onChange={setOptions} outdated={outdated} onGenerate={handleGenerate} />
             )}
             {tab === "solver" && (
               <SolverPanel
                 solver={solver}
                 onChange={setSolver}
-                level={level}
+                level={effectiveLevel}
                 result={solverResult}
                 running={solverRunning}
                 onSolve={runSolver}
@@ -6858,7 +7388,27 @@ export default function BuildRecommender() {
               />
             )}
 
-            {tab === "build" && (
+            {tab === "build" && !build && (
+              <section className="mc-panel flex flex-col gap-3 p-6">
+                <h2 className="mc-title text-xl">No build yet</h2>
+                <p className="max-w-2xl text-sm text-zinc-300">
+                  Type your level, choose a class and the archetype you play, then press <span className="mc-gold">Generate Build</span>. To build
+                  around gear you already have, pin it first with "Build around an item" in Custom stats.
+                </p>
+                <ul className="flex flex-col gap-1 text-sm text-zinc-400">
+                  <li>• Level: {level ? <span className="text-zinc-100">{level}</span> : <span className="text-amber-300">missing</span>}</li>
+                  <li>• Class: {playerClass ? <span className="text-zinc-100">{playerClass}</span> : <span className="text-amber-300">missing</span>}</li>
+                  <li>• Archetype: {archetypeValid ? <span className="text-zinc-100">{archetype}</span> : <span className="text-amber-300">missing</span>}</li>
+                </ul>
+                {ready && (
+                  <button type="button" onClick={handleGenerate} className="mc-btn mc-btn-primary self-start">
+                    Generate Build
+                  </button>
+                )}
+                {buildError && <p className="text-sm text-red-400">{buildError}</p>}
+              </section>
+            )}
+            {tab === "build" && build && (
             <>
             <section className="mc-panel flex flex-col gap-3 p-4">
               {solverBuild && !guideResult ? (
@@ -6967,7 +7517,7 @@ export default function BuildRecommender() {
               </p>
             </section>
 
-            <div key={guideView ? guideView.url : solverView ? `solver-${solverView.candidate.rank}` : result.run} className="wbr-fade flex flex-col gap-4 xl:grid xl:grid-cols-[minmax(0,1fr)_400px] xl:items-start">
+            <div key={guideView ? guideView.url : solverView ? `solver-${solverView.candidate.rank}` : result ? result.run : 0} className="wbr-fade flex flex-col gap-4 xl:grid xl:grid-cols-[minmax(0,1fr)_400px] xl:items-start">
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-[repeat(auto-fill,minmax(300px,1fr))]">
                 {build.slots.map((slot) => (
                   <ItemCard key={slot.id} slot={slot} build={build} actions={cardActions} powder={powderBySlot[slot.id] || null} />
@@ -6990,7 +7540,15 @@ export default function BuildRecommender() {
               </div>
             </div>
             {alternativesFor && !viewed && (
-              <AlternativesDialog build={build} slotId={alternativesFor} onClose={() => setAlternativesFor(null)} onUse={applyAlternative} />
+              <ItemBrowserDialog
+                build={build}
+                slotId={alternativesFor}
+                playerClass={build.playerClass}
+                level={build.level}
+                options={options}
+                onPick={(item, slot) => applyAlternative(slot, item.name)}
+                onClose={() => setAlternativesFor(null)}
+              />
             )}
             {rollsFor && build.slots.find((slot) => slot.id === rollsFor && slot.item) && (
               <RollsDialog
@@ -7013,6 +7571,18 @@ export default function BuildRecommender() {
           </main>
         </div>
       </div>
+      {browseOpen && (
+        <ItemBrowserDialog
+          build={generated && !viewed && generated.playerClass === playerClass && generated.archetype === archetype ? build : null}
+          slotId={null}
+          playerClass={playerClass || null}
+          level={effectiveLevel}
+          options={options}
+          onPick={pinFromBrowser}
+          onClose={() => setBrowseOpen(false)}
+          pickLabel="Pin"
+        />
+      )}
     </div>
   );
 }

@@ -2,6 +2,15 @@
 @tailwind components;
 @tailwind utilities;
 
+/* VCR OSD Mono (Riciery Leal / MrManet, freeware) - czcionka calego interfejsu; tooltipy kart tez. */
+@font-face {
+  font-family: "VCR OSD Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./fonts/VCR_OSD_MONO.woff2") format("woff2");
+}
+
 html,
 body {
   background: #0e0c13;
