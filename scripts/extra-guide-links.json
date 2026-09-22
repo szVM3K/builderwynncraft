@@ -1,0 +1,12 @@
+{
+  "note": "Extra reference builds for 'Suggest a tree' (besides The Ultimate Build Guide). Same up-to-date check as the guide builds; each counts as 2 guide trees.",
+  "builds": [
+    {
+      "name": "Masterwork Olympic - Acolyte",
+      "class": "Shaman",
+      "archetype": "Acolyte",
+      "credits": "submitted by the site author",
+      "url": "https://wynnbuilder.github.io/builder/#CY0oq6w0e06y0kcXE1K843N7Hu3QJBsEc30wtzWl-d-02"
+    }
+  ]
+}

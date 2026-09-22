@@ -1,7 +1,7 @@
 {
   "name": "wynncraft-build-recommender",
   "private": true,
-  "version": "0.25.1",
+  "version": "0.27.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "update-items": "node scripts/update-items.mjs",
     "update-tree-effects": "node scripts/update-tree-effects.mjs",
-    "update-prices": "node scripts/update-prices.mjs"
+    "update-prices": "node scripts/update-prices.mjs",
+    "update-guide-trees": "node scripts/update-guide-trees.mjs"
   },
   "dependencies": {
     "@fontsource/pixelify-sans": "^5.3.0",

@@ -34,6 +34,7 @@ Ability-tree node effects (bonuses, toggles, sliders, spells) for a new data ver
 ```bash
 npm run update-tree-effects             # atree.json for the version recorded in src/ability-trees.json
 npm run update-tree-effects -- 2.2.4.0  # a specific version
+npm run update-guide-trees               # re-check the guide builds' trees against the new tree data
 ```
 
 ## Trade Market prices (budget)
@@ -230,6 +231,21 @@ of the site):
 - **Copy tree / Paste tree**: the same tree code as Wynnbuilder's "Copy Tree" / "Paste Tree" buttons (Ability Tree
   tab on wynnbuilder.github.io/builder), so a tree can be moved either way; if the browser blocks the clipboard, a
   text box takes the code. Verified against Wynnbuilder's encodeAtree/decodeAtree.
+- **Suggest a tree** (one button per archetype): replaces the tree with one for that archetype that fits the AP of
+  the chosen level (and the rank's loan), always valid under the tree rules; Undo brings the previous tree back.
+  Only the newest tree data is used (2.2.4.0 – Wynncraft 2.2.4, which reworked Ritualist). Each ability is scored
+  from the tree data (archetype abilities, class spells, the archetype's ultimate, cheaper spells, masteries of the
+  archetype's elements) and by how often **up-to-date** guide builds take it: the trees inside The Ultimate Build
+  Guide's Wynnbuilder links are decoded (`src/guide-trees.json`, `npm run update-guide-trees`), and a guide tree is
+  only used if its link is from the same data version, or from an older one where that archetype's abilities and
+  the tree's abilities have exactly the same structure and the whole tree is still valid. After the latest
+  reworks that leaves 64 of 126 guide trees; Shaman, Arcanist and Light Bender have none, so their suggestions
+  come from the tree data alone, except Acolyte, which also follows an extra 2.2.4 reference build
+  (`scripts/extra-guide-links.json`, counted like two guide trees; add more links there). An ability's value grows
+  with its AP cost, and the tree is picked greedily by value per AP, together with the cheapest path of abilities
+  leading to each pick. Checked for every class, archetype, level 1–120 and rank:
+  always valid, never over the AP limit, no AP left while an ability still fits; at 50 AP the suggestions share
+  82–97 % of their abilities with the current reference trees (Jaccard similarity).
 - The player's tree (nodes, toggles, sliders, per class) is remembered in the browser, like the rank.
 - **Rank** at the top of the form (No rank, VIP, VIP+, HERO, HERO+, CHAMPION): VIP+ borrows 2 AP, HERO and above
   4 AP (Wynncraft wiki), 50 AP at most. The choice is remembered in the browser.
@@ -254,6 +270,11 @@ of the site):
 - The whole interface follows the game's GUI: the VCR OSD Mono pixel font with a Minecraft-style outline, bevelled panels
   and buttons like the Wynncraft menus, gold titles, black text fields, XP-bar-style bars (`mc-*` classes in
   `MC_STYLES` in `BuildRecommender.jsx`).
+- **Dark / Light** switch in the top right corner. The choice is remembered in the browser; without one the site
+  follows the system setting. Light mode is a light, inventory-like version of the same GUI: the `mc-*` classes have
+  light overrides under `.wbr-mc[data-theme=light]`, and every inline style goes through `ts()`, which swaps the
+  game's bright chat colours for darker ones readable on light panels (`LIGHT_COLOR_MAP`) and flips the lightness of
+  any other colour in OKLab, keeping its hue. Item icons and the ability tree sprites look the same in both modes.
 
 ## Where things are
 
@@ -263,6 +284,8 @@ of the site):
 - `src/wynncraft-items.json`: 5,414 items (Wynnbuilder data 2.2.4.0) with `fixID`, the list of static IDs and the
   item's set, plus the 79 sets with their bonuses.
 - `src/guide-builds.json`: the guide builds (items, tomes, authors, Wynnbuilder links).
+- `src/guide-trees.json`: the ability trees decoded from those links that still match the current tree data
+  (written by `scripts/update-guide-trees.mjs`; outdated ones are only counted).
 - `src/item-prices.json`: Trade Market prices (`items`) and today's listings (`live`, `liveAt`) written by
   `scripts/update-prices.mjs` (empty in the repository; filled by the Pages workflow when the `WYNNVENTORY_KEY`
   secret exists).

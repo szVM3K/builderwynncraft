@@ -3,6 +3,7 @@ import WYNNBUILDER_DATA from "./wynncraft-items.json";
 import GUIDE_DATA from "./guide-builds.json";
 import PRICE_DATA from "./item-prices.json";
 import TREE_DATA from "./ability-trees.json";
+import GUIDE_TREES from "./guide-trees.json";
 
 /*
  * Wynncraft Build Recommender (MVP)
@@ -1120,7 +1121,7 @@ function MarketDot({ item, withText = true }) {
   if (status.state === "untradable") return null;
   const listed = status.state === "listed";
   return (
-    <span className="inline-flex items-center gap-1 normal-case tracking-normal" style={{ color: listed ? "#55FF55" : "#6B6F94" }} title={`${marketText(item)}. ${marketTitle()}`}>
+    <span className="inline-flex items-center gap-1 normal-case tracking-normal" style={ts({ color: listed ? "#55FF55" : "#6B6F94" })} title={`${marketText(item)}. ${marketTitle()}`}>
       <span aria-hidden="true">{listed ? "●" : "○"}</span>
       {withText ? (listed ? `${status.count} on market` : "not on market") : <span className="sr-only">{listed ? "on the market" : "not on the market"}</span>}
     </span>
@@ -1827,6 +1828,129 @@ function timedBuild(level, playerClass, archetype, options, run) {
   return { build, run, ms: Math.max(1, Math.round(performance.now() - started)), at: new Date() };
 }
 
+// MOTYW JASNY/CIEMNY. Interfejs jest projektowany w ciemnym stylu gry; jasny motyw powstaje z niego:
+// - klasy mc-* i kolory Tailwinda mają własne jasne odpowiedniki w MC_STYLES (sekcja [data-theme=light]),
+// - kolory w stylach inline przechodzą przez ts()/tc(): ręcznie dobrane odpowiedniki dla palety z gry (kolory czatu
+//   Minecrafta są za jasne na jasnym tle), a pozostałe kolory przez odwrócenie jasności w OKLab (odcień zostaje).
+// Ikony przedmiotów (atrybut fill w SVG) i sprite'y drzewka zostają bez zmian w obu motywach.
+let THEME = "dark";
+const LIGHT_COLOR_MAP = {
+  "#55FF55": "#0F6B14", // dobre / zielony
+  "#FF5555": "#AD101A", // złe / Fire / Fabled
+  "#FFAA00": "#854A00", // złoty (tytuły, Neutral)
+  "#55FFFF": "#05636C", // Water / Legendary
+  "#FFFF55": "#6B5800", // Thunder / Dex / Unique
+  "#FF55FF": "#9A1C96", // Rare
+  "#C04BD8": "#7A2596", // Mythic
+  "#2DBE2D": "#2A5F10", // Earth / Str
+  "#FFFFFF": "#34313D", // Air / Agi / Normal / zwykły tekst
+  "#FFF": "#34313D",
+  "#FFFFA0": "#5A4A00",
+  "#F2EEFF": "#1C1A24", // tekst tooltipa
+  "#E8E8E8": "#23212B",
+  "#E0E0E0": "#26232E",
+  "#A9AAC9": "#4D4E6A", // wyciszony tekst tooltipa
+  "#7FE828": "#2F6E0A",
+  "#8C8C8C": "#57555E",
+  "#8B8B8B": "#57555E",
+  "#AAAAAA": "#48464F",
+  "#AAA": "#48464F",
+  "#A0A0A0": "#4E4C55",
+  "#9A9A9A": "#524F59",
+  "#6B6F94": "#555978",
+  "#C8C8C8": "#3A3842",
+  "#55B7FF": "#1558A8",
+  "#C77DFF": "#6B2DA8",
+  "#FF8C1A": "#A04A00",
+  "#E07B1A": "#96460A",
+  "#E8C33A": "#7A5E00",
+  "#FFD84D": "#7A6000",
+  "#A8FF55": "#3F7A10",
+  "#98DB73": "#3F7A2A",
+};
+const LIGHT_CACHE = new Map();
+function srgbToLinear(v) {
+  const c = v / 255;
+  return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+}
+function linearToSrgb(v) {
+  const c = v <= 0.0031308 ? 12.92 * v : 1.055 * v ** (1 / 2.4) - 0.055;
+  return Math.round(Math.min(1, Math.max(0, c)) * 255);
+}
+function hexToRgb(hex) {
+  let h = hex.replace("#", "");
+  if (h.length === 3) h = [...h].map((ch) => ch + ch).join("");
+  return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16));
+}
+function rgbToOklab([r, g, b]) {
+  const [lr, lg, lb] = [r, g, b].map(srgbToLinear);
+  const l = Math.cbrt(0.4122214708 * lr + 0.5363325363 * lg + 0.0514459929 * lb);
+  const m = Math.cbrt(0.2119034982 * lr + 0.6806995451 * lg + 0.1073969566 * lb);
+  const s = Math.cbrt(0.0883024619 * lr + 0.2817188376 * lg + 0.6299787005 * lb);
+  return [0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s, 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s, 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s];
+}
+function oklabToRgb([L, a, b]) {
+  const l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3;
+  const m = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3;
+  const s = (L - 0.0894841775 * a - 1.291485548 * b) ** 3;
+  return [
+    linearToSrgb(4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s),
+    linearToSrgb(-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s),
+    linearToSrgb(-0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s),
+  ];
+}
+function inGamut([L, a, b]) {
+  const l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3;
+  const m = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3;
+  const s = (L - 0.0894841775 * a - 1.291485548 * b) ** 3;
+  const rgb = [4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s, -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s, -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s];
+  return rgb.every((v) => v >= -0.0005 && v <= 1.0005);
+}
+// Ciemne tło (L≈0.15) → jasne (≈0.95), jasny tekst (≈0.93) → ciemny (≈0.27); odcień i nasycenie zostają
+// (nasycenie ścinane do gamutu sRGB).
+function autoLight(hex) {
+  const [L, a, b] = rgbToOklab(hexToRgb(hex));
+  // tekst (jasny) ciemnieje mocniej niż tło jaśnieje, żeby trzymać kontrast na jasnych panelach
+  const L2 = Math.min(0.985, Math.max(0.18, L > 0.5 ? 1.0 - 0.85 * L : 1.081 - 0.872 * L));
+  // jasne tła dostają tylko lekki odcień (granat kart → jasny fiolet, nie jaskrawy błękit)
+  let scale = L2 > 0.8 ? 0.35 : L2 > 0.65 ? 0.6 : 1;
+  while (scale > 0 && !inGamut([L2, a * scale, b * scale])) scale -= 0.05;
+  const rgb = oklabToRgb([L2, a * Math.max(0, scale), b * Math.max(0, scale)]);
+  return `#${rgb.map((v) => v.toString(16).padStart(2, "0")).join("")}`.toUpperCase();
+}
+function lightColor(hex) {
+  const key = hex.toUpperCase();
+  if (!LIGHT_CACHE.has(key)) LIGHT_CACHE.set(key, LIGHT_COLOR_MAP[key] || autoLight(key));
+  return LIGHT_CACHE.get(key);
+}
+// Kolor dla bieżącego motywu (hex; #RRGGBBAA zachowuje przezroczystość).
+function tc(hex) {
+  if (THEME !== "light" || typeof hex !== "string" || hex[0] !== "#") return hex;
+  if (hex.length === 9) return lightColor(hex.slice(0, 7)) + hex.slice(7);
+  return lightColor(hex);
+}
+const HEX_IN_CSS = /#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3})(?![0-9a-zA-Z])/g;
+const RGBA_IN_CSS = /rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(,\s*[\d.]+\s*)?\)/g;
+function themeCss(value) {
+  if (THEME !== "light" || typeof value !== "string" || value.startsWith("url(")) return value;
+  return value
+    .replace(HEX_IN_CSS, (match) => tc(match))
+    .replace(RGBA_IN_CSS, (match, r, g, b, alpha) => {
+      const hex = lightColor(`#${[r, g, b].map((v) => Number(v).toString(16).padStart(2, "0")).join("")}`);
+      const [r2, g2, b2] = hexToRgb(hex);
+      return alpha ? `rgba(${r2},${g2},${b2}${alpha})` : `rgb(${r2},${g2},${b2})`;
+    });
+}
+// Obiekt stylu inline dla bieżącego motywu (wszystkie komponenty przepuszczają przez to swoje style).
+function ts(style) {
+  if (THEME !== "light" || !style || typeof style !== "object") return style;
+  const out = {};
+  Object.keys(style).forEach((key) => {
+    out[key] = themeCss(style[key]);
+  });
+  return out;
+}
+
 const RARITY_COLORS = {
   Normal: "#FFFFFF",
   Unique: "#FFFF55",
@@ -1898,7 +2022,7 @@ function StatLine({ statKey, value }) {
   return (
     <li className="flex items-baseline justify-between gap-3">
       <span className="text-zinc-300">{STAT_META[statKey].label}</span>
-      <span className="tabular-nums font-semibold" style={{ color: good ? "#55FF55" : "#FF5555" }}>
+      <span className="tabular-nums font-semibold" style={ts({ color: good ? "#55FF55" : "#FF5555" })}>
         {formatStatValue(statKey, value)}
       </span>
     </li>
@@ -1915,6 +2039,10 @@ const PIXEL_FONT = '"VCR OSD Mono", "Tiny5", ui-monospace, SFMono-Regular, Menlo
 // mają własny styl tooltipa z gry i nie dostają cienia tekstu.
 const MC_BG_PATTERN =
   "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32' shape-rendering='crispEdges'%3E%3Crect width='32' height='32' fill='%230c0a10'/%3E%3Crect width='8' height='8' fill='%230f0d14'/%3E%3Crect x='16' y='8' width='8' height='8' fill='%230f0d14'/%3E%3Crect x='8' y='20' width='8' height='8' fill='%230e0c13'/%3E%3Crect x='24' y='24' width='8' height='8' fill='%23100e15'/%3E%3Crect x='24' y='4' width='4' height='4' fill='%230a080e'/%3E%3C/svg%3E\")";
+const MC_BG_PATTERN_LIGHT =
+  "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32' shape-rendering='crispEdges'%3E%3Crect width='32' height='32' fill='%23d9d6df'/%3E%3Crect width='8' height='8' fill='%23dddae3'/%3E%3Crect x='16' y='8' width='8' height='8' fill='%23dddae3'/%3E%3Crect x='8' y='20' width='8' height='8' fill='%23d6d3dc'/%3E%3Crect x='24' y='24' width='8' height='8' fill='%23dcd9e2'/%3E%3Crect x='24' y='4' width='4' height='4' fill='%23d3d0d9'/%3E%3C/svg%3E\")";
+const MC_SELECT_ARROW_LIGHT =
+  "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' shape-rendering='crispEdges'%3E%3Cpath d='M0 0h10v2H8v2H6v2H4V4H2V2H0z' fill='%2334313d'/%3E%3C/svg%3E\")";
 const MC_SELECT_ARROW =
   "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' shape-rendering='crispEdges'%3E%3Cpath d='M0 0h10v2H8v2H6v2H4V4H2V2H0z' fill='%23e0e0e0'/%3E%3C/svg%3E\")";
 // SPRITE'Y DRZEWKA jak w Wynnbuilderze (media/atree/icons.png i connectors.png z wynnbuilder.github.io - grafiki
@@ -2018,6 +2146,50 @@ select.mc-input option{background:#000;color:#fff}
 .wbr-mc .atree-hit{position:absolute;inset:0;z-index:2;background:transparent;border:0;cursor:pointer;padding:0;margin:0}
 .wbr-mc .atree-hit:focus-visible{outline:2px solid #fff;outline-offset:-2px}
 .wbr-mc .atree-cell:hover .atree-node{filter:brightness(1.3)}
+.wbr-mc[data-theme=light]{color:#23212B;background:#D9D6DF ${MC_BG_PATTERN_LIGHT};text-shadow:none;color-scheme:light}
+.wbr-mc[data-theme=light] .text-xs,.wbr-mc[data-theme=light] .text-sm{text-shadow:none}
+.wbr-mc[data-theme=light] .text-zinc-50,.wbr-mc[data-theme=light] .text-zinc-100,.wbr-mc[data-theme=light] .text-white{color:#14121A}
+.wbr-mc[data-theme=light] .text-zinc-200,.wbr-mc[data-theme=light] .text-zinc-300{color:#2A2733}
+.wbr-mc[data-theme=light] .text-zinc-400{color:#46434F}
+.wbr-mc[data-theme=light] .text-zinc-500{color:#57545F}
+.wbr-mc[data-theme=light] .text-zinc-600{color:#6E6A78}
+.wbr-mc[data-theme=light] .text-amber-300,.wbr-mc[data-theme=light] .text-amber-400,.wbr-mc[data-theme=light] .text-amber-500,.wbr-mc[data-theme=light] .mc-gold,.wbr-mc[data-theme=light] .mc-title{color:#854A00}
+.wbr-mc[data-theme=light] .text-red-400{color:#AD101A}
+.wbr-mc[data-theme=light] .text-sky-300{color:#05636C}
+.wbr-mc[data-theme=light] .mc-panel{background:#EEECF2;border-color:#3A3644;box-shadow:inset 2px 2px 0 #FFFFFF,inset -2px -2px 0 #BDB8C8}
+.wbr-mc[data-theme=light] .mc-slot{background:#E4E1EA;border-color:#A9A4B4 #FFFFFF #FFFFFF #A9A4B4}
+.wbr-mc[data-theme=light] .mc-well{background:#F8F7FA;border-color:#3A3644;box-shadow:inset 2px 2px 0 #D6D2DE,inset -2px -2px 0 #FFFFFF}
+.wbr-mc[data-theme=light] .mc-hr{border-top-color:#BDB8C8;box-shadow:inset 0 2px 0 #FFFFFF}
+.wbr-mc[data-theme=light] .mc-hr-bottom{border-bottom-color:#BDB8C8;box-shadow:0 2px 0 #FFFFFF}
+.wbr-mc[data-theme=light] .mc-divide>*+*{border-top-color:#CFCAD8;box-shadow:inset 0 2px 0 #FFFFFF}
+.wbr-mc[data-theme=light] .mc-btn{color:#1C1A24;background:#D8D5DE;border-color:#3A3644;box-shadow:inset 2px 2px 0 #F7F6FA,inset -2px -2px 0 #9A95A6}
+.wbr-mc[data-theme=light] .mc-btn:hover{background:#C3CFF3;box-shadow:inset 2px 2px 0 #E8EDFD,inset -2px -2px 0 #7584BC;color:#10163A}
+.wbr-mc[data-theme=light] .mc-btn:active{background:#BDB9C6;box-shadow:inset 2px 2px 0 #9A95A6,inset -2px -2px 0 #E8E6EE}
+.wbr-mc[data-theme=light] .mc-btn-on,.wbr-mc[data-theme=light] .mc-btn-on:hover{background:#FDFCFE;box-shadow:inset 2px 2px 0 #CFCAD8,inset -2px -2px 0 #FFFFFF;color:#854A00}
+.wbr-mc[data-theme=light] .mc-btn-primary{background:#3F7D2C;color:#FFFFFF;text-shadow:1px 1px 0 #1E4413;box-shadow:inset 2px 2px 0 #7FC55A,inset -2px -2px 0 #1E4413}
+.wbr-mc[data-theme=light] .mc-btn-primary:hover{background:#4C9634;color:#FFFFA0;box-shadow:inset 2px 2px 0 #98DB73,inset -2px -2px 0 #24501A}
+.wbr-mc[data-theme=light] .mc-btn:disabled{background:#E2E0E6;color:#8A8694;text-shadow:none;box-shadow:inset 2px 2px 0 #F2F1F5,inset -2px -2px 0 #BAB6C2}
+.wbr-mc[data-theme=light] .mc-btn:focus-visible,.wbr-mc[data-theme=light] .mc-input:focus-visible,.wbr-mc[data-theme=light] .mc-check:focus-visible,.wbr-mc[data-theme=light] .mc-range:focus-visible,.wbr-mc[data-theme=light] .mc-link:focus-visible,.wbr-mc[data-theme=light] .atree-hit:focus-visible{outline-color:#14121A}
+.wbr-mc[data-theme=light] .mc-link{color:#854A00}
+.wbr-mc[data-theme=light] .mc-link:hover{color:#5A3200}
+.wbr-mc[data-theme=light] .mc-input{color:#14121A;background:#FFFFFF;border-color:#6E6A78}
+.wbr-mc[data-theme=light] .mc-input:focus{border-color:#14121A}
+.wbr-mc[data-theme=light] .mc-input::placeholder{color:#7A7685}
+.wbr-mc[data-theme=light] select.mc-input{background:#FFFFFF ${MC_SELECT_ARROW_LIGHT} no-repeat right 10px center/10px 6px}
+.wbr-mc[data-theme=light] select.mc-input option{background:#FFFFFF;color:#14121A}
+.wbr-mc[data-theme=light] .mc-check{background:#FFFFFF;border-color:#6E6A78}
+.wbr-mc[data-theme=light] .mc-check:checked{border-color:#14121A}
+.wbr-mc[data-theme=light] .mc-check:checked::after{background:#0F6B14;box-shadow:2px 2px 0 #0F6B14,4px 4px 0 #0F6B14,6px 2px 0 #0F6B14,8px 0 0 #0F6B14,10px -2px 0 #0F6B14}
+.wbr-mc[data-theme=light] .mc-range::-webkit-slider-runnable-track{border-color:#6E6A78;background:linear-gradient(to right,rgba(255,255,255,.4) 0 var(--mc-fill,0%),transparent var(--mc-fill,0%)) 0 0/100% 3px no-repeat,linear-gradient(to right,rgba(0,0,0,.25) 0 var(--mc-fill,0%),transparent var(--mc-fill,0%)) 0 100%/100% 3px no-repeat,linear-gradient(to right,var(--mc-accent,#2F6E0A) 0 var(--mc-fill,0%),#FFFFFF var(--mc-fill,0%))}
+.wbr-mc[data-theme=light] .mc-range::-moz-range-track{background:#FFFFFF;border-color:#6E6A78}
+.wbr-mc[data-theme=light] .mc-range::-webkit-slider-thumb{background:#C9C6D0;border-color:#3A3644;box-shadow:inset 2px 2px 0 #F4F3F7,inset -2px -2px 0 #8E899A}
+.wbr-mc[data-theme=light] .mc-range::-moz-range-thumb{background:#C9C6D0;border-color:#3A3644;box-shadow:inset 2px 2px 0 #F4F3F7,inset -2px -2px 0 #8E899A}
+.wbr-mc[data-theme=light] .mc-range:hover::-webkit-slider-thumb{background:#DAD7E0}
+.wbr-mc[data-theme=light] .mc-tick{background:#14121A;opacity:.45}
+.wbr-mc[data-theme=light] .mc-bar{background:#FFFFFF;border-color:#3A3644;box-shadow:inset 0 0 0 1px #D6D2DE}
+.wbr-mc[data-theme=light] ::-webkit-scrollbar-track{background:#E4E1EA;border-color:#BDB8C8;box-shadow:none}
+.wbr-mc[data-theme=light] ::-webkit-scrollbar-thumb{background:#AEA9B9;border-color:#6E6A78;box-shadow:inset 2px 2px 0 #D6D2DE,inset -2px -2px 0 #8E899A}
+.wbr-mc[data-theme=light]{scrollbar-color:#AEA9B9 #E4E1EA}
 `;
 const PIXEL_ICONS = {
   helmet: [
@@ -2326,7 +2498,7 @@ function IconBox({ item, size = 48 }) {
   return (
     <div
       className="flex flex-shrink-0 items-center justify-center"
-      style={{ width: size + 18, height: size + 18, background: "#2B2A36", border: "2px solid", borderColor: "#5C5A6C #14131A #14131A #5C5A6C", boxShadow: "inset 0 0 0 2px #1A1922" }}
+      style={ts({ width: size + 18, height: size + 18, background: "#2B2A36", border: "2px solid", borderColor: "#5C5A6C #14131A #14131A #5C5A6C", boxShadow: "inset 0 0 0 2px #1A1922" })}
     >
       <PixelIcon item={item} size={size} />
     </div>
@@ -2335,7 +2507,7 @@ function IconBox({ item, size = 48 }) {
 
 function TooltipBadge({ color, children }) {
   return (
-    <span className="px-1.5 text-sm uppercase leading-5" style={{ background: color, color: TOOLTIP.ink }}>
+    <span className="px-1.5 text-sm uppercase leading-5" style={ts({ background: color, color: TOOLTIP.ink })}>
       {children}
     </span>
   );
@@ -2344,10 +2516,10 @@ function TooltipBadge({ color, children }) {
 function TooltipDivider({ color }) {
   return (
     <div className="flex items-center gap-1" aria-hidden="true">
-      <div className="h-px flex-1" style={{ background: color, opacity: 0.45 }} />
-      <div className="h-1.5 w-1.5 rotate-45 border" style={{ borderColor: color }} />
-      <div className="h-1.5 w-1.5 rotate-45 border" style={{ borderColor: color }} />
-      <div className="h-px flex-1" style={{ background: color, opacity: 0.45 }} />
+      <div className="h-px flex-1" style={ts({ background: color, opacity: 0.45 })} />
+      <div className="h-1.5 w-1.5 rotate-45 border" style={ts({ borderColor: color })} />
+      <div className="h-1.5 w-1.5 rotate-45 border" style={ts({ borderColor: color })} />
+      <div className="h-px flex-1" style={ts({ background: color, opacity: 0.45 })} />
     </div>
   );
 }
@@ -2355,12 +2527,12 @@ function TooltipDivider({ color }) {
 function ElementIcons({ elements, color }) {
   if (elements.length === 0) return null;
   return (
-    <div className="flex w-max gap-1 px-1 py-0.5" style={{ background: color }} aria-label={`Elements: ${elements.join(", ")}`}>
+    <div className="flex w-max gap-1 px-1 py-0.5" style={ts({ background: color })} aria-label={`Elements: ${elements.join(", ")}`}>
       {elements.map((element) => (
         <span
           key={element}
           className="flex h-5 w-5 items-center justify-center text-sm leading-none"
-          style={{ background: TOOLTIP.ink, color: ELEMENT_STYLE[element].color }}
+          style={ts({ background: TOOLTIP.ink, color: ELEMENT_STYLE[element].color })}
           title={ELEMENT_STYLE[element].label}
         >
           {ELEMENT_STYLE[element].symbol}
@@ -2381,12 +2553,12 @@ function PowderSlots({ count, recommended = null, applied = null, level = 120 })
       ? `${count} powder slot${count === 1 ? "" : "s"} · recommended: Tier ${ROMAN[powderTierFor(level) - 1]} ${style.label} powders (see the Powders panel)`
       : `${count} powder slot${count === 1 ? "" : "s"}`;
   return (
-    <div className="grid flex-shrink-0 gap-1" style={{ gridTemplateColumns: `repeat(${Math.min(3, count)}, 16px)` }} aria-label={title} title={title}>
+    <div className="grid flex-shrink-0 gap-1" style={ts({ gridTemplateColumns: `repeat(${Math.min(3, count)}, 16px)` })} aria-label={title} title={title}>
       {Array.from({ length: count }, (_, index) => (
         <span
           key={index}
           className="flex h-4 w-4 items-center justify-center text-xs leading-none"
-          style={{ background: applied ? mixColor(style.color, "#0A0C1E", 0.7) : "#0A0C1E", border: "2px solid", borderColor: applied ? `${style.color} #050612 #050612 ${style.color}` : "#050612 #2C3160 #2C3160 #050612", color: style ? style.color : "transparent", opacity: applied ? 1 : 0.8 }}
+          style={ts({ background: applied ? mixColor(style.color, "#0A0C1E", 0.7) : "#0A0C1E", border: "2px solid", borderColor: applied ? `${style.color} #050612 #050612 ${style.color}` : "#050612 #2C3160 #2C3160 #050612", color: style ? style.color : "transparent", opacity: applied ? 1 : 0.8 })}
         >
           {style ? style.symbol : ""}
         </span>
@@ -2401,7 +2573,7 @@ function CheckBox({ state }) {
   return (
     <span
       className="inline-flex h-3.5 w-3.5 flex-shrink-0 items-center justify-center align-middle leading-none"
-      style={{ border: `2px solid ${color}`, background: state === "none" ? "transparent" : "#0A0C1E", color, fontSize: 11 }}
+      style={ts({ border: `2px solid ${color}`, background: state === "none" ? "transparent" : "#0A0C1E", color, fontSize: 11 })}
       aria-hidden="true"
     >
       {state === "yes" ? "✓" : state === "no" ? "✗" : ""}
@@ -2439,23 +2611,23 @@ function SkillRow({ reqs, totals }) {
             className="flex flex-col items-center gap-2"
             title={required ? `${SKILL_LABELS[skill]} Min: ${req} (build has ${totals[skill] || 0})` : `No ${SKILL_LABELS[skill]} requirement`}
           >
-            <span className="px-1 text-xs leading-5 tracking-wider" style={{ background: "#262A50", color: required ? TOOLTIP.text : "#6E6C8C" }}>
+            <span className="px-1 text-xs leading-5 tracking-wider" style={ts({ background: "#262A50", color: required ? TOOLTIP.text : "#6E6C8C" })}>
               {SKILL_STYLE[skill].short.toUpperCase()}
             </span>
             <div
               className="flex h-8 w-8 items-center justify-center"
-              style={{
+              style={ts({
                 transform: "rotate(45deg)",
                 background: required ? mixColor(skillColor, "#0A0C1E", 0.8) : "#171A33",
                 border: `2px solid ${required ? skillColor : "#33375C"}`,
                 boxShadow: required ? `0 0 8px ${skillColor}66, inset 0 0 0 2px #0A0C1E` : "inset 0 0 0 2px #0F1128",
-              }}
+              })}
             >
-              <span className="text-base leading-none" style={{ transform: "rotate(-45deg)", color: required ? skillColor : "#4A4D70" }}>
+              <span className="text-base leading-none" style={ts({ transform: "rotate(-45deg)", color: required ? skillColor : "#4A4D70" })}>
                 {SKILL_STYLE[skill].symbol}
               </span>
             </div>
-            <span className="flex items-center gap-1 text-sm tabular-nums" style={{ color: required ? (met ? TOOLTIP.good : TOOLTIP.bad) : "#6E6C8C" }}>
+            <span className="flex items-center gap-1 text-sm tabular-nums" style={ts({ color: required ? (met ? TOOLTIP.good : TOOLTIP.bad) : "#6E6C8C" })}>
               <CheckBox state={required ? (met ? "yes" : "no") : "none"} />
               {req}
             </span>
@@ -2494,7 +2666,7 @@ function WeaponBlock({ item, profile }) {
     <div className="flex flex-col gap-1">
       <p
         className="leading-none"
-        style={{ color: TOOLTIP.text }}
+        style={ts({ color: TOOLTIP.text })}
         title={
           item.powders
             ? `Damage per second as on the tooltip of the powdered weapon (${powderLabel(item.powders)}): average damage × hits per second. Identifications, skill points and the ability tree are not included.`
@@ -2503,15 +2675,15 @@ function WeaponBlock({ item, profile }) {
       >
         <span className="text-3xl">{formatNumber(item.dps || 0)}</span> <span className="text-lg">DPS</span>
       </p>
-      <p className="text-sm" style={{ color: TOOLTIP.muted }}>
+      <p className="text-sm" style={ts({ color: TOOLTIP.muted })}>
         <span aria-hidden="true">⚔</span> {ATTACK_SPEED_LABELS[item.atkSpd] || item.atkSpd}
         {hitsPerSecond ? ` (${hitsPerSecond} hits/s)` : ""}
       </p>
       <p className="flex flex-wrap gap-x-3 gap-y-0.5 text-base">
         {Object.entries(item.damageRanges || {}).map(([element, range]) => (
           <span key={element} className="whitespace-nowrap" title={`${ELEMENT_STYLE[element].label} damage`}>
-            <span style={{ color: ELEMENT_STYLE[element].color }}>{ELEMENT_STYLE[element].symbol}</span>{" "}
-            <span className="tabular-nums" style={{ color: TOOLTIP.text }}>
+            <span style={ts({ color: ELEMENT_STYLE[element].color })}>{ELEMENT_STYLE[element].symbol}</span>{" "}
+            <span className="tabular-nums" style={ts({ color: TOOLTIP.text })}>
               {range}
             </span>
           </span>
@@ -2519,16 +2691,16 @@ function WeaponBlock({ item, profile }) {
       </p>
       {item.powders && (
         <div className="flex items-baseline justify-between gap-3 text-xs" title="Custom stats › Weapon powders: every slot gets the highest powder tier for the weapon's level. The damage above, the score and the summary include them.">
-          <span style={{ color: TOOLTIP.muted }}>With {powderLabel(item.powders)} powders</span>
-          <span className="tabular-nums" style={{ color: TOOLTIP.muted }}>
+          <span style={ts({ color: TOOLTIP.muted })}>With {powderLabel(item.powders)} powders</span>
+          <span className="tabular-nums" style={ts({ color: TOOLTIP.muted })}>
             base {formatNumber(item.baseWeapon.dps || 0)} DPS
           </span>
         </div>
       )}
       {withBonuses !== Math.round(item.dps || 0) && (
         <div className="flex items-baseline justify-between gap-3 text-xs" title="Main attack DPS with this weapon's own bonuses (raw per hit × hits per second, %), before skill points">
-          <span style={{ color: TOOLTIP.muted }}>With its own bonuses</span>
-          <span className="tabular-nums" style={{ color: TOOLTIP.text }}>
+          <span style={ts({ color: TOOLTIP.muted })}>With its own bonuses</span>
+          <span className="tabular-nums" style={ts({ color: TOOLTIP.text })}>
             {formatNumber(withBonuses)} DPS
           </span>
         </div>
@@ -2538,8 +2710,8 @@ function WeaponBlock({ item, profile }) {
           className="flex items-baseline justify-between gap-3 text-xs"
           title="Your damage focus is a preference: damage outside it doesn't get the focused elements' bonuses, so the weapon's DPS counts only partly. A weapon outside your focus wins only when nothing in focus comes close."
         >
-          <span style={{ color: TOOLTIP.muted }}>Damage in your focus</span>
-          <span className="tabular-nums" style={{ color: weaponFocusShare(item, profile) > 0 ? TOOLTIP.text : TOOLTIP.bad }}>
+          <span style={ts({ color: TOOLTIP.muted })}>Damage in your focus</span>
+          <span className="tabular-nums" style={ts({ color: weaponFocusShare(item, profile) > 0 ? TOOLTIP.text : TOOLTIP.bad })}>
             {Math.round(weaponFocusShare(item, profile) * 100)}% · counted {Math.round(weaponElementFactor(item, profile) * 100)}%
           </span>
         </div>
@@ -2554,7 +2726,7 @@ function BaseStats({ item }) {
   return (
     <div className="flex flex-col gap-1">
       {item.base.hp ? (
-        <p className="leading-none" style={{ color: TOOLTIP.text }}>
+        <p className="leading-none" style={ts({ color: TOOLTIP.text })}>
           <span className="text-3xl">
             {item.base.hp > 0 ? "+" : ""}
             {formatNumber(item.base.hp)}
@@ -2564,10 +2736,10 @@ function BaseStats({ item }) {
       ) : null}
       {defences.map(({ element, value }) => (
         <div key={element} className="flex items-baseline justify-between gap-3 text-base">
-          <span style={{ color: ELEMENT_STYLE[element].color }}>
+          <span style={ts({ color: ELEMENT_STYLE[element].color })}>
             {ELEMENT_STYLE[element].symbol} {ELEMENT_STYLE[element].label} Defence
           </span>
-          <span className="tabular-nums" style={{ color: value > 0 ? TOOLTIP.good : TOOLTIP.bad }}>
+          <span className="tabular-nums" style={ts({ color: value > 0 ? TOOLTIP.good : TOOLTIP.bad })}>
             {value > 0 ? "+" : ""}
             {formatNumber(value)}
           </span>
@@ -2604,7 +2776,7 @@ function idLabel(display, playerClass) {
 
 function IdentificationList({ item, relevant, playerClass }) {
   const lines = ID_DISPLAY.filter((display) => item.ids[display.key]);
-  if (lines.length === 0) return <p className="text-sm" style={{ color: TOOLTIP.muted }}>No identifications</p>;
+  if (lines.length === 0) return <p className="text-sm" style={ts({ color: TOOLTIP.muted })}>No identifications</p>;
   const groups = ID_GROUP_ORDER.map((group) => lines.filter((display) => idGroup(display.key) === group)).filter((group) => group.length > 0);
   return (
     <div className="flex flex-col gap-3">
@@ -2619,17 +2791,17 @@ function IdentificationList({ item, relevant, playerClass }) {
             const [worst, best] = rolls ? rollRange(display.key, item.baseIds[display.key]) : [value, value];
             return (
               <li key={display.key} className="flex items-baseline justify-between gap-3">
-                <span style={{ color: counts ? TOOLTIP.text : TOOLTIP.muted }} title={counts ? "Counts toward this build's score" : "Doesn't add to the score with your settings"}>
+                <span style={ts({ color: counts ? TOOLTIP.text : TOOLTIP.muted })} title={counts ? "Counts toward this build's score" : "Doesn't add to the score with your settings"}>
                   {idLabel(display, playerClass)}
                 </span>
                 <span
                   className="whitespace-nowrap tabular-nums"
-                  style={{ color: good ? TOOLTIP.good : TOOLTIP.bad }}
+                  style={ts({ color: good ? TOOLTIP.good : TOOLTIP.bad })}
                   title={rolls ? `Roll ${percent}% of ${formatIdValue(display, worst)} to ${formatIdValue(display, best)} (base ${formatIdValue(display, item.baseIds[display.key])})` : "Doesn't roll"}
                 >
                   {formatIdValue(display, value)}
                   {rolls && (
-                    <span className="ml-1 text-sm" style={{ color: rollColor(percent) }}>
+                    <span className="ml-1 text-sm" style={ts({ color: rollColor(percent) })}>
                       [{percent.toFixed(1)}%]
                     </span>
                   )}
@@ -2640,12 +2812,12 @@ function IdentificationList({ item, relevant, playerClass }) {
         </ul>
       ))}
       {item.fixed && (
-        <p className="text-xs" style={{ color: TOOLTIP.muted }}>
+        <p className="text-xs" style={ts({ color: TOOLTIP.muted })}>
           Fixed IDs, no rolls.
         </p>
       )}
       {item.set && ITEM_SETS[item.set] && (
-        <p className="text-xs" style={{ color: TOOLTIP.good }}>
+        <p className="text-xs" style={ts({ color: TOOLTIP.good })}>
           {item.set} set item.
         </p>
       )}
@@ -2715,10 +2887,10 @@ function CardPager({ page, onChange }) {
           onClick={() => onChange(index)}
           className="flex h-5 w-5 items-center justify-center focus:outline-none focus:ring-2 focus:ring-amber-500"
         >
-          <span className="block h-2.5 w-2.5" style={{ background: page === index ? "#FFAA00" : "#3B3F6A", boxShadow: page === index ? "0 0 6px #FFAA0088" : "none" }} />
+          <span className="block h-2.5 w-2.5" style={ts({ background: page === index ? "#FFAA00" : "#3B3F6A", boxShadow: page === index ? "0 0 6px #FFAA0088" : "none" })} />
         </button>
       ))}
-      <span className="ml-1 text-xs" style={{ color: TOOLTIP.muted }}>
+      <span className="ml-1 text-xs" style={ts({ color: TOOLTIP.muted })}>
         {CARD_PAGES[page].label}
       </span>
     </div>
@@ -2732,20 +2904,20 @@ function ScorePage({ slot, build }) {
     .slice(0, 12);
   return (
     <div className="flex flex-col gap-2">
-      <p className="text-sm" style={{ color: TOOLTIP.muted }}>
+      <p className="text-sm" style={ts({ color: TOOLTIP.muted })}>
         What this item adds to the build score (×10) with your settings. Values ÷ unit × {build.archetype} weight; see "How is the score
         calculated?" above the cards.
       </p>
       {entries.length === 0 ? (
-        <p className="text-sm" style={{ color: TOOLTIP.muted }}>Nothing on this item counts with the current weights.</p>
+        <p className="text-sm" style={ts({ color: TOOLTIP.muted })}>Nothing on this item counts with the current weights.</p>
       ) : (
         <ul className="flex flex-col gap-0.5 text-base">
           {entries.map((entry) => {
             const { label } = contributionLabel(entry, build.profile);
             return (
               <li key={entry.key} className="flex items-baseline justify-between gap-3">
-                <span style={{ color: TOOLTIP.text }}>{label}</span>
-                <span className="whitespace-nowrap tabular-nums" style={{ color: entry.contribution >= 0 ? TOOLTIP.good : TOOLTIP.bad }}>
+                <span style={ts({ color: TOOLTIP.text })}>{label}</span>
+                <span className="whitespace-nowrap tabular-nums" style={ts({ color: entry.contribution >= 0 ? TOOLTIP.good : TOOLTIP.bad })}>
                   {entry.contribution >= 0 ? "+" : ""}
                   {formatScore(entry.contribution)}
                 </span>
@@ -2754,9 +2926,9 @@ function ScorePage({ slot, build }) {
           })}
         </ul>
       )}
-      <div className="flex items-baseline justify-between gap-3 border-t pt-1 text-base" style={{ borderColor: "#2A2F58" }}>
-        <span style={{ color: TOOLTIP.text }}>Score in this build</span>
-        <span className="tabular-nums" style={{ color: "#FFAA00" }}>
+      <div className="flex items-baseline justify-between gap-3 border-t pt-1 text-base" style={ts({ borderColor: "#2A2F58" })}>
+        <span style={ts({ color: TOOLTIP.text })}>Score in this build</span>
+        <span className="tabular-nums" style={ts({ color: "#FFAA00" })}>
           {formatScore(slot.score)}
         </span>
       </div>
@@ -2774,13 +2946,13 @@ function ItemCard({ slot, build, actions, powder = null, open = true, onToggle =
     return (
       <article
         className={`flex flex-col items-start gap-2 border-2 border-dashed border-zinc-600 p-4 text-sm ${wide}`}
-        style={{ fontFamily: CARD_FONT, background: TOOLTIP.bg2 }}
+        style={ts({ fontFamily: CARD_FONT, background: TOOLTIP.bg2 })}
       >
         <span className="text-xs uppercase tracking-widest text-zinc-500">{slot.label}</span>
         <div className="flex items-center gap-3">
           <PixelIcon item={{ type: slot.type === "weapon" ? build.profile && CLASSES[build.playerClass].weapon : slot.type, category: slot.type === "weapon" ? "weapon" : ["ring", "bracelet", "necklace"].includes(slot.type) ? "accessory" : "armor", icon: "iron", elements: [] }} size={40} />
           <div className="flex flex-col">
-            <span className="text-base" style={{ color: "#55FFFF" }}>{slot.crafted ? `Crafted ${slot.crafted}` : slot.missing}</span>
+            <span className="text-base" style={ts({ color: "#55FFFF" })}>{slot.crafted ? `Crafted ${slot.crafted}` : slot.missing}</span>
             <span className="text-xs text-zinc-500">
               {slot.crafted ? "Crafted items aren't in the item database. Open the build in Wynnbuilder to see it." : "Not found in this item database version."}
             </span>
@@ -2794,7 +2966,7 @@ function ItemCard({ slot, build, actions, powder = null, open = true, onToggle =
     return (
       <article
         className={`flex flex-col justify-center gap-1 border-2 border-dashed border-zinc-700 p-4 text-sm ${wide}`}
-        style={{ fontFamily: CARD_FONT, background: TOOLTIP.bg2 }}
+        style={ts({ fontFamily: CARD_FONT, background: TOOLTIP.bg2 })}
       >
         <span className="text-xs uppercase tracking-widest text-zinc-500">{slot.label}</span>
         <p className="text-zinc-300">Slot left empty</p>
@@ -2823,17 +2995,17 @@ function ItemCard({ slot, build, actions, powder = null, open = true, onToggle =
       <div className="flex flex-col gap-0.5 text-base">
         {item.category === "weapon" && (
           <div className="flex items-baseline justify-between gap-3">
-            <span className="flex items-center gap-1.5" style={{ color: TOOLTIP.text }}>
+            <span className="flex items-center gap-1.5" style={ts({ color: TOOLTIP.text })}>
               <CheckBox state={classOk ? "yes" : "no"} /> Class Type
             </span>
-            <span style={{ color: TOOLTIP.muted }}>{CLASS_TYPE_NAMES[WEAPON_CLASS[item.type]] || WEAPON_CLASS[item.type]}</span>
+            <span style={ts({ color: TOOLTIP.muted })}>{CLASS_TYPE_NAMES[WEAPON_CLASS[item.type]] || WEAPON_CLASS[item.type]}</span>
           </div>
         )}
         <div className="flex items-baseline justify-between gap-3">
-          <span className="flex items-center gap-1.5" style={{ color: TOOLTIP.text }}>
+          <span className="flex items-center gap-1.5" style={ts({ color: TOOLTIP.text })}>
             <CheckBox state={levelOk ? "yes" : "no"} /> Combat Level
           </span>
-          <span className="tabular-nums" style={{ color: TOOLTIP.muted }}>
+          <span className="tabular-nums" style={ts({ color: TOOLTIP.muted })}>
             {item.level}
           </span>
         </div>
@@ -2843,12 +3015,12 @@ function ItemCard({ slot, build, actions, powder = null, open = true, onToggle =
   return (
     <article
       className={`relative flex flex-col border-2 ${wide}`}
-      style={{ borderColor: color, background: `linear-gradient(180deg, ${TOOLTIP.bg} 0%, ${TOOLTIP.bg2} 100%)`, boxShadow: "inset 0 0 0 2px #070919", fontFamily: CARD_FONT }}
+      style={ts({ borderColor: color, background: `linear-gradient(180deg, ${TOOLTIP.bg} 0%, ${TOOLTIP.bg2} 100%)`, boxShadow: "inset 0 0 0 2px #070919", fontFamily: CARD_FONT })}
     >
-      <div className="flex items-center justify-between gap-2 px-3 py-1 text-xs uppercase tracking-widest" style={{ background: "#070919", color: TOOLTIP.muted }}>
+      <div className="flex items-center justify-between gap-2 px-3 py-1 text-xs uppercase tracking-widest" style={ts({ background: "#070919", color: TOOLTIP.muted })}>
         <span>
           {slot.label}
-          {pinned && <span style={{ color: "#FFAA00" }}> · pinned</span>}
+          {pinned && <span style={ts({ color: "#FFAA00" })}> · pinned</span>}
         </span>
         <MarketDot item={item} />
         <button
@@ -2861,7 +3033,7 @@ function ItemCard({ slot, build, actions, powder = null, open = true, onToggle =
               setPage(2);
             } else setPage(page === 2 ? 0 : 2);
           }}
-          style={{ color: page === 2 && !collapsed ? "#FFAA00" : TOOLTIP.muted }}
+          style={ts({ color: page === 2 && !collapsed ? "#FFAA00" : TOOLTIP.muted })}
         >
           score {formatScore(slot.score)}
         </button>
@@ -2870,10 +3042,10 @@ function ItemCard({ slot, build, actions, powder = null, open = true, onToggle =
         <div className="flex items-start gap-3">
           <IconBox item={item} />
           <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-            <h3 className="text-xl leading-tight" style={{ color }}>
-              <span style={{ overflowWrap: "anywhere" }}>{item.name}</span>
+            <h3 className="text-xl leading-tight" style={ts({ color })}>
+              <span style={ts({ overflowWrap: "anywhere" })}>{item.name}</span>
               {overall !== null && (
-                <span className="ml-1 whitespace-nowrap text-base" style={{ color: rollColor(overall) }} title={item.rolls ? "Average of your identification rolls" : "All identifications at their 50% roll"}>
+                <span className="ml-1 whitespace-nowrap text-base" style={ts({ color: rollColor(overall) })} title={item.rolls ? "Average of your identification rolls" : "All identifications at their 50% roll"}>
                   [{overall.toFixed(1)}%]
                 </span>
               )}
@@ -2913,7 +3085,7 @@ function ItemCard({ slot, build, actions, powder = null, open = true, onToggle =
             <IdentificationList item={item} relevant={relevant} playerClass={build.playerClass} />
 
             {item.majorIds.length > 0 && (
-              <div className="flex flex-col gap-0.5 text-base" style={{ color: "#55FFFF" }}>
+              <div className="flex flex-col gap-0.5 text-base" style={ts({ color: "#55FFFF" })}>
                 {item.majorIds.map((major) => (
                   <span key={major}>+ Major ID: {titleCase(major)}</span>
                 ))}
@@ -2924,12 +3096,12 @@ function ItemCard({ slot, build, actions, powder = null, open = true, onToggle =
 
         <div className="mt-auto flex flex-col gap-2 pt-1">
           {!collapsed && item && hasPriceData() && (
-            <p className="text-xs" style={{ color: TOOLTIP.muted }} title="Trade Market price (WynnVentory, average of the middle 80% of listings)">
+            <p className="text-xs" style={ts({ color: TOOLTIP.muted })} title="Trade Market price (WynnVentory, average of the middle 80% of listings)">
               {priceLabel(item)}
             </p>
           )}
           {!collapsed && item && hasLiveData() && !isUntradable(item) && (
-            <p className="text-xs" style={{ color: marketStatus(item).state === "listed" ? "#55FF55" : TOOLTIP.muted }} title={marketTitle()}>
+            <p className="text-xs" style={ts({ color: marketStatus(item).state === "listed" ? "#55FF55" : TOOLTIP.muted })} title={marketTitle()}>
               {marketText(item)}
             </p>
           )}
@@ -2941,22 +3113,22 @@ function ItemCard({ slot, build, actions, powder = null, open = true, onToggle =
               aria-expanded={open}
               aria-label={open ? `Hide ${item.name} details` : `Show ${item.name} details`}
               className="flex w-full items-center justify-center gap-2 py-0.5 text-xs hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
-              style={{ color: TOOLTIP.muted }}
+              style={ts({ color: TOOLTIP.muted })}
             >
-              <span aria-hidden="true" style={{ color }}>
+              <span aria-hidden="true" style={ts({ color })}>
                 {open ? "▲" : "▼"}
               </span>
               {open ? "Hide details" : "Details"}
             </button>
           )}
           {actions && (
-            <div className="flex flex-wrap gap-2 border-t pt-3" style={{ borderColor: "#1C2044" }}>
+            <div className="flex flex-wrap gap-2 border-t pt-3" style={ts({ borderColor: "#1C2044" })}>
               {actions.onAlternatives && (
                 <button
                   type="button"
                   onClick={() => actions.onAlternatives(slot.id)}
                   className="border px-2 py-1 text-xs hover:text-white focus:outline-none focus:ring-2 focus:ring-amber-500"
-                  style={{ borderColor: color, color: TOOLTIP.text }}
+                  style={ts({ borderColor: color, color: TOOLTIP.text })}
                 >
                   Other picks
                 </button>
@@ -2967,7 +3139,7 @@ function ItemCard({ slot, build, actions, powder = null, open = true, onToggle =
                   onClick={() => actions.onRolls(slot.id)}
                   title="Set the roll of each identification (0-100%), like the [xx%] shown in game"
                   className="border px-2 py-1 text-xs hover:text-white focus:outline-none focus:ring-2 focus:ring-amber-500"
-                  style={{ borderColor: "#3B3F6A", color: item.rolls ? "#FFAA00" : TOOLTIP.muted }}
+                  style={ts({ borderColor: "#3B3F6A", color: item.rolls ? "#FFAA00" : TOOLTIP.muted })}
                 >
                   Rolls{item.rolls ? " ✎" : ""}
                 </button>
@@ -2977,7 +3149,7 @@ function ItemCard({ slot, build, actions, powder = null, open = true, onToggle =
                   type="button"
                   onClick={() => actions.onUnpin(slot.id)}
                   className="border px-2 py-1 text-xs hover:text-white focus:outline-none focus:ring-2 focus:ring-amber-500"
-                  style={{ borderColor: "#3B3F6A", color: "#FFAA00" }}
+                  style={ts({ borderColor: "#3B3F6A", color: "#FFAA00" })}
                 >
                   Unpin
                 </button>
@@ -2987,7 +3159,7 @@ function ItemCard({ slot, build, actions, powder = null, open = true, onToggle =
                   onClick={() => actions.onExclude(item.name)}
                   title="Don't suggest this item again"
                   className="border px-2 py-1 text-xs hover:text-white focus:outline-none focus:ring-2 focus:ring-amber-500"
-                  style={{ borderColor: "#3B3F6A", color: TOOLTIP.muted }}
+                  style={ts({ borderColor: "#3B3F6A", color: TOOLTIP.muted })}
                 >
                   Exclude
                 </button>
@@ -3046,10 +3218,10 @@ function ObtainInfo({ item, color }) {
       <ul className="flex flex-col gap-2 text-base">
         {obtainLines(item).map((line, index) => (
           <li key={index} className="flex flex-col">
-            <span style={{ color: TOOLTIP.text }}>{line.label}</span>
-            {line.detail && <span style={{ color: "#55FFFF" }}>{line.detail}</span>}
+            <span style={ts({ color: TOOLTIP.text })}>{line.label}</span>
+            {line.detail && <span style={ts({ color: "#55FFFF" })}>{line.detail}</span>}
             {line.coords && (
-              <span className="text-sm tabular-nums" style={{ color: TOOLTIP.muted }}>
+              <span className="text-sm tabular-nums" style={ts({ color: TOOLTIP.muted })}>
                 at {line.coords.join(", ")}
               </span>
             )}
@@ -3058,15 +3230,15 @@ function ObtainInfo({ item, color }) {
       </ul>
       <TooltipDivider color={color} />
       <div className="flex items-center justify-between gap-2 text-base">
-        <span className="flex items-center gap-1.5" style={{ color: TOOLTIP.text }}>
+        <span className="flex items-center gap-1.5" style={ts({ color: TOOLTIP.text })}>
           <CheckBox state={tradeable ? "yes" : "no"} /> Trade Market
         </span>
-        <span style={{ color: tradeable ? TOOLTIP.good : TOOLTIP.bad }}>{tradeable ? "Yes" : "No"}</span>
+        <span style={ts({ color: tradeable ? TOOLTIP.good : TOOLTIP.bad })}>{tradeable ? "Yes" : "No"}</span>
       </div>
-      <span className="text-sm" style={{ color: TOOLTIP.muted }}>
+      <span className="text-sm" style={ts({ color: TOOLTIP.muted })}>
         {tradeable ? "Can be bought and sold on the Trade Market." : restriction}
       </span>
-      <a href={wikiLink(item.name)} target="_blank" rel="noreferrer" className="text-base underline hover:text-white" style={{ color: "#FFAA00" }}>
+      <a href={wikiLink(item.name)} target="_blank" rel="noreferrer" className="text-base underline hover:text-white" style={ts({ color: "#FFAA00" })}>
         Open on the Wynncraft wiki ↗
       </a>
     </div>
@@ -3280,7 +3452,7 @@ function AffixPicker({ selected, onChange, mode, onModeChange }) {
             const affix = AFFIX_BY_ID.get(filter.id);
             if (!affix) return null;
             return (
-              <span key={filter.id} className="mc-slot flex items-center gap-1 px-2 py-0.5 text-xs" style={{ color: "#FFAA00" }}>
+              <span key={filter.id} className="mc-slot flex items-center gap-1 px-2 py-0.5 text-xs" style={ts({ color: "#FFAA00" })}>
                 {affix.label}
                 {affix.kind !== "major" && (
                   <>
@@ -3331,7 +3503,7 @@ function AffixPicker({ selected, onChange, mode, onModeChange }) {
                         aria-selected={chosen.has(affix.id)}
                         onClick={() => toggle(affix)}
                         className="mc-slot flex items-center gap-1 px-2 py-0.5 text-left text-xs"
-                        style={{ color: chosen.has(affix.id) ? "#FFAA00" : "#e0e0e0", borderColor: chosen.has(affix.id) ? "#FFAA00" : undefined }}
+                        style={ts({ color: chosen.has(affix.id) ? "#FFAA00" : "#e0e0e0", borderColor: chosen.has(affix.id) ? "#FFAA00" : undefined })}
                         title={`${affix.count} item${affix.count === 1 ? "" : "s"} in the game have it`}
                       >
                         {chosen.has(affix.id) ? "✓ " : ""}
@@ -3508,7 +3680,7 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
             <p className="text-sm text-zinc-400">
               {current ? (
                 <>
-                  Current: <span style={{ color: RARITY_COLORS[current.tier] }}>{current.name}</span>
+                  Current: <span style={ts({ color: RARITY_COLORS[current.tier] })}>{current.name}</span>
                   {results.currentScore !== null ? ` (score ${formatScore(results.currentScore)})` : ""}.{" "}
                 </>
               ) : null}
@@ -3611,11 +3783,11 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
                   <div className="flex-shrink-0">
                     <PixelIcon item={item} size={32} />
                   </div>
-                  <div className="flex min-w-0 flex-1 flex-col" style={{ fontFamily: PIXEL_FONT }}>
-                    <span className="text-base" style={{ color: RARITY_COLORS[item.tier] || RARITY_COLORS.Normal }}>
+                  <div className="flex min-w-0 flex-1 flex-col" style={ts({ fontFamily: PIXEL_FONT })}>
+                    <span className="text-base" style={ts({ color: RARITY_COLORS[item.tier] || RARITY_COLORS.Normal })}>
                       {item.name}
                     </span>
-                    <span className="text-xs" style={{ color: TOOLTIP.muted }}>
+                    <span className="text-xs" style={ts({ color: TOOLTIP.muted })}>
                       {item.tier} {item.type} · Lv. {item.level}
                       {item.category === "weapon" ? ` · ${ATTACK_SPEED_LABELS[item.atkSpd] || item.atkSpd} · ${formatNumber(item.dps || 0)} DPS` : ""}
                       {item.powders ? ` (${powderLabel(item.powders)} powders; base ${formatNumber(item.baseWeapon.dps || 0)})` : ""}
@@ -3626,20 +3798,20 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
                       {entry.slotId && !slot ? ` · → ${SLOTS.find((s) => s.id === entry.slotId).label}` : ""}
                       {hasPriceData() ? ` · ${priceLabel(item)}` : ""}
                       {hasLiveData() && !isUntradable(item) ? (
-                        <span style={{ color: marketStatus(item).state === "listed" ? "#55FF55" : undefined }} title={marketTitle()}>
+                        <span style={ts({ color: marketStatus(item).state === "listed" ? "#55FF55" : undefined })} title={marketTitle()}>
                           {" · "}
                           {marketStatus(item).state === "listed" ? "● " : "○ "}
                           {marketText(item, true)}
                         </span>
                       ) : null}
                     </span>
-                    <span className="text-xs" style={{ color: TOOLTIP.text }}>
+                    <span className="text-xs" style={ts({ color: TOOLTIP.text })}>
                       {stats.map((c) => `${formatStatValue(c.key, c.value)} ${STAT_META[c.key].label}`).join(" · ")}
                       {fallbackStats.map((c) => `${formatStatValue(c.key, c.value)} ${STAT_META[c.key] ? STAT_META[c.key].label : c.key}`).join(" · ")}
-                      {levelGap ? <span style={{ color: "#FFAA00" }}>{stats.length > 0 ? " · " : ""}far below your level ({formatScore(levelGap.contribution)})</span> : null}
+                      {levelGap ? <span style={ts({ color: "#FFAA00" })}>{stats.length > 0 ? " · " : ""}far below your level ({formatScore(levelGap.contribution)})</span> : null}
                     </span>
                     {affixFilters.length > 0 && (
-                      <span className="text-xs" style={{ color: "#FFAA00" }}>
+                      <span className="text-xs" style={ts({ color: "#FFAA00" })}>
                         {affixFilters
                           .map((filter) => AFFIX_BY_ID.get(filter.id))
                           .filter((affix) => affix && affixValue(item, affix) > 0)
@@ -3650,10 +3822,10 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
                     {entry.score !== null && (
                       <span className="flex flex-wrap gap-x-3 text-xs" title="Change in the build summary if you use this item (without the ability tree)">
                         {!entry.deltas || entry.deltas.length === 0 ? (
-                          <span style={{ color: TOOLTIP.muted }}>No change in the summary</span>
+                          <span style={ts({ color: TOOLTIP.muted })}>No change in the summary</span>
                         ) : (
                           entry.deltas.slice(0, 6).map((d) => (
-                            <span key={d.id} style={{ color: d.delta > 0 ? "#55FF55" : "#FF5555" }}>
+                            <span key={d.id} style={ts({ color: d.delta > 0 ? "#55FF55" : "#FF5555" })}>
                               {d.label} {d.delta > 0 ? "+" : ""}
                               {formatNumber(d.delta)}
                             </span>
@@ -3667,7 +3839,7 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
                       <span className="tabular-nums text-zinc-200">
                         score {formatScore(entry.score)}
                         {delta !== null ? (
-                          <span style={{ color: delta >= 0 ? "#55FF55" : "#FF5555" }}>
+                          <span style={ts({ color: delta >= 0 ? "#55FF55" : "#FF5555" })}>
                             {" "}
                             ({delta >= 0 ? "+" : ""}
                             {formatScore(delta)})
@@ -3676,7 +3848,7 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
                       </span>
                     )}
                     {entry.score !== null && (
-                      <span style={{ color: entry.illegalSet || entry.overBudget ? "#FF5555" : entry.overflow === 0 ? "#55FF55" : "#FFAA00" }}>
+                      <span style={ts({ color: entry.illegalSet || entry.overBudget ? "#FF5555" : entry.overflow === 0 ? "#55FF55" : "#FFAA00" })}>
                         {entry.illegalSet
                           ? `✗ can't be worn with your other ${entry.illegalSet} item`
                           : entry.overBudget
@@ -3724,7 +3896,7 @@ function RollsDialog({ item, rolls, onChange, onClose }) {
         <div className="flex items-start justify-between gap-3">
           <div>
             <h2 className="mc-title text-lg">
-              Rolls: <span style={{ color: RARITY_COLORS[item.tier] || RARITY_COLORS.Normal }}>{item.name}</span>
+              Rolls: <span style={ts({ color: RARITY_COLORS[item.tier] || RARITY_COLORS.Normal })}>{item.name}</span>
             </h2>
             <p className="text-sm text-zinc-400">
               In game each identification rolls 30-130% of its base (negative ones 70-130%); the [xx%] tag is where the roll landed.
@@ -3747,7 +3919,7 @@ function RollsDialog({ item, rolls, onChange, onClose }) {
             <label htmlFor="roll-all" className="mc-gold">
               Whole item
             </label>
-            <span className="tabular-nums" style={{ color: rollColor(wholeValue) }}>
+            <span className="tabular-nums" style={ts({ color: rollColor(wholeValue) })}>
               {wholeValue}%
             </span>
           </div>
@@ -3770,8 +3942,8 @@ function RollsDialog({ item, rolls, onChange, onClose }) {
                       {formatIdValue(display, worst)} … {formatIdValue(display, best)}
                     </span>
                   </label>
-                  <span className="tabular-nums" style={{ color: good ? "#55FF55" : "#FF5555" }}>
-                    {formatIdValue(display, value)} <span style={{ color: rollColor(percent) }}>[{percent.toFixed(1)}%]</span>
+                  <span className="tabular-nums" style={ts({ color: good ? "#55FF55" : "#FF5555" })}>
+                    {formatIdValue(display, value)} <span style={ts({ color: rollColor(percent) })}>[{percent.toFixed(1)}%]</span>
                   </span>
                 </div>
                 <McRange id={id} min={0} max={100} step={1} value={percent} onChange={(event) => setOne(display.key, Number(event.target.value))} className="w-full" accent={rollColor(percent)} />
@@ -3856,7 +4028,7 @@ function ScoreGuide({ build }) {
                       <span className="text-zinc-300">
                         {label} {math && <span className="text-zinc-500">{math}{math.includes("÷") ? " × 10" : ""}</span>}
                       </span>
-                      <span className="tabular-nums" style={{ color: entry.contribution >= 0 ? "#55FF55" : "#FF5555" }}>
+                      <span className="tabular-nums" style={ts({ color: entry.contribution >= 0 ? "#55FF55" : "#FF5555" })}>
                         {entry.contribution >= 0 ? "+" : ""}
                         {formatScore(entry.contribution)}
                       </span>
@@ -3878,7 +4050,7 @@ function SkillPointPanel({ skillPoints }) {
     <section className="mc-panel flex flex-col gap-3 p-4">
       <div className="flex items-center justify-between gap-2">
         <h3 className="mc-title text-sm uppercase">Skill points</h3>
-        <span className="mc-slot px-2 py-0.5 text-xs" style={{ color: skillPoints.valid ? "#55FF55" : "#FF5555" }}>
+        <span className="mc-slot px-2 py-0.5 text-xs" style={ts({ color: skillPoints.valid ? "#55FF55" : "#FF5555" })}>
           {skillPoints.valid ? "Equippable" : "Over budget"}
         </span>
       </div>
@@ -3890,7 +4062,7 @@ function SkillPointPanel({ skillPoints }) {
           </span>
         </div>
         <div className="mc-bar mt-1">
-          <div className="mc-bar-fill" style={{ width: `${usedPct}%`, background: skillPoints.valid ? "#7FE828" : "#FF5555" }} />
+          <div className="mc-bar-fill" style={ts({ width: `${usedPct}%`, background: skillPoints.valid ? "#7FE828" : "#FF5555" })} />
         </div>
         <p className="mt-1 text-xs text-zinc-500" title="Free points you can put into your archetype's skills.">
           {skillPoints.remaining} free points.
@@ -3901,11 +4073,11 @@ function SkillPointPanel({ skillPoints }) {
           const assigned = skillPoints.assigned[skill];
           return (
             <li key={skill} className="grid grid-cols-12 items-center gap-2 text-xs">
-              <span className="col-span-4 truncate" style={{ color: SKILL_STYLE[skill].color }}>
+              <span className="col-span-4 truncate" style={ts({ color: SKILL_STYLE[skill].color })}>
                 {SKILL_STYLE[skill].symbol} {SKILL_LABELS[skill]}
               </span>
               <div className="mc-bar col-span-4">
-                <div className="mc-bar-fill" style={{ width: `${Math.min(100, assigned)}%`, background: SKILL_STYLE[skill].color }} />
+                <div className="mc-bar-fill" style={ts({ width: `${Math.min(100, assigned)}%`, background: SKILL_STYLE[skill].color })} />
               </div>
               <span className="col-span-2 text-right tabular-nums text-zinc-200" title="Points you assign">
                 {assigned}
@@ -4682,7 +4854,7 @@ function SummaryRow({ label, value, hint, color }) {
   return (
     <li className="flex items-baseline justify-between gap-3" title={hint}>
       <span className="text-zinc-300">{label}</span>
-      <span className="tabular-nums font-semibold" style={{ color: color || "#F4F4F5" }}>
+      <span className="tabular-nums font-semibold" style={ts({ color: color || "#F4F4F5" })}>
         {value}
       </span>
     </li>
@@ -4710,7 +4882,7 @@ function ElementAmount({ index, min, max }) {
   // większe od jego "max" (tak samo w Wynnbuilderze); pokazujemy od mniejszej do większej.
   const [low, high] = min <= max ? [min, max] : [max, min];
   return (
-    <span className="tabular-nums" style={{ color: style.color }}>
+    <span className="tabular-nums" style={ts({ color: style.color })}>
       {style.symbol} {formatNumber(Math.round(low))} – {formatNumber(Math.round(high))}
     </span>
   );
@@ -4722,7 +4894,7 @@ function MultiplierLine({ part }) {
     <span className="flex flex-wrap items-baseline gap-x-2 text-xs">
       {part.multipliers.map((value, index) =>
         value > 0 ? (
-          <span key={index} style={{ color: ELEMENT_STYLE[ELEMENT_BY_PREFIX[DAMAGE_PREFIXES[index]]].color }}>
+          <span key={index} style={ts({ color: ELEMENT_STYLE[ELEMENT_BY_PREFIX[DAMAGE_PREFIXES[index]]].color })}>
             {ELEMENT_STYLE[ELEMENT_BY_PREFIX[DAMAGE_PREFIXES[index]]].symbol} {Math.round(value * 10) / 10}%
           </span>
         ) : null
@@ -4738,7 +4910,7 @@ function PartBreakdown({ part, critChance }) {
     return (
       <li className="flex flex-col gap-0.5">
         <span className="text-zinc-200">{part.name}</span>
-        <span className="tabular-nums" style={{ color: "#55FF55" }}>
+        <span className="tabular-nums" style={ts({ color: "#55FF55" })}>
           Heal: {formatNumber(Math.round(part.amount))} HP
         </span>
       </li>
@@ -4772,17 +4944,17 @@ function SpellCard({ spell, critChance, mainAttack, open, onToggle }) {
         <span className="min-w-0 text-zinc-100">
           {spell.name}
           {spell.cost !== null && (
-            <span className="ml-2 text-xs" style={{ color: "#55FFFF" }}>
+            <span className="ml-2 text-xs" style={ts({ color: "#55FFFF" })}>
               ({spell.cost.toFixed(1)} mana)
             </span>
           )}
           {spell.manaGained > 0 && (
-            <span className="ml-2 text-xs" style={{ color: "#55FFFF" }}>
+            <span className="ml-2 text-xs" style={ts({ color: "#55FFFF" })}>
               +{formatNumber(spell.manaGained)} mana back
             </span>
           )}
         </span>
-        <span className="shrink-0 tabular-nums" style={{ color: heal ? "#55FF55" : "#FFAA00" }}>
+        <span className="shrink-0 tabular-nums" style={ts({ color: heal ? "#55FF55" : "#FFAA00" })}>
           {mainAttack
             ? `${formatNumber(Math.round(mainAttack.dps))} DPS`
             : main
@@ -4803,7 +4975,7 @@ function SpellCard({ spell, critChance, mainAttack, open, onToggle }) {
           {spell.dps && (
             <>
               {" "}
-              · <span style={{ color: "#55FFFF" }}>Spell DPS {formatNumber(Math.round(spell.dps.sustained))}</span>
+              · <span style={ts({ color: "#55FFFF" })}>Spell DPS {formatNumber(Math.round(spell.dps.sustained))}</span>
               <span className="text-zinc-500">
                 {" "}
                 sustained ({spell.dps.castsPerSecond.toFixed(2)} casts/s) · spam {formatNumber(Math.round(spell.dps.spam))}
@@ -4915,11 +5087,11 @@ function DamagePanel({ build, stats, onOpenTree }) {
                 ["melee", "[100%] Main Attack Damage", "#FFAA00"],
               ].map(([kind, label, color]) => (
                 <div key={kind} className="mc-slot flex flex-col gap-0.5 px-3 py-2 text-xs">
-                  <span style={{ color }}>{label}</span>
+                  <span style={ts({ color })}>{label}</span>
                   {stats.hundred[kind].ranges.map(([min, max], index) =>
                     max > 0 ? (
                       <span key={index} className="flex justify-between gap-2">
-                        <span style={{ color: ELEMENT_STYLE[ELEMENT_BY_PREFIX[DAMAGE_PREFIXES[index]]].color }}>
+                        <span style={ts({ color: ELEMENT_STYLE[ELEMENT_BY_PREFIX[DAMAGE_PREFIXES[index]]].color })}>
                           {ELEMENT_STYLE[ELEMENT_BY_PREFIX[DAMAGE_PREFIXES[index]]].symbol} {ELEMENT_STYLE[ELEMENT_BY_PREFIX[DAMAGE_PREFIXES[index]]].label} Damage
                         </span>
                         <span className="tabular-nums text-zinc-100">
@@ -5053,7 +5225,7 @@ function SurvivabilityPanel({ build, stats }) {
               className="flex items-baseline justify-between gap-3"
               title={`${formatNumber(raw)} from items${pct ? `, ${pct > 0 ? "+" : ""}${pct}% from identifications` : ""}`}
             >
-              <span style={{ color: ELEMENT_STYLE[element].color }}>
+              <span style={ts({ color: ELEMENT_STYLE[element].color })}>
                 {ELEMENT_STYLE[element].symbol} {ELEMENT_STYLE[element].label}
               </span>
               <span className="flex items-baseline gap-2">
@@ -5063,7 +5235,7 @@ function SurvivabilityPanel({ build, stats }) {
                     {pct}%
                   </span>
                 )}
-                <span className="tabular-nums font-semibold" style={{ color: effective >= 0 ? "#55FF55" : "#FF5555" }}>
+                <span className="tabular-nums font-semibold" style={ts({ color: effective >= 0 ? "#55FF55" : "#FF5555" })}>
                   {effective > 0 ? "+" : ""}
                   {formatNumber(effective)}
                 </span>
@@ -5168,7 +5340,7 @@ function TreeEffectsPanel({ playerClass, state, settings, onChange, onOpenTree }
               <span className="text-xs text-zinc-400">Always on</span>
               <div className="flex flex-wrap gap-x-3 gap-y-1 font-mono text-xs">
                 {passive.map((line) => (
-                  <span key={line.key} style={{ color: line.color || "#D4D4D8" }}>
+                  <span key={line.key} style={ts({ color: line.color || "#D4D4D8" })}>
                     {line.text}
                   </span>
                 ))}
@@ -5269,11 +5441,11 @@ function SetBonusList({ items, playerClass }) {
         const majors = Array.isArray(set.bonus.majorIds) ? set.bonus.majorIds : [];
         return (
           <div key={set.name} className="flex flex-col gap-1 text-sm">
-            <span style={{ color: TOOLTIP.good }}>
+            <span style={ts({ color: TOOLTIP.good })}>
               {set.name} set bonus ({set.count}/{set.size})
             </span>
             {set.illegal ? (
-              <span className="text-xs" style={{ color: TOOLTIP.bad }}>
+              <span className="text-xs" style={ts({ color: TOOLTIP.bad })}>
                 These items can't be worn together in game.
               </span>
             ) : lines.length === 0 && majors.length === 0 ? (
@@ -5286,7 +5458,7 @@ function SetBonusList({ items, playerClass }) {
                   return (
                     <li key={display.key} className="flex items-baseline justify-between gap-3">
                       <span className="text-zinc-300">{idLabel(display, playerClass)}</span>
-                      <span className="tabular-nums" style={{ color: good ? TOOLTIP.good : TOOLTIP.bad }}>
+                      <span className="tabular-nums" style={ts({ color: good ? TOOLTIP.good : TOOLTIP.bad })}>
                         {formatIdValue(display, value)}
                       </span>
                     </li>
@@ -5368,7 +5540,7 @@ function ToggleChip({ pressed, onClick, color, children }) {
       aria-pressed={pressed}
       onClick={onClick}
       className={`mc-btn mc-btn-sm ${pressed ? "mc-btn-on" : ""}`}
-      style={color ? { color } : pressed ? { color: "#FFAA00" } : undefined}
+      style={ts(color ? { color } : pressed ? { color: "#FFAA00" } : undefined)}
     >
       {children}
     </button>
@@ -5387,7 +5559,7 @@ function McRange({ value, min = 0, max = 100, accent = "#FFAA00", className = ""
       max={max}
       value={value}
       className={`mc-range ${className}`}
-      style={{ ...style, "--mc-accent": accent, "--mc-fill": `${fill}%` }}
+      style={ts({ ...style, "--mc-accent": accent, "--mc-fill": `${fill}%` })}
       {...props}
     />
   );
@@ -5426,7 +5598,7 @@ function FocusSliders({ options, onChange, archetype }) {
         return (
           <div key={group.id} className="flex flex-col gap-1">
             <div className="flex items-baseline justify-between gap-2 text-xs">
-              <label htmlFor={`focus-${group.id}`} className="font-semibold" style={{ color: group.color }}>
+              <label htmlFor={`focus-${group.id}`} className="font-semibold" style={ts({ color: group.color })}>
                 {group.label}
               </label>
               <span className="tabular-nums text-zinc-200">
@@ -5457,7 +5629,7 @@ function FocusSliders({ options, onChange, archetype }) {
                 accent={group.color}
                 aria-describedby={`focus-${group.id}-hint`}
               />
-              <span className="mc-tick" style={{ left: `calc(6px + (100% - 12px) * ${meta / 100})` }} title={`Archetype meta: ${meta}%`} aria-hidden="true" />
+              <span className="mc-tick" style={ts({ left: `calc(6px + (100% - 12px) * ${meta / 100})` })} title={`Archetype meta: ${meta}%`} aria-hidden="true" />
             </div>
             <p id={`focus-${group.id}-hint`} className="sr-only">
               {group.hint}
@@ -5523,7 +5695,7 @@ function PinItemSearch({ options, onChange, weaponType, level, onBrowse = null }
             matches.map((item) => (
               <li key={item.name}>
                 <button type="button" onClick={() => pin(item)} className="flex w-full items-center justify-between gap-2 px-2 py-1 text-left text-sm hover:bg-zinc-800">
-                  <span style={{ color: RARITY_COLORS[item.tier] || RARITY_COLORS.Normal }}>{item.name}</span>
+                  <span style={ts({ color: RARITY_COLORS[item.tier] || RARITY_COLORS.Normal })}>{item.name}</span>
                   <span className="whitespace-nowrap text-xs text-zinc-500">
                     {item.tier} {item.type} · Lv. {item.level}
                     {item.category === "weapon" ? ` · ${formatNumber(item.dps || 0)} DPS` : ""}
@@ -5575,7 +5747,7 @@ function BudgetInput({ options, onChange }) {
             apply(event.target.value, unit.id);
           }}
           className="mc-input min-w-0 flex-1 tabular-nums"
-          style={prices ? undefined : { opacity: 0.5 }}
+          style={ts(prices ? undefined : { opacity: 0.5 })}
         />
         <select
           aria-label="Budget unit"
@@ -5583,7 +5755,7 @@ function BudgetInput({ options, onChange }) {
           disabled={!prices}
           onChange={(event) => apply(text, event.target.value)}
           className="mc-input w-20"
-          style={prices ? undefined : { opacity: 0.5 }}
+          style={ts(prices ? undefined : { opacity: 0.5 })}
         >
           {EMERALD_UNITS.map((entry) => (
             <option key={entry.id} value={entry.id}>
@@ -5610,7 +5782,7 @@ function OnlyListedCheckbox({ options, onChange }) {
     : "No Trade Market listings in this copy of the site. The GitHub Pages version fetches them from WynnVentory when the repository has a WYNNVENTORY_KEY secret (see the README).";
   return (
     <div className="flex flex-col gap-1">
-      <label htmlFor="only-listed" className="flex items-center gap-2 text-xs text-zinc-200" title={info} style={live ? undefined : { opacity: 0.5 }}>
+      <label htmlFor="only-listed" className="flex items-center gap-2 text-xs text-zinc-200" title={info} style={ts(live ? undefined : { opacity: 0.5 })}>
         <input
           id="only-listed"
           type="checkbox"
@@ -6108,7 +6280,7 @@ function ScoreWeightsPanel({ archetype, playerClass, level, options, onChange, o
                     placeholder={formatWeight(current)}
                     onChange={(event) => setTuning(spec.id, event.target.value)}
                     className="mc-input w-24 text-right"
-                    style={overridden ? { color: "#FFAA00" } : undefined}
+                    style={ts(overridden ? { color: "#FFAA00" } : undefined)}
                   />
                   {overridden && (
                     <button type="button" onClick={() => setTuning(spec.id, "")} className="mc-link text-xs" title="Back to the computed value">
@@ -6176,7 +6348,7 @@ function ScoreWeightsPanel({ archetype, playerClass, level, options, onChange, o
                           placeholder={formatWeight(computed)}
                           onChange={(event) => setWeight(key, event.target.value)}
                           className="mc-input w-20 text-right"
-                          style={overridden ? { color: "#FFAA00" } : undefined}
+                          style={ts(overridden ? { color: "#FFAA00" } : undefined)}
                         />
                         {overridden && (
                           <button type="button" onClick={() => setWeight(key, "")} className="mc-link text-xs" title="Back to the computed weight">
@@ -6432,7 +6604,7 @@ function BuildInfoPanel({ playerClass, archetype, build, stats, treeSettings, on
               return (
                 <li key={name} className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
                   <span className="flex items-center gap-2">
-                    <span className="mc-slot px-1.5 text-xs" style={{ color: "#FFAA00" }}>
+                    <span className="mc-slot px-1.5 text-xs" style={ts({ color: "#FFAA00" })}>
                       {index + 1}
                     </span>
                     <span className="text-zinc-100">{spell && spell.name !== name ? `${spell.name} (${name})` : name}</span>
@@ -6449,13 +6621,13 @@ function BuildInfoPanel({ playerClass, archetype, build, stats, treeSettings, on
             {ultimate && (
               <li className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
                 <span className="flex items-center gap-2">
-                  <span className="mc-slot px-1.5 text-xs" style={{ color: "#FF55FF" }}>
+                  <span className="mc-slot px-1.5 text-xs" style={ts({ color: "#FF55FF" })}>
                     F
                   </span>
                   <span className="text-zinc-100">{ultimate.name}</span>
                   <span className="text-xs text-zinc-500">ultimate</span>
                 </span>
-                <span className="text-xs" style={{ color: selected.has(ultimate.id) ? "#55FF55" : "#8c8c8c" }}>
+                <span className="text-xs" style={ts({ color: selected.has(ultimate.id) ? "#55FF55" : "#8c8c8c" })}>
                   {selected.has(ultimate.id) ? "✓ in your tree" : `needs ${ultimate.archReq || "?"} ${archetype} nodes`}
                 </span>
               </li>
@@ -6481,7 +6653,7 @@ function BuildInfoPanel({ playerClass, archetype, build, stats, treeSettings, on
                 </span>
                 <span className="flex flex-wrap gap-1">
                   {nodes.map((node) => (
-                    <span key={node.id} className="mc-slot px-1.5 text-xs" title={plainDescription(node.desc)} style={{ color: selected.has(node.id) ? "#55FF55" : "#e0e0e0" }}>
+                    <span key={node.id} className="mc-slot px-1.5 text-xs" title={plainDescription(node.desc)} style={ts({ color: selected.has(node.id) ? "#55FF55" : "#e0e0e0" })}>
                       {selected.has(node.id) ? "✓ " : ""}
                       {node.name}
                     </span>
@@ -6512,7 +6684,7 @@ function BuildInfoPanel({ playerClass, archetype, build, stats, treeSettings, on
                   {cycle.steps.map((step, index) => (
                     <span key={index} className="flex items-center gap-1">
                       {index > 0 && <span className="text-zinc-600">→</span>}
-                      <span className="mc-slot px-1.5 py-0.5" style={{ color: step.color }} title={step.cost ? `${step.cost.toFixed(1)} mana` : undefined}>
+                      <span className="mc-slot px-1.5 py-0.5" style={ts({ color: step.color })} title={step.cost ? `${step.cost.toFixed(1)} mana` : undefined}>
                         {step.label}
                         <span className="text-zinc-500"> {step.combo}</span>
                       </span>
@@ -6525,7 +6697,7 @@ function BuildInfoPanel({ playerClass, archetype, build, stats, treeSettings, on
                     One cycle: <span className="tabular-nums text-zinc-200">{cycle.cost.toFixed(1)}</span> mana in {cycle.seconds.toFixed(1)} s; you regain{" "}
                     <span className="tabular-nums text-zinc-200">{cycle.regained.toFixed(1)}</span> in that time
                     {stats.manaSteal > 0 ? ` (+${(stats.manaSteal / 3).toFixed(1)}/s Mana Steal while hitting)` : ""} —{" "}
-                    <span style={{ color: sustainable ? "#55FF55" : "#FFAA00" }}>
+                    <span style={ts({ color: sustainable ? "#55FF55" : "#FFAA00" })}>
                       {sustainable
                         ? "sustainable without stopping"
                         : Number.isFinite(cycle.every)
@@ -6732,7 +6904,7 @@ function PowderPanel({ build, stats, standalone = false }) {
     );
   }
   const elementName = (element) => (
-    <span style={{ color: ELEMENT_STYLE[element].color }}>
+    <span style={ts({ color: ELEMENT_STYLE[element].color })}>
       {ELEMENT_STYLE[element].symbol} {ELEMENT_STYLE[element].label}
     </span>
   );
@@ -6791,6 +6963,45 @@ function PowderPanel({ build, stats, standalone = false }) {
 }
 
 const RANK_STORAGE_KEY = "wynn-build-recommender-rank";
+const THEME_STORAGE_KEY = "wynn-build-recommender-theme";
+// Motyw: zapisany wybór, inaczej ustawienie systemu (prefers-color-scheme), inaczej ciemny.
+function loadSavedTheme() {
+  try {
+    const saved = window.localStorage.getItem(THEME_STORAGE_KEY);
+    if (saved === "light" || saved === "dark") return saved;
+  } catch (error) {
+    // brak localStorage
+  }
+  try {
+    if (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches) return "light";
+  } catch (error) {
+    // brak matchMedia
+  }
+  return "dark";
+}
+
+// Przełącznik motywu w prawym górnym rogu.
+function ThemeToggle({ theme, onChange, className = "" }) {
+  return (
+    <div className={`flex gap-1 ${className}`} role="group" aria-label="Colour theme">
+      {[
+        ["dark", "☾", "Dark"],
+        ["light", "☀", "Light"],
+      ].map(([id, icon, label]) => (
+        <button
+          key={id}
+          type="button"
+          aria-pressed={theme === id}
+          onClick={() => onChange(id)}
+          className={`mc-btn mc-btn-sm ${theme === id ? "mc-btn-on" : ""}`}
+          title={`${label} mode`}
+        >
+          <span aria-hidden="true">{icon}</span> {label}
+        </button>
+      ))}
+    </div>
+  );
+}
 function loadSavedRank() {
   try {
     const saved = window.localStorage.getItem(RANK_STORAGE_KEY);
@@ -6875,6 +7086,152 @@ function resolveTree(tree, selectedIds) {
   return { reachable, archetypeCount, points, invalid: pending };
 }
 
+// PROPOZYCJA DRZEWKA dla archetypu i poziomu (przycisk "Suggest" w zakładce drzewka). Tylko dane drzewek z gry
+// w wersji TREE_DATA.version (najnowsze), limit AP jak w zakładce (poziom + pożyczka rangi).
+// Waga węzła = ocena z danych drzewka (archetyp, czary, ultimate, tańsze czary, mastery żywiołów archetypu) oraz
+// udział w AKTUALNYCH drzewkach z guide buildów (src/guide-trees.json: tylko drzewka zgodne z tą wersją danych -
+// po przeróbkach, np. Shaman w 2.2.4, stare drzewka są odrzucane). Wybór: zachłannie najlepsza wartość na punkt AP,
+// razem z węzłami po drodze (najtańsza ścieżka od już wybranych), z pełną walidacją zasad drzewka.
+const ELEMENT_NAMES = { earth: "Earth", thunder: "Thunder", water: "Water", fire: "Fire", air: "Air" };
+function treeNodeHeuristic(node, archetype, playerClass) {
+  const isSpell = node.icon === `node_${playerClass.toLowerCase()}`;
+  const ultimate = /Click Combo:\s*F\b/.test(node.desc || "");
+  if (ultimate) return node.arch === archetype ? 1.6 : 0;
+  if (isSpell) return 1.2;
+  if (node.arch && node.arch !== archetype) return 0.03;
+  const config = ARCHETYPES[archetype];
+  const mastery = /^(Earth|Thunder|Water|Fire|Air) Mastery$/.exec(node.name);
+  if (mastery) {
+    const wanted = config ? config.elements.some((element) => ELEMENT_NAMES[element] === mastery[1]) : false;
+    return wanted ? (node.arch === archetype ? 1.1 : 0.7) : node.arch === archetype ? 0.6 : 0.08;
+  }
+  if (node.arch === archetype) return { node_4: 1.3, node_3: 1.15, node_2: 1.05, node_1: 1.0, node_0: 0.8 }[node.icon] || 0.9;
+  if (/^Cheaper /.test(node.name)) return 0.55;
+  if (/Proficiency/.test(node.name)) return 0.5;
+  return 0.35;
+}
+
+function guideTreesFor(playerClass, archetype) {
+  return (GUIDE_TREES.trees || []).filter((entry) => entry.class === playerClass && entry.archetype === archetype);
+}
+
+function treeNodeWeights(playerClass, archetype) {
+  const tree = TREE_INDEX[playerClass];
+  const references = guideTreesFor(playerClass, archetype);
+  const share = new Map();
+  let total = 0;
+  references.forEach((entry) => {
+    // dodatkowe buildy-wzorce (scripts/extra-guide-links.json) liczą się jak dwa guide'y
+    const weight = (entry.status === "current" ? 1 : 0.8) * (entry.source === "extra" ? 2 : 1);
+    total += weight;
+    entry.nodes.forEach((name) => share.set(name, (share.get(name) || 0) + weight));
+  });
+  const mix = total >= 2 ? [0.3, 1.2] : total > 0 ? [0.6, 0.8] : [1, 0];
+  const weights = new Map();
+  tree.nodes.forEach((node) => {
+    const heuristic = treeNodeHeuristic(node, archetype, playerClass);
+    const fromGuides = total > 0 ? (share.get(node.name) || 0) / total : 0;
+    // wartość rośnie z kosztem: węzeł za 2 AP, który autorzy drzewek i tak biorą, jest wart swoich punktów
+    weights.set(node.id, heuristic === 0 && fromGuides === 0 ? 0 : (mix[0] * heuristic + mix[1] * fromGuides) * node.cost + 0.001);
+  });
+  return { weights, references };
+}
+
+// Najtańsza ścieżka nieodblokowanych węzłów od odblokowanych do celu (koszt = AP węzłów na ścieżce).
+function cheapestTreePath(tree, children, active, target) {
+  const dist = new Map();
+  const prev = new Map();
+  const open = new Set();
+  tree.nodes.forEach((node) => {
+    if (active.has(node.id)) return;
+    if (node.parents.length === 0 ? active.size === 0 : node.parents.some((id) => active.has(id))) {
+      dist.set(node.id, node.cost);
+      prev.set(node.id, null);
+      open.add(node.id);
+    }
+  });
+  while (open.size > 0) {
+    let current = null;
+    open.forEach((id) => {
+      if (current === null || dist.get(id) < dist.get(current) || (dist.get(id) === dist.get(current) && id < current)) current = id;
+    });
+    open.delete(current);
+    if (current === target) break;
+    (children.get(current) || []).forEach((child) => {
+      if (active.has(child)) return;
+      const next = dist.get(current) + tree.byId.get(child).cost;
+      if (!dist.has(child) || next < dist.get(child)) {
+        dist.set(child, next);
+        prev.set(child, current);
+        open.add(child);
+      }
+    });
+  }
+  if (!dist.has(target)) return null;
+  const path = [];
+  for (let id = target; id !== null && id !== undefined; id = prev.get(id)) path.unshift(id);
+  return path;
+}
+
+function suggestAbilityTree(playerClass, archetype, cap) {
+  const tree = TREE_INDEX[playerClass];
+  const { weights, references } = treeNodeWeights(playerClass, archetype);
+  const children = new Map(tree.nodes.map((node) => [node.id, []]));
+  tree.nodes.forEach((node) => node.parents.forEach((parent) => children.get(parent) && children.get(parent).push(node.id)));
+  const active = new Set();
+  const counts = {};
+  let points = 0;
+  const unlock = (id) => {
+    const node = tree.byId.get(id);
+    active.add(id);
+    points += node.cost;
+    if (node.arch) counts[node.arch] = (counts[node.arch] || 0) + 1;
+  };
+  // Czy dany ciąg węzłów da się odblokować po kolei (zasady jak canUnlock, bez limitu AP)?
+  const feasible = (ids) => {
+    const reach = new Set(active);
+    const count = { ...counts };
+    for (const id of ids) {
+      const node = tree.byId.get(id);
+      if (!canUnlock(tree, node, reach, count, Infinity).ok) return false;
+      reach.add(id);
+      if (node.arch) count[node.arch] = (count[node.arch] || 0) + 1;
+    }
+    return true;
+  };
+  for (let guard = 0; guard < 200; guard += 1) {
+    let best = null;
+    tree.nodes.forEach((target) => {
+      if (active.has(target.id) || !(weights.get(target.id) > 0)) return;
+      let path = cheapestTreePath(tree, children, active, target.id);
+      if (!path) return;
+      // Zależności (dependencies) spoza ścieżki idą przed nią.
+      const missingDeps = [...new Set(path.flatMap((id) => tree.byId.get(id).deps))].filter((id) => !active.has(id) && !path.includes(id));
+      if (missingDeps.length > 0) {
+        const depPaths = [];
+        for (const dep of missingDeps) {
+          const depPath = cheapestTreePath(tree, children, active, dep);
+          if (!depPath) return;
+          depPaths.push(...depPath.filter((id) => !depPaths.includes(id)));
+        }
+        path = [...depPaths, ...path.filter((id) => !depPaths.includes(id))];
+      }
+      const cost = path.reduce((sum, id) => sum + tree.byId.get(id).cost, 0);
+      if (points + cost > cap || !feasible(path)) return;
+      const value = path.reduce((sum, id) => sum + (weights.get(id) || 0), 0);
+      const ratio = value / cost;
+      const better =
+        !best ||
+        ratio > best.ratio + 1e-9 ||
+        (Math.abs(ratio - best.ratio) <= 1e-9 && (value > best.value + 1e-9 || (Math.abs(value - best.value) <= 1e-9 && target.row < best.row)));
+      if (better) best = { path, ratio, value, row: target.row };
+    });
+    if (!best) break;
+    best.path.forEach(unlock);
+  }
+  return { ids: [...active], points, counts, references };
+}
+
 function renderDescription(html) {
   const decode = (text) =>
     text
@@ -6901,7 +7258,7 @@ function renderDescription(html) {
       return (
         <p key={lineIndex}>
           {parts.map((part, index) => (
-            <span key={index} style={part.color ? { color: part.color } : undefined}>
+            <span key={index} style={ts(part.color ? { color: part.color } : undefined)}>
               {part.text}
             </span>
           ))}
@@ -6925,7 +7282,7 @@ function TreeCell({ cell, activeEdges }) {
   return (
     <span
       className="atree-connector"
-      style={{ backgroundPosition: `calc(var(--cell) * -1.125 * ${pos[0]}) calc(var(--cell) * -1.125 * ${pos[1]})` }}
+      style={ts({ backgroundPosition: `calc(var(--cell) * -1.125 * ${pos[0]}) calc(var(--cell) * -1.125 * ${pos[1]})` })}
       aria-hidden="true"
     />
   );
@@ -6938,10 +7295,10 @@ function TreeNodeButton({ node, state, archetypeColor, onToggle, onFocus }) {
     <>
       <span
         className="atree-node"
-        style={{ backgroundPosition: `calc(var(--cell) * -2 * ${column}) calc(var(--cell) * -2 * ${row})`, opacity: state === "locked" ? 0.7 : 1 }}
+        style={ts({ backgroundPosition: `calc(var(--cell) * -2 * ${column}) calc(var(--cell) * -2 * ${row})`, opacity: state === "locked" ? 0.7 : 1 })}
         aria-hidden="true"
       />
-      {node.arch && <span className="atree-arch" style={{ background: archetypeColor }} aria-hidden="true" />}
+      {node.arch && <span className="atree-arch" style={ts({ background: archetypeColor })} aria-hidden="true" />}
       <button
         type="button"
         aria-pressed={state === "on"}
@@ -7028,17 +7385,22 @@ function AbilityTree({ playerClass, level, rank, selected, onChange, buildArchet
   const [message, setMessage] = useState("");
   const [pasteOpen, setPasteOpen] = useState(false);
   const [pasteText, setPasteText] = useState("");
+  const [undo, setUndo] = useState(null); // { ids, message } - poprzednie drzewko po "Suggest"
+  const say = (text) => {
+    setUndo(null);
+    setMessage(text);
+  };
   const applyTreeCode = (text) => {
     const ids = decodeTreeHash(playerClass, text);
     if (!ids) {
-      setMessage("That doesn't look like a Wynnbuilder tree code (letters, digits, + and - only).");
+      say("That doesn't look like a Wynnbuilder tree code (letters, digits, + and - only).");
       return;
     }
     const next = resolveTree(tree, ids);
     onChange([...next.reachable]);
     setPasteOpen(false);
     setPasteText("");
-    setMessage(`Loaded ${next.reachable.size} abilities (${next.points} AP) from the Wynnbuilder tree code${next.reachable.size < ids.length ? `; ${ids.length - next.reachable.size} couldn't be placed - the code may be for another class or data version` : ""}.`);
+    say(`Loaded ${next.reachable.size} abilities (${next.points} AP) from the Wynnbuilder tree code${next.reachable.size < ids.length ? `; ${ids.length - next.reachable.size} couldn't be placed - the code may be for another class or data version` : ""}.`);
   };
   const copyTree = async () => {
     const code = encodeTreeHash(playerClass, selected);
@@ -7069,6 +7431,26 @@ function AbilityTree({ playerClass, level, rank, selected, onChange, buildArchet
   const cap = abilityPointCap(level, loan);
   const pointsLeft = cap - resolved.points;
   const archetypeColor = (arch) => ARCHETYPE_COLORS[tree.archetypes.indexOf(arch)] || "#888888";
+  const suggest = (arch) => {
+    const result = suggestAbilityTree(playerClass, arch, cap);
+    const refs = result.references.length;
+    const extraRefs = result.references.filter((entry) => entry.source === "extra");
+    const refsText =
+      extraRefs.length > 0
+        ? `${extraRefs.map((entry) => entry.name).join(", ")}${refs > extraRefs.length ? ` and ${refs - extraRefs.length} guide tree${refs - extraRefs.length === 1 ? "" : "s"}` : ""}`
+        : `${refs} guide tree${refs === 1 ? "" : "s"}`;
+    const skipped = (GUIDE_TREES.excluded || {})[`${playerClass}/${arch}`];
+    const skippedCount = skipped ? skipped.outdated + skipped.invalid : 0;
+    const skippedNote = skippedCount > 0 ? ` (${skippedCount} older guide tree${skippedCount === 1 ? " was" : "s were"} skipped - reworked since)` : "";
+    const text =
+      `Suggested ${arch} tree: ${result.ids.length} abilities, ${result.points} / ${cap} AP at level ${level}. ` +
+      (refs > 0
+        ? `Weighted by ${refsText}, up to date for the ${TREE_DATA.version} tree${skippedNote}.`
+        : `No guide tree matches the ${TREE_DATA.version} ${arch} tree${skippedNote}, so it's picked from the tree data: ${arch} abilities, spells, the ultimate, cheaper spells.`);
+    onChange(result.ids);
+    setUndo({ ids: selected, message: text });
+    setMessage(text);
+  };
   const activeEdges = new Set(
     tree.edges.map((edge, index) => (resolved.reachable.has(edge.parent) && resolved.reachable.has(edge.child) ? index : -1)).filter((i) => i >= 0)
   );
@@ -7086,16 +7468,16 @@ function AbilityTree({ playerClass, level, rank, selected, onChange, buildArchet
       const remaining = resolveTree(tree, selected.filter((id) => id !== node.id));
       onChange([...remaining.reachable]);
       const lost = resolved.reachable.size - 1 - remaining.reachable.size;
-      setMessage(lost > 0 ? `Removed ${node.name} and ${lost} abilit${lost === 1 ? "y" : "ies"} that depended on it.` : `Removed ${node.name}.`);
+      say(lost > 0 ? `Removed ${node.name} and ${lost} abilit${lost === 1 ? "y" : "ies"} that depended on it.` : `Removed ${node.name}.`);
       return;
     }
     const check = canUnlock(tree, node, resolved.reachable, resolved.archetypeCount, pointsLeft);
     if (!check.ok) {
-      setMessage(`${node.name}: ${check.reason}.`);
+      say(`${node.name}: ${check.reason}.`);
       return;
     }
     onChange([...resolved.reachable, node.id]);
-    setMessage(`Unlocked ${node.name}.`);
+    say(`Unlocked ${node.name}.`);
   }
 
   const info = focused && tree.byId.get(focused.id) ? focused : null;
@@ -7113,13 +7495,13 @@ function AbilityTree({ playerClass, level, rank, selected, onChange, buildArchet
         <div className="flex flex-wrap items-center gap-2">
           <span
             className="mc-slot px-2 py-1 text-sm tabular-nums"
-            style={{ color: pointsLeft < 0 ? "#FF5555" : "#FFFFFF" }}
+            style={ts({ color: pointsLeft < 0 ? "#FF5555" : "#FFFFFF" })}
             title={cap > baseCap ? `${baseCap} AP from level ${level} + ${cap - baseCap} loaned by your rank` : `${cap} AP at level ${level}`}
           >
             {resolved.points} / {cap} AP{cap > baseCap ? ` (+${cap - baseCap} rank)` : ""}
           </span>
           {tree.archetypes.map((arch) => (
-            <span key={arch} className="mc-slot px-2 py-1 text-xs tabular-nums" style={{ color: archetypeColor(arch) }}>
+            <span key={arch} className="mc-slot px-2 py-1 text-xs tabular-nums" style={ts({ color: archetypeColor(arch) })}>
               {arch} {resolved.archetypeCount[arch] || 0}
             </span>
           ))}
@@ -7133,7 +7515,7 @@ function AbilityTree({ playerClass, level, rank, selected, onChange, buildArchet
             type="button"
             onClick={() => {
               onChange([]);
-              setMessage("Tree cleared.");
+              say("Tree cleared.");
             }}
             className="mc-btn mc-btn-sm"
           >
@@ -7165,6 +7547,30 @@ function AbilityTree({ playerClass, level, rank, selected, onChange, buildArchet
         </div>
       )}
 
+      <div className="flex flex-wrap items-center gap-2">
+        <span
+          className="text-xs text-zinc-300"
+          title={`Builds a tree for the archetype within the AP you have at level ${level}${cap > baseCap ? " (with your rank's loan)" : ""}, using only the ${TREE_DATA.version} ability trees: archetype abilities, spells, the ultimate and cheaper spells, weighted by how often up-to-date guide builds (The Ultimate Build Guide) take each ability. Guide trees made before a rework are ignored.`}
+        >
+          Suggest a tree:
+        </span>
+        {tree.archetypes.map((arch) => (
+          <button
+            key={arch}
+            type="button"
+            onClick={() => suggest(arch)}
+            className={`mc-btn mc-btn-sm ${arch === buildArchetype ? "mc-btn-on" : ""}`}
+            title={`Replace the tree with a ${arch} tree for level ${level} (${cap} AP)`}
+          >
+            <span className="mr-1.5 inline-block h-2.5 w-2.5 align-middle" style={ts({ background: archetypeColor(arch), boxShadow: "0 0 0 1px #000" })} aria-hidden="true" />
+            {arch}
+          </button>
+        ))}
+        <span className="text-xs text-zinc-500">
+          Level {level} · {cap} AP
+        </span>
+      </div>
+
       {dominant && buildArchetype && dominant[0] !== buildArchetype && (
         <div className="mc-slot flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-sm">
           <span className="text-zinc-200">
@@ -7187,7 +7593,7 @@ function AbilityTree({ playerClass, level, rank, selected, onChange, buildArchet
       )}
 
       <div className="flex flex-col gap-4 md:flex-row md:items-start">
-        <div className="mc-well atree-wrap w-full flex-shrink-0 overflow-y-auto" style={{ maxHeight: "75vh", maxWidth: "404px" }}>
+        <div className="mc-well atree-wrap w-full flex-shrink-0 overflow-y-auto" style={ts({ maxHeight: "75vh", maxWidth: "404px" })}>
           <div className="atree" role="group" aria-label={`${playerClass} ability tree`}>
             {Array.from({ length: tree.rows * 9 }, (_, index) => {
               const row = Math.floor(index / 9);
@@ -7207,42 +7613,61 @@ function AbilityTree({ playerClass, level, rank, selected, onChange, buildArchet
         </div>
 
         <div className="flex min-w-0 flex-1 flex-col gap-3 md:sticky md:top-4">
-          {message && <p className="text-sm text-amber-300" role="status">{message}</p>}
+          {message && (
+            <p className="text-sm text-amber-300" role="status">
+              {message}
+              {undo && undo.message === message && (
+                <>
+                  {" "}
+                  <button
+                    type="button"
+                    className="mc-link"
+                    onClick={() => {
+                      onChange(undo.ids);
+                      say("Previous tree restored.");
+                    }}
+                  >
+                    Undo
+                  </button>
+                </>
+              )}
+            </p>
+          )}
           {info ? (
-            <div className="flex flex-col gap-2 rounded border-2 p-3 text-sm" style={{ borderColor: nodeColor(info), background: "#1D1329", fontFamily: PIXEL_FONT }}>
+            <div className="flex flex-col gap-2 rounded border-2 p-3 text-sm" style={ts({ borderColor: nodeColor(info), background: "#1D1329", fontFamily: PIXEL_FONT })}>
               <div className="flex flex-wrap items-baseline justify-between gap-2">
-                <h3 className="text-lg" style={{ color: nodeColor(info) }}>
+                <h3 className="text-lg" style={ts({ color: nodeColor(info) })}>
                   {info.name}
                 </h3>
-                <span className="text-xs" style={{ color: TOOLTIP.muted }}>
+                <span className="text-xs" style={ts({ color: TOOLTIP.muted })}>
                   {TREE_NODE_TYPES[info.icon] || "Spell"} · {info.cost} AP
                 </span>
               </div>
               {info.arch && (
-                <p className="text-xs" style={{ color: archetypeColor(info.arch) }}>
+                <p className="text-xs" style={ts({ color: archetypeColor(info.arch) })}>
                   {info.arch} archetype
                 </p>
               )}
-              <div className="flex flex-col gap-1 leading-snug" style={{ color: TOOLTIP.muted }}>
+              <div className="flex flex-col gap-1 leading-snug" style={ts({ color: TOOLTIP.muted })}>
                 {renderDescription(info.desc)}
               </div>
               <div className="flex flex-col gap-0.5 border-t border-zinc-800 pt-2 text-xs">
                 {info.archReq > 0 && (
-                  <span style={{ color: (resolved.archetypeCount[info.arch] || 0) >= info.archReq ? TOOLTIP.good : TOOLTIP.bad }}>
+                  <span style={ts({ color: (resolved.archetypeCount[info.arch] || 0) >= info.archReq ? TOOLTIP.good : TOOLTIP.bad })}>
                     Min {info.arch} Archetype: {resolved.archetypeCount[info.arch] || 0}/{info.archReq}
                   </span>
                 )}
                 {info.deps.map((id) => (
-                  <span key={id} style={{ color: resolved.reachable.has(id) ? TOOLTIP.good : TOOLTIP.bad }}>
+                  <span key={id} style={ts({ color: resolved.reachable.has(id) ? TOOLTIP.good : TOOLTIP.bad })}>
                     Required Ability: {tree.byId.get(id).name}
                   </span>
                 ))}
                 {[...tree.exclusive.get(info.id)].map((id) => (
-                  <span key={id} style={{ color: resolved.reachable.has(id) ? TOOLTIP.bad : TOOLTIP.muted }}>
+                  <span key={id} style={ts({ color: resolved.reachable.has(id) ? TOOLTIP.bad : TOOLTIP.muted })}>
                     Unlocking blocks: {tree.byId.get(id).name}
                   </span>
                 ))}
-                <span style={{ color: resolved.reachable.has(info.id) ? TOOLTIP.good : infoCheck && infoCheck.ok ? "#FFAA00" : TOOLTIP.muted }}>
+                <span style={ts({ color: resolved.reachable.has(info.id) ? TOOLTIP.good : infoCheck && infoCheck.ok ? "#FFAA00" : TOOLTIP.muted })}>
                   {resolved.reachable.has(info.id) ? "Unlocked" : infoCheck && infoCheck.ok ? "Can be unlocked" : `Locked: ${infoCheck ? infoCheck.reason : ""}`}
                 </span>
               </div>
@@ -7257,17 +7682,18 @@ function AbilityTree({ playerClass, level, rank, selected, onChange, buildArchet
           ) : (
             <p className="text-sm text-zinc-500">Hover or tap an ability to see what it does and what it needs.</p>
           )}
+          {/* legenda opisuje kolory sprite'ów, które są takie same w obu motywach - bez ts() */}
           <ul className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-400">
             <li className="flex items-center gap-1">
-              <span className="h-3 w-3 rounded-sm" style={{ background: SPELL_NODE_COLOR }} /> Spell
+              <span className="h-3 w-3 rounded-sm" style={{ background: SPELL_NODE_COLOR, boxShadow: "0 0 0 1px #000" }} /> Spell
             </li>
             {Object.entries(TREE_NODE_TYPES).map(([icon, label]) => (
               <li key={icon} className="flex items-center gap-1">
-                <span className="h-3 w-3 rounded-full" style={{ background: TREE_NODE_COLORS[icon] }} /> {label}
+                <span className="h-3 w-3 rounded-full" style={{ background: TREE_NODE_COLORS[icon], boxShadow: "0 0 0 1px #000" }} /> {label}
               </li>
             ))}
             <li className="flex items-center gap-1">
-              <span className="h-3 w-3 rounded-full border-2" style={{ borderColor: "#4FE3F0" }} /> Unlocked
+              <span className="h-3 w-3 rounded-full border-2" style={{ borderColor: "#4FE3F0", boxShadow: "0 0 0 1px #000" }} /> Unlocked
             </li>
             <li className="flex items-center gap-1">
               <span className="h-3 w-3 rounded-full" style={{ background: "#555", opacity: 0.7 }} /> Not reachable yet
@@ -7701,7 +8127,7 @@ function SolverPanel({ solver, onChange, level, result, running, onSolve, onShow
     const value = target.pick(candidate.summary);
     const check = candidate.checks.find((entry) => entry.id === target.id);
     return (
-      <span key={target.id} title={target.label} style={{ color: check ? (check.ok ? "#55FF55" : "#FF5555") : target.color }}>
+      <span key={target.id} title={target.label} style={ts({ color: check ? (check.ok ? "#55FF55" : "#FF5555") : target.color })}>
         {target.label.replace(" (100%)", "")} {formatNumber(Math.round(value))}
         {target.unit}
       </span>
@@ -7725,7 +8151,7 @@ function SolverPanel({ solver, onChange, level, result, running, onSolve, onShow
         {SLOTS.map((slot) => {
           const item = candidate.items[slot.id] ? ITEM_BY_NAME.get(candidate.items[slot.id]) : null;
           return (
-            <span key={slot.id} style={{ color: item ? RARITY_COLORS[item.tier] || RARITY_COLORS.Normal : "#666" }}>
+            <span key={slot.id} style={ts({ color: item ? RARITY_COLORS[item.tier] || RARITY_COLORS.Normal : "#666" })}>
               {item ? item.name : `(no ${slot.label.toLowerCase()})`}
             </span>
           );
@@ -7787,7 +8213,7 @@ function SolverPanel({ solver, onChange, level, result, running, onSolve, onShow
           <legend className="mb-2 text-xs text-zinc-300">Targets (minimum)</legend>
           <div className="grid grid-cols-2 gap-2">
             {SOLVER_TARGETS.map((target) => (
-              <label key={target.id} className="flex flex-col gap-1 text-xs" style={{ color: target.color }}>
+              <label key={target.id} className="flex flex-col gap-1 text-xs" style={ts({ color: target.color })}>
                 {target.label}
                 {target.unit ? ` (${target.unit})` : ""}
                 <input
@@ -7817,7 +8243,7 @@ function SolverPanel({ solver, onChange, level, result, running, onSolve, onShow
             {SOLVER_PRIORITIES.map((priority) => (
               <div key={priority.id} className="flex flex-col gap-1">
                 <div className="flex items-baseline justify-between text-xs">
-                  <label htmlFor={`solver-${priority.id}`} style={{ color: priority.color }} title={priority.hint}>
+                  <label htmlFor={`solver-${priority.id}`} style={ts({ color: priority.color })} title={priority.hint}>
                     {priority.label}
                   </label>
                   <span className="tabular-nums text-zinc-200">{solver.priorities[priority.id] ?? 0}%</span>
@@ -7992,6 +8418,20 @@ function NeedsPick({ what, why, onGenerate = null }) {
 }
 
 export default function BuildRecommender() {
+  const [theme, setTheme] = useState(loadSavedTheme);
+  THEME = theme; // style inline całego drzewa (ts/tc) czytają motyw w tym samym renderze
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+    } catch (error) {
+      // brak localStorage (tryb prywatny, ramka) - motyw tylko na tę sesję
+    }
+    const root = document.documentElement;
+    root.dataset.theme = theme;
+    root.style.colorScheme = theme;
+    root.style.background = theme === "light" ? "#D9D6DF" : "";
+    document.body.style.background = theme === "light" ? "#D9D6DF" : "";
+  }, [theme]);
   const [savedRank] = useState(loadSavedRank);
   const [rank, setRank] = useState(savedRank || "none");
   const [rankConfirmed, setRankConfirmed] = useState(Boolean(savedRank));
@@ -8188,15 +8628,16 @@ export default function BuildRecommender() {
   }
 
   return (
-    <div className="wbr-mc min-h-screen px-4 py-6 sm:px-6">
+    <div className="wbr-mc min-h-screen px-4 py-6 sm:px-6" data-theme={theme}>
       <style>{MC_STYLES}</style>
       <div className="mx-auto flex max-w-[1720px] flex-col gap-6">
-        <header className="mc-hr-bottom flex flex-wrap items-end justify-between gap-3 pb-4">
-          <div>
+        <header className="mc-hr-bottom relative flex flex-wrap items-end justify-between gap-3 pb-4">
+          <div className="pt-10 sm:pt-0">
             <p className="mc-gold text-sm uppercase">Wynncraft</p>
             <h1 className="text-3xl text-white">Build Recommender</h1>
           </div>
-          <p className="max-w-md text-sm text-zinc-400">
+          <ThemeToggle theme={theme} onChange={setTheme} className="absolute right-0 top-0" />
+          <p className="max-w-md text-sm text-zinc-400 sm:pt-12">
             Picks the strongest 9-piece loadout for your level, class and ability-tree archetype, checked against your skill point budget.
           </p>
         </header>
@@ -8323,7 +8764,7 @@ export default function BuildRecommender() {
                 type="button"
                 onClick={handleGenerate}
                 className="mc-btn mc-btn-primary w-full py-3 text-lg"
-                style={ready ? undefined : { opacity: 0.55 }}
+                style={ts(ready ? undefined : { opacity: 0.55 })}
                 title={ready ? undefined : "Type your level and choose a class and archetype first"}
               >
                 Generate Build
@@ -8535,7 +8976,7 @@ export default function BuildRecommender() {
                     {build.cost && (
                       <span
                         title={`Trade Market prices (WynnVentory). Pinned items aren't counted.${build.cost.unknown.length > 0 ? ` No market price: ${build.cost.unknown.join(", ")}.` : ""}`}
-                        style={{ color: build.cost.budget && build.cost.total > build.cost.budget ? "#FF5555" : undefined }}
+                        style={ts({ color: build.cost.budget && build.cost.total > build.cost.budget ? "#FF5555" : undefined })}
                       >
                         {" "}
                         · cost <span className="tabular-nums text-zinc-200">≈ {formatEmeralds(build.cost.total)}</span>
