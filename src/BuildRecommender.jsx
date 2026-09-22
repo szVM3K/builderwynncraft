@@ -328,6 +328,7 @@ const DEFAULT_OPTIONS = {
   excludedTiers: [], // rzadkości wyłączone z puli (np. ["Mythic"] = tańszy build); przypięte przedmioty zostają
   budget: null, // maksymalny koszt zestawu w emeraldach (ceny z Trade Marketu); null = bez limitu
   budgetUnit: "le", // jednostka pola budżetu: e | eb | le | stx
+  onlyListed: false, // tylko przedmioty wystawione dziś na Trade Markecie (przypięte zostają, gracz je ma)
   powders: "auto", // powdery broni w wyniku i obrażeniach: auto (żywioł focusu) | earth..air | none
   scoring: { weights: {}, tuning: {} }, // zakładka "Score calculation": własne wagi statystyk i stałe wyniku
 };
@@ -515,6 +516,7 @@ function normalizeOptions(options = DEFAULT_OPTIONS) {
     excludedTiers: ITEM_TIERS.filter((tier) => (options.excludedTiers || []).includes(tier)),
     budget: Number(options.budget) > 0 ? Math.round(Number(options.budget)) : null,
     budgetUnit: EMERALD_UNITS.some((unit) => unit.id === options.budgetUnit) ? options.budgetUnit : "le",
+    onlyListed: options.onlyListed === true,
     powders: options.powders === "none" || ["earth", "thunder", "water", "fire", "air"].includes(options.powders) ? options.powders : "auto",
     scoring: normalizeScoring(options.scoring),
   };
@@ -1621,6 +1623,8 @@ function generateOptimizedBuild(level, playerClass, archetype, allItems = ITEM_D
   // Budżet (ceny z Trade Marketu): przypięte przedmioty się nie liczą (gracz je ma).
   profile.budget = hasPriceData() && profile.options.budget > 0 ? profile.options.budget : null;
   profile.budgetFree = lockedNames;
+  // "Only items on the market": tylko przedmioty wystawione dziś (snapshot WynnVentory); przypięte zostają.
+  profile.onlyListed = hasLiveData() && profile.options.onlyListed;
   profile.playerLevel = playerLevel;
   const levelWindow = LEVEL_WINDOWS.find((entry) => entry.id === profile.options.levelWindow) || LEVEL_WINDOWS[0];
   const minLevel = levelWindow.strict ? playerLevel - levelWindow.window : -Infinity;
@@ -1634,6 +1638,7 @@ function generateOptimizedBuild(level, playerClass, archetype, allItems = ITEM_D
     if (excludedNames.has(item.name) && !lockedNames.has(item.name)) return false;
     if (excludedTiers.has(item.tier) && !lockedNames.has(item.name)) return false;
     if (profile.budget && !lockedNames.has(item.name) && !withinBudget(item, profile.budget)) return false;
+    if (profile.onlyListed && !lockedNames.has(item.name) && marketStatus(item).state !== "listed") return false;
     if (item.category !== "weapon") return true;
     return item.type === classConfig.weapon && (attackSpeeds.length === 0 || attackSpeeds.includes(item.atkSpd));
   });
@@ -1762,6 +1767,18 @@ function generateOptimizedBuild(level, playerClass, archetype, allItems = ITEM_D
 
   const totals = itemStatTotals(Object.values(best.picks).filter(Boolean).map((pick) => pick.item));
   const finalSp = computeSkillPoints(Object.values(best.picks).filter(Boolean).map((pick) => pick.item), true);
+  const marketWarnings = [];
+  if (profile.onlyListed) {
+    const shown = new Set();
+    SLOTS.forEach((slot) => {
+      if (best.picks[slot.id] || shown.has(slot.type)) return;
+      const fits = (item) => (slot.type === "weapon" ? item.category === "weapon" : item.type === slot.type);
+      if (eligible.some(fits)) return;
+      shown.add(slot.type);
+      const label = slot.type === "weapon" ? classConfig.weapon : slot.type;
+      marketWarnings.push(`Nothing listed on the Trade Market today fits the ${label} slot (up to level ${playerLevel}), so it stays empty.`);
+    });
+  }
 
   return {
     level: playerLevel,
@@ -1770,7 +1787,11 @@ function generateOptimizedBuild(level, playerClass, archetype, allItems = ITEM_D
     options: profile.options,
     profile: finalProfile,
     mainAttack: finalProfile.meleeBlend > 0 ? { dps: best.meleeDps, weight: finalProfile.meleeModelWeight * finalProfile.meleeBlend, blend: finalProfile.meleeBlend } : null,
-    warnings: best.overflow > 0 ? [...warnings, best.costOverflow > 0 ? "No build fits the budget with these settings; the closest one is shown." : "The pinned items need more skill points than this level gives."] : warnings,
+    warnings: [
+      ...warnings,
+      ...marketWarnings,
+      ...(best.overflow > 0 ? [best.costOverflow > 0 ? "No build fits the budget with these settings; the closest one is shown." : "The pinned items need more skill points than this level gives."] : []),
+    ],
     cost: hasPriceData() ? { ...buildCost(Object.values(best.picks).filter(Boolean).map((pick) => pick.item), lockedNames), budget: profile.budget } : null,
     lockedSlots: [...lockedSlots],
     score: finalValue(best, available),
@@ -3106,6 +3127,7 @@ function slotAlternatives(build, slotId, limit = 20, candidates = null) {
     ITEM_DB.filter((item) => {
       if (item.level > build.level || item.level < minLevel || excluded.includes(item.name)) return false;
       if (excludedTiers.includes(item.tier)) return false;
+      if (build.options.onlyListed && hasLiveData() && marketStatus(item).state !== "listed") return false;
       if (slot.type !== "weapon") return item.type === slot.type;
       return item.type === classConfig.weapon && (attackSpeeds.length === 0 || attackSpeeds.includes(item.atkSpd));
     });
@@ -3377,7 +3399,7 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
   const [types, setTypes] = useState(slot ? [slot.type] : []);
   const [elements, setElements] = useState([]);
   const [tiers, setTiers] = useState([]);
-  const [onlyListed, setOnlyListed] = useState(false);
+  const [onlyListed, setOnlyListed] = useState(normalized.onlyListed && hasLiveData());
   const [speeds, setSpeeds] = useState([]);
   const [levelMin, setLevelMin] = useState("");
   const [levelMax, setLevelMax] = useState("");
@@ -5319,6 +5341,7 @@ function describeOptions(rawOptions) {
   });
   if (options.levelWindow !== "prefer10") parts.push(LEVEL_WINDOWS.find((entry) => entry.id === options.levelWindow).label.toLowerCase());
   if (options.excludedTiers.length > 0) parts.push(`no ${options.excludedTiers.join("/")} items`);
+  if (options.onlyListed && hasLiveData()) parts.push("only items on the market");
   const overrides = Object.keys(options.scoring.weights).length + Object.keys(options.scoring.tuning).length;
   if (overrides > 0) parts.push(`${overrides} custom score weight${overrides === 1 ? "" : "s"}`);
   if (!options.preferGuideItems) parts.push("guide items not preferred");
@@ -5571,6 +5594,35 @@ function BudgetInput({ options, onChange }) {
       </div>
       <p className="text-xs text-zinc-500" title={info}>
         {!prices ? "No price data yet." : normalized.budget ? `Max ${formatEmeralds(normalized.budget)}.` : "Trade Market prices."}
+      </p>
+      <OnlyListedCheckbox options={options} onChange={onChange} />
+    </div>
+  );
+}
+
+// Checkbox pod budżetem: build tylko z przedmiotów wystawionych dziś na Trade Markecie.
+function OnlyListedCheckbox({ options, onChange }) {
+  const live = hasLiveData();
+  const checked = live && normalizeOptions(options).onlyListed;
+  const count = live ? Object.values(LIVE_ITEMS).filter((entry) => entry && entry.n > 0).length : 0;
+  const info = live
+    ? `Only items listed on the Trade Market today (${count.toLocaleString("en-US")} items, WynnVentory snapshot ${formatClock(PRICE_DATA.liveAt)}). Pinned items stay (you have them); untradable and quest items are skipped; a slot with nothing listed stays empty. Listings can sell in the meantime.`
+    : "No Trade Market listings in this copy of the site. The GitHub Pages version fetches them from WynnVentory when the repository has a WYNNVENTORY_KEY secret (see the README).";
+  return (
+    <div className="flex flex-col gap-1">
+      <label htmlFor="only-listed" className="flex items-center gap-2 text-xs text-zinc-200" title={info} style={live ? undefined : { opacity: 0.5 }}>
+        <input
+          id="only-listed"
+          type="checkbox"
+          checked={checked}
+          disabled={!live}
+          onChange={() => onChange({ ...options, onlyListed: !checked })}
+          className="mc-check"
+        />
+        Only items on the market
+      </label>
+      <p className="text-xs text-zinc-500" title={info}>
+        {!live ? "No market data yet." : checked ? "Listed today only." : "Any item."}
       </p>
     </div>
   );

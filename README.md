@@ -74,6 +74,9 @@ field is disabled and everything else works as before.
 - **Trade Market availability**: the dot next to the slot name (● N on market / ○ not on market) says whether the
   item was listed on the Trade Market today; the expanded card shows the listing count and the lowest price, and
   the item browser has a **● Listed today** filter. Needs the `WYNNVENTORY_KEY` secret like the prices.
+- **Only items on the market** (checkbox under Budget): the build uses only items listed on the Trade Market today.
+  Pinned items stay (you have them), untradable and quest items are skipped, and a slot with nothing listed stays
+  empty (with a note above the build). Other picks and the item browser start with the same filter.
 - **Build around an item**: type a name in Custom stats (weapons of the class, armour, accessories up to your level)
   and pick it – the item is pinned to its slot and the rest of the build is fitted around it. This is how most
   builds start in practice (you have the weapon, you need the gear).
