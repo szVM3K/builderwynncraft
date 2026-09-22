@@ -2,13 +2,14 @@
 @tailwind components;
 @tailwind utilities;
 
-/* VCR OSD Mono (Riciery Leal / MrManet, freeware) - czcionka calego interfejsu; tooltipy kart tez. */
+/* "Minecraft" (Pwnage_Block, FontStruct, CC BY-SA 3.0) - czcionka calego interfejsu, jak w grze; znaki spoza
+   niej (·, –, ✓…) biora sie z Pixelify Sans (OFL). */
 @font-face {
-  font-family: "VCR OSD Mono";
+  font-family: "WBR Minecraft";
   font-style: normal;
   font-weight: 400;
   font-display: swap;
-  src: url("./fonts/VCR_OSD_MONO.woff2") format("woff2");
+  src: url("./fonts/minecraft.woff2") format("woff2");
 }
 
 html,

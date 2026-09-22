@@ -1081,6 +1081,11 @@ function eventOf(item) {
   return (item && EVENT_ITEM_NAMES.get(item.name)) || null;
 }
 
+// Ujemna obrona żywiołu w statystykach bazowych przedmiotu (np. -80 Water Defence).
+function hasNegativeDefence(item) {
+  return ELEMENTS.some((element) => (item.base && item.base[`${element.charAt(0)}Def`]) < 0);
+}
+
 function isUntradable(item) {
   const restrict = item.source && item.source.restrict;
   return restrict === "untradable" || restrict === "quest_item";
@@ -1127,6 +1132,7 @@ function marketTitle() {
 }
 // Mały znacznik "na rynku": zielona kropka = wystawiony dziś, szara = brak ofert.
 function MarketDot({ item, withText = true }) {
+  const ts = useTs();
   if (!hasLiveData()) return null;
   const status = marketStatus(item);
   if (status.state === "untradable") return null;
@@ -2042,6 +2048,8 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
     if (excluded.has(item.name) || excludedTiers.has(item.tier)) return false;
     if (excludeEvents && eventOf(item)) return false;
     if (tradeableOnly && isUntradable(item)) return false;
+    if (normalized.avoidNegativeDefences && hasNegativeDefence(item)) return false;
+    if (item.category === "weapon" && normalized.attackSpeeds.length > 0 && !normalized.attackSpeeds.includes(item.atkSpd)) return false;
     if (budget && !withinBudget(item, budget)) return false;
     if (onlyListed && marketStatus(item).state !== "listed") return false;
     if (item.category !== "weapon") return true;
@@ -2068,6 +2076,8 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
       !excludedTiers.has(item.tier) &&
       !(excludeEvents && eventOf(item) && !(normalized.locked && normalized.locked[slotId] === item.name)) &&
       !(tradeableOnly && isUntradable(item) && !(normalized.locked && normalized.locked[slotId] === item.name)) &&
+      !(normalized.avoidNegativeDefences && hasNegativeDefence(item) && !(normalized.locked && normalized.locked[slotId] === item.name)) &&
+      !(slotId === "weapon" && normalized.attackSpeeds.length > 0 && !normalized.attackSpeeds.includes(item.atkSpd) && !(normalized.locked && normalized.locked.weapon === item.name)) &&
       (!budget || withinBudget(item, budget)) &&
       (!onlyListed || marketStatus(item).state === "listed");
     (GUIDE_DATA.builds || [])
@@ -2775,14 +2785,36 @@ function themeCss(value) {
       return alpha ? `rgba(${r2},${g2},${b2}${alpha})` : `rgb(${r2},${g2},${b2})`;
     });
 }
+// Obrys tekstu w jasnym motywie: biały tekst z gry (Air, Agility, zwykłe przedmioty) po przyciemnieniu robił się
+// czarny, więc zostaje biały z ciemnym obrysem 1 px - jak w grze. Pozostałe kolory (żółty, turkus, zielony…)
+// są przyciemniane, bo z obrysem na jasnym tle zlewały się przy małej czcionce.
+const LIGHT_TEXT_OUTLINE = "-1px -1px 0 #1B1822,0 -1px 0 #1B1822,1px -1px 0 #1B1822,-1px 0 0 #1B1822,1px 0 0 #1B1822,-1px 1px 0 #1B1822,0 1px 0 #1B1822,1px 1px 0 #1B1822";
+function isBrightColor(value) {
+  if (typeof value !== "string" || value[0] !== "#" || (value.length !== 7 && value.length !== 9)) return false;
+  const [r, g, b] = hexToRgb(value.slice(0, 7));
+  return Math.min(r, g, b) >= 250;
+}
 // Obiekt stylu inline dla bieżącego motywu (wszystkie komponenty przepuszczają przez to swoje style).
 function ts(style) {
   if (THEME !== "light" || !style || typeof style !== "object") return style;
   const out = {};
   Object.keys(style).forEach((key) => {
+    if (key === "color" && isBrightColor(style.color)) {
+      out.color = style.color;
+      if (!("textShadow" in style)) out.textShadow = LIGHT_TEXT_OUTLINE;
+      return;
+    }
     out[key] = themeCss(style[key]);
   });
   return out;
+}
+
+// Karty przedmiotów to "tooltipy z gry": w obu motywach zostają ciemne (granatowe tło, jasny tekst, jasna ramka
+// rzadkości). Komponenty rysowane w karcie biorą styl przez useTs(): w kontekście karty to styl bez zmian.
+const GameCardContext = React.createContext(false);
+const keepStyle = (style) => style;
+function useTs() {
+  return React.useContext(GameCardContext) ? keepStyle : ts;
 }
 
 const RARITY_COLORS = {
@@ -2866,9 +2898,12 @@ function StatLine({ statKey, value }) {
 // KARTY PRZEDMIOTÓW W STYLU TOOLTIPA Z GRY
 // Ikonki to własne pikselowe placeholdery 16x16 (nie tekstury z gry). Znaki w siatce:
 // o obrys, m/l/d kolor główny/jasny/ciemny, g/G klejnot, y/Y złoto, w/W drewno, x cięciwa.
-const PIXEL_FONT = '"VCR OSD Mono", "Tiny5", ui-monospace, SFMono-Regular, Menlo, monospace';
-// STYL GUI Z GRY: czcionka VCR OSD Mono (freeware, Riciery Leal) w całym interfejsie i na kartach (znaki spoza niej,
-// np. ✓ × →, biorą się z czcionek zapasowych); małe rozmiary mają obrys 1 px, większe 2 px; panele i przyciski ze skosem (bevel) jak w
+// Czcionka "Minecraft" (Pwnage_Block, FontStruct, CC BY-SA 3.0): ta sama co w grze, proporcjonalna, z wyraźnymi
+// cyframi (5 ≠ S, 3 ≠ 8). Ma tylko ASCII, więc znaki spoza niej (·, –, ✓, ×…) biorą się z Pixelify Sans (OFL).
+// Pogrubienie jest syntetyczne - wygląda jak pogrubiony tekst w grze (litera przesunięta o 1 piksel).
+const PIXEL_FONT = '"WBR Minecraft", "Pixelify Sans", ui-sans-serif, system-ui, sans-serif';
+// STYL GUI Z GRY: czcionka Minecraft w całym interfejsie i na kartach (znaki spoza niej, np. ✓ × →, biorą się
+// z czcionek zapasowych); małe rozmiary mają obrys 1 px, większe 2 px; panele i przyciski ze skosem (bevel) jak w
 // menu Wynncrafta, złote tytuły, paski jak XP bar, pola tekstowe czarne z szarą ramką. Karty przedmiotów (article)
 // mają własny styl tooltipa z gry i nie dostają cienia tekstu.
 const MC_BG_PATTERN =
@@ -2903,23 +2938,29 @@ const ATREE_CONNECTOR_POS = {
 const ATREE_DIRS = ["left", "right", "up", "down"];
 
 const MC_STYLES = `
-.wbr-mc{font-family:${PIXEL_FONT};color:#E8E8E8;background:#0c0a10 ${MC_BG_PATTERN};text-shadow:-2px -2px 0 #000,-2px -1px 0 #000,-2px 0px 0 #000,-2px 1px 0 #000,-2px 2px 0 #000,-1px -2px 0 #000,-1px -1px 0 #000,-1px 0px 0 #000,-1px 1px 0 #000,-1px 2px 0 #000,0px -2px 0 #000,0px -1px 0 #000,0px 1px 0 #000,0px 2px 0 #000,1px -2px 0 #000,1px -1px 0 #000,1px 0px 0 #000,1px 1px 0 #000,1px 2px 0 #000,2px -2px 0 #000,2px -1px 0 #000,2px 0px 0 #000,2px 1px 0 #000,2px 2px 0 #000}
+.wbr-mc{font-family:${PIXEL_FONT};color:#E8E8E8;background:#0c0a10 ${MC_BG_PATTERN};text-shadow:2px 2px 0 rgba(0,0,0,.85)};color:#E8E8E8;background:#0c0a10 ${MC_BG_PATTERN};text-shadow:-2px -2px 0 #000,-2px -1px 0 #000,-2px 0px 0 #000,-2px 1px 0 #000,-2px 2px 0 #000,-1px -2px 0 #000,-1px -1px 0 #000,-1px 0px 0 #000,-1px 1px 0 #000,-1px 2px 0 #000,0px -2px 0 #000,0px -1px 0 #000,0px 1px 0 #000,0px 2px 0 #000,1px -2px 0 #000,1px -1px 0 #000,1px 0px 0 #000,1px 1px 0 #000,1px 2px 0 #000,2px -2px 0 #000,2px -1px 0 #000,2px 0px 0 #000,2px 1px 0 #000,2px 2px 0 #000}
 .wbr-mc article,.wbr-mc article *{text-shadow:none}
-.wbr-mc .text-xs,.wbr-mc .text-sm{text-shadow:-1px -1px 0 #000,0 -1px 0 #000,1px -1px 0 #000,-1px 0 0 #000,1px 0 0 #000,-1px 1px 0 #000,0 1px 0 #000,1px 1px 0 #000}
-.wbr-mc .text-xs{font-size:14px;line-height:1.3}
-.wbr-mc .text-sm{font-size:15px;line-height:1.4}
-.wbr-mc .text-base{font-size:17px;line-height:1.35}
-.wbr-mc .text-lg{font-size:20px;line-height:1.3}
-.wbr-mc .text-xl{font-size:23px;line-height:1.25}
-.wbr-mc .text-3xl{font-size:34px;line-height:1.1}
-.wbr-mc article .text-xs{font-size:13px;line-height:1.3}
-.wbr-mc article .text-sm{font-size:14px;line-height:1.35}
-.wbr-mc article .text-base{font-size:16px;line-height:1.3}
-.wbr-mc article .text-lg{font-size:19px;line-height:1.25}
-.wbr-mc article .text-xl{font-size:22px;line-height:1.2}
+.wbr-mc .text-xs,.wbr-mc .text-sm{text-shadow:1px 1px 0 rgba(0,0,0,.9)}
+.wbr-mc{font-size:16px}
+.wbr-mc .text-xs{font-size:13px;line-height:1.4}
+.wbr-mc .text-sm{font-size:14px;line-height:1.45}
+.wbr-mc .text-base{font-size:16px;line-height:1.4}
+.wbr-mc .text-lg{font-size:18px;line-height:1.3}
+.wbr-mc .text-xl{font-size:20px;line-height:1.25}
+.wbr-mc .text-2xl{font-size:24px;line-height:1.2}
+.wbr-mc .text-3xl{font-size:32px;line-height:1.1}
+.wbr-mc article .text-xs{font-size:13px;line-height:1.35}
+.wbr-mc article .text-sm{font-size:14px;line-height:1.4}
+.wbr-mc article .text-base{font-size:16px;line-height:1.35}
+.wbr-mc article .text-lg{font-size:18px;line-height:1.25}
+.wbr-mc article .text-xl{font-size:20px;line-height:1.2}
 .wbr-mc article .text-3xl{font-size:32px;line-height:1}
 .wbr-mc .font-mono{font-family:inherit}
-.wbr-mc .font-bold,.wbr-mc .font-semibold{font-weight:400}
+.wbr-mc .font-semibold{font-weight:600}
+.wbr-mc .font-bold{font-weight:700}
+.wbr-mc .mc-title,.wbr-mc h1,.wbr-mc h2,.wbr-mc h3{font-weight:700}
+.wbr-mc .mc-btn{font-weight:600}
+.wbr-mc .tabular-nums{font-variant-numeric:tabular-nums}
 .wbr-mc .text-zinc-50,.wbr-mc .text-zinc-100{color:#fff}
 .wbr-mc .text-zinc-200,.wbr-mc .text-zinc-300{color:#e0e0e0}
 .wbr-mc .text-zinc-400{color:#aaa}
@@ -2971,6 +3012,97 @@ select.mc-input option{background:#000;color:#fff}
 @keyframes wbr-fade{from{opacity:.2;transform:translateY(6px)}to{opacity:1;transform:none}}
 .wbr-fade{animation:wbr-fade .35s ease-out}
 @media (prefers-reduced-motion:reduce){.wbr-fade{animation:none}}
+@keyframes wbr-drop{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
+.wbr-drop{animation:wbr-drop .18s ease-out;transform-origin:top}
+@keyframes wbr-backdrop{from{background:rgba(4,3,8,0);backdrop-filter:blur(0)}to{background:rgba(4,3,8,.72);backdrop-filter:blur(3px)}}
+.wbr-backdrop{background:rgba(4,3,8,.72);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);animation:wbr-backdrop .2s ease-out}
+@keyframes wbr-pop{0%{opacity:0;transform:translateY(14px) scale(.96)}70%{opacity:1;transform:translateY(-2px) scale(1.005)}100%{transform:none}}
+.wbr-pop{animation:wbr-pop .26s cubic-bezier(.2,.9,.3,1.2);box-shadow:inset 2px 2px 0 #4a4556,inset -2px -2px 0 #0b0a0e}
+.wbr-mc[data-theme=light] .wbr-backdrop{background:rgba(40,34,52,.55)}
+@keyframes wbr-shine{0%{background-position:-160% 0}60%,100%{background-position:260% 0}}
+@keyframes wbr-bob{0%,100%{transform:translateY(0)}50%{transform:translateY(-3px)}}
+@keyframes wbr-float{0%{transform:translateY(0)}100%{transform:translateY(-48px)}}
+.wbr-hero{position:relative;overflow:hidden;border:3px solid #000;background:radial-gradient(120% 140% at 0% 0%,#4b2a7a 0%,rgba(75,42,122,0) 55%),radial-gradient(90% 160% at 100% 100%,#0f5a5a 0%,rgba(15,90,90,0) 60%),linear-gradient(135deg,#1b1030 0%,#231540 45%,#0d1f2e 100%);box-shadow:inset 3px 3px 0 rgba(255,255,255,.14),inset -3px -3px 0 rgba(0,0,0,.55),0 4px 0 rgba(0,0,0,.35);clip-path:polygon(3px 0,calc(100% - 3px) 0,100% 3px,100% calc(100% - 3px),calc(100% - 3px) 100%,3px 100%,0 calc(100% - 3px),0 3px)}
+.wbr-hero::before{content:"";position:absolute;inset:0;pointer-events:none;background-image:linear-gradient(rgba(255,255,255,.035) 2px,transparent 2px),linear-gradient(90deg,rgba(255,255,255,.035) 2px,transparent 2px);background-size:16px 16px}
+.wbr-hero::after{content:"";position:absolute;inset:auto 0 0 0;height:4px;background:linear-gradient(90deg,#2DBE2D 0 20%,#FFFF55 20% 40%,#55FFFF 40% 60%,#FF5555 60% 80%,#FFFFFF 80% 100%);opacity:.85}
+.wbr-hero-inner{position:relative;z-index:1;padding:14px 18px 18px}
+.wbr-hero-portraits{align-items:flex-end;gap:2px;padding:6px 8px 4px;background:rgba(0,0,0,.35);border:2px solid #000;box-shadow:inset 2px 2px 0 rgba(255,255,255,.08)}
+.wbr-hero-portraits img{image-rendering:pixelated;filter:drop-shadow(2px 2px 0 rgba(0,0,0,.6));animation:wbr-bob 2.4s ease-in-out infinite}
+.wbr-hero-kicker{font-size:16px;font-weight:700;letter-spacing:.3em;text-transform:uppercase;line-height:1;color:#FFAA00;background:linear-gradient(100deg,#FFAA00 0%,#FFAA00 40%,#FFF8C8 50%,#FFAA00 60%,#FFAA00 100%);background-size:250% 100%;-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;animation:wbr-shine 4.5s ease-in-out infinite;text-shadow:none;filter:drop-shadow(2px 2px 0 #3a1f00)}
+.wbr-hero-title{font-size:40px;font-weight:700;line-height:1;letter-spacing:.01em;color:#fff;text-shadow:3px 3px 0 #3F3F00,-2px -2px 0 #000,2px -2px 0 #000,-2px 2px 0 #000,2px 2px 0 #000,0 0 18px rgba(255,210,90,.35)!important}
+.wbr-hero-title{background:linear-gradient(180deg,#FFFFFF 0%,#FFFFFF 45%,#FFE58A 55%,#FFBB33 100%);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;text-shadow:none!important;filter:drop-shadow(3px 3px 0 #2a1600) drop-shadow(0 0 1px #000) drop-shadow(0 0 10px rgba(255,190,60,.35))}
+.wbr-hero-sub{font-size:14px;color:#D7D2E6;text-shadow:1px 1px 0 #000!important;max-width:44rem}
+.wbr-hero-chip{font-size:13px;font-weight:600;line-height:1;padding:4px 7px;color:#E9E6F5;background:rgba(0,0,0,.45);border:2px solid #000;box-shadow:inset 1px 1px 0 rgba(255,255,255,.12);text-shadow:1px 1px 0 #000!important}
+.wbr-hero-chip-gold{color:#FFAA00}
+@media (max-width:640px){.wbr-hero-title{font-size:30px}.wbr-hero-kicker{font-size:13px}.wbr-hero-inner{padding:12px 14px 16px}}
+.wbr-mc[data-theme=light] .wbr-hero .mc-btn{color:#fff;background:rgba(0,0,0,.35);border-color:#000;box-shadow:inset 2px 2px 0 rgba(255,255,255,.18),inset -2px -2px 0 rgba(0,0,0,.4);text-shadow:1px 1px 0 #000}
+.wbr-mc[data-theme=light] .wbr-hero .mc-btn-on{color:#FFAA00;background:rgba(0,0,0,.6)}
+.wbr-tabs{display:flex;align-items:flex-end;gap:4px;padding:0 4px;border-bottom:3px solid #000;box-shadow:0 2px 0 #3a3644;overflow-x:auto;overflow-y:hidden;scrollbar-width:thin}
+.wbr-tab{position:relative;display:inline-flex;align-items:center;gap:8px;flex-shrink:0;font-family:inherit;font-size:18px;font-weight:700;line-height:1;color:#C9C4D6;background:#2a2633;border:2px solid #000;border-bottom:0;padding:12px 16px 10px;margin-bottom:0;cursor:pointer;box-shadow:inset 2px 2px 0 #4a4556,inset -2px 0 0 #16131b;transition:background .12s,color .12s,padding .12s;-webkit-tap-highlight-color:transparent}
+.wbr-tab:hover{background:#3a3548;color:#FFFFA0}
+.wbr-tab-on,.wbr-tab-on:hover{color:#FFAA00;background:#1e1b26;padding-top:15px;padding-bottom:12px;margin-bottom:-3px;box-shadow:inset 2px 2px 0 #4a4556,inset -2px 0 0 #0b0a0e,inset 0 4px 0 #FFAA00}
+.wbr-tab:focus-visible{outline:2px solid #fff;outline-offset:-4px}
+.wbr-tab-icon{font-size:17px;opacity:.9}
+.wbr-tab-ctx{font-size:12px;font-weight:600;color:#8c8c8c;padding:2px 5px;background:rgba(0,0,0,.35);border:1px solid #000;text-shadow:none}
+.wbr-tab-on .wbr-tab-ctx{color:#E8E8E8}
+@media (max-width:1600px){.wbr-tab-ctx{display:none}}
+@media (max-width:640px){.wbr-tab{font-size:16px;padding:9px 11px 8px;gap:6px}.wbr-tab-on,.wbr-tab-on:hover{padding-top:12px;padding-bottom:10px}.wbr-tab-ctx{display:none}}
+.wbr-mc[data-theme=light] .wbr-tabs{border-bottom-color:#3A3644;box-shadow:0 2px 0 #FFFFFF}
+.wbr-mc[data-theme=light] .wbr-tab{color:#46434F;background:#D8D5DE;border-color:#3A3644;box-shadow:inset 2px 2px 0 #F7F6FA,inset -2px 0 0 #9A95A6}
+.wbr-mc[data-theme=light] .wbr-tab:hover{background:#C3CFF3;color:#10163A}
+.wbr-mc[data-theme=light] .wbr-tab-on,.wbr-mc[data-theme=light] .wbr-tab-on:hover{color:#854A00;background:#EEECF2;box-shadow:inset 2px 2px 0 #FFFFFF,inset -2px 0 0 #BDB8C8,inset 0 4px 0 #D98A00}
+.wbr-mc[data-theme=light] .wbr-tab-ctx{color:#57545F;background:#FFFFFF;border-color:#BDB8C8}
+.wbr-mc[data-theme=light] .wbr-tab-on .wbr-tab-ctx{color:#23212B}
+@supports (appearance:base-select){
+.wbr-mc select.mc-input,.wbr-mc select.mc-input::picker(select){appearance:base-select}
+.wbr-mc select.mc-input{display:flex;align-items:center;background-image:none;padding-right:10px;gap:8px;cursor:pointer}
+.wbr-mc select.mc-input::picker-icon{content:"";display:block;flex:none;width:10px;height:6px;margin-left:auto;background:${MC_SELECT_ARROW} no-repeat center/10px 6px;transition:transform .15s}
+.wbr-mc select.mc-input:open::picker-icon{transform:rotate(180deg)}
+.wbr-mc select.mc-input:open{border-color:#fff}
+.wbr-mc select.mc-input::picker(select){margin-top:4px;padding:4px;max-height:min(22rem,60vh);color:#fff;background:#1e1b26;border:2px solid #000;box-shadow:inset 2px 2px 0 #4a4556,inset -2px -2px 0 #0b0a0e,0 8px 0 rgba(0,0,0,.35);opacity:1;transform:none;transition:opacity .16s ease-out,transform .16s ease-out,display .16s allow-discrete,overlay .16s allow-discrete;scrollbar-color:#8b8b8b #000}
+.wbr-mc select.mc-input:not(:open)::picker(select){opacity:0;transform:translateY(-6px)}
+@starting-style{.wbr-mc select.mc-input:open::picker(select){opacity:0;transform:translateY(-6px)}}
+.wbr-mc select.mc-input option{display:flex;align-items:center;gap:8px;padding:7px 10px;background:transparent;color:#E8E8E8;font-family:inherit;font-size:16px;border:2px solid transparent;cursor:pointer;text-shadow:1px 1px 0 #000}
+.wbr-mc select.mc-input option:hover,.wbr-mc select.mc-input option:focus-visible{background:#3b4a86;color:#FFFFA0;border-color:#000;outline:none}
+.wbr-mc select.mc-input option:checked{color:#FFAA00;background:#2f2d36}
+.wbr-mc select.mc-input option::checkmark{content:"▶";font-size:11px;color:#FFAA00;order:-1}
+.wbr-mc select.mc-input option:disabled{color:#6c6c6c;cursor:default}
+.wbr-mc select.mc-input optgroup{font-weight:700;color:#FFAA00;padding:4px 6px}
+.wbr-mc.wbr-mc[data-theme=light] select.mc-input{background-image:none;background-color:#FFFFFF}
+.wbr-mc[data-theme=light] select.mc-input::picker-icon{background:${MC_SELECT_ARROW_LIGHT} no-repeat center/10px 6px}
+.wbr-mc[data-theme=light] select.mc-input::picker(select){color:#14121A;background:#F8F7FA;border-color:#3A3644;box-shadow:inset 2px 2px 0 #FFFFFF,inset -2px -2px 0 #BDB8C8,0 8px 0 rgba(40,34,52,.18)}
+.wbr-mc[data-theme=light] select.mc-input option{color:#23212B;text-shadow:none}
+.wbr-mc[data-theme=light] select.mc-input option:hover,.wbr-mc[data-theme=light] select.mc-input option:focus-visible{background:#C3CFF3;color:#10163A;border-color:#3A3644}
+.wbr-mc[data-theme=light] select.mc-input option:checked{color:#854A00;background:#ECE6D6}
+.wbr-mc[data-theme=light] select.mc-input option::checkmark{color:#854A00}
+}
+.wbr-welcome{position:relative;color:#E8E8E8;background:linear-gradient(180deg,#1f1633 0%,#15121d 22%,#131019 100%);border:3px solid #000;box-shadow:inset 3px 3px 0 rgba(255,255,255,.12),inset -3px -3px 0 rgba(0,0,0,.6),0 0 0 2px #FFAA0055,0 18px 60px rgba(0,0,0,.6);clip-path:polygon(3px 0,calc(100% - 3px) 0,100% 3px,100% calc(100% - 3px),calc(100% - 3px) 100%,3px 100%,0 calc(100% - 3px),0 3px);color-scheme:dark}
+.wbr-welcome-head{border-bottom:3px solid #000;box-shadow:0 2px 0 #3a3644;background:radial-gradient(120% 180% at 0% 0%,#4b2a7a 0%,rgba(75,42,122,0) 60%),radial-gradient(90% 200% at 100% 100%,#0f5a5a 0%,rgba(15,90,90,0) 65%)}
+.wbr-welcome-title{font-size:34px}
+@media (max-width:640px){.wbr-welcome-title{font-size:26px}}
+.wbr-welcome-body{outline:none;line-height:1.5;text-shadow:2px 2px 0 rgba(0,0,0,.85)}
+.wbr-welcome-body .text-sm,.wbr-welcome-body .text-xs{text-shadow:1px 1px 0 rgba(0,0,0,.9)}
+.wbr-welcome-body:focus-visible{box-shadow:inset 3px 0 0 #FFAA0088}
+.wbr-welcome-hl{color:#FFAA00;font-weight:700}
+.wbr-welcome-sub{color:#FFAA00;font-size:16px;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
+.wbr-welcome-link{color:#55FFFF;text-decoration:underline;text-underline-offset:3px;font-weight:700}
+.wbr-welcome-link:hover{color:#FFFF55}
+.wbr-welcome-link:focus-visible{outline:2px solid #fff;outline-offset:2px}
+.wbr-welcome-url{color:#8c8c8c;font-size:13px;overflow-wrap:anywhere}
+.wbr-welcome-muted{color:#a9a6b6}
+.wbr-welcome-ok{color:#55FF55}
+.wbr-welcome-source{padding-left:14px;position:relative}
+.wbr-welcome-source::before{content:"";position:absolute;left:0;top:.55em;width:6px;height:6px;background:#FFAA00;box-shadow:1px 1px 0 #000}
+.wbr-welcome-foot{border-top:3px solid #000;box-shadow:inset 0 2px 0 #3a3644;background:#0f0d14}
+.wbr-welcome-btn{min-width:13rem;font-size:18px;padding:12px 18px;text-shadow:2px 2px 0 rgba(0,0,0,.6)}
+.wbr-mc .wbr-welcome .wbr-welcome-btn.mc-btn:disabled{background:#2c2a33;color:#b8b4c4;box-shadow:inset 2px 2px 0 #45414f,inset -2px -2px 0 #16141b}
+.wbr-mc .wbr-welcome .wbr-welcome-btn.mc-btn:disabled::before{content:"";position:absolute;left:0;top:0;bottom:0;width:var(--wbr-progress,0%);background:rgba(63,125,44,.55);transition:width .2s linear}
+.wbr-welcome-btn:not(:disabled){animation:wbr-ready .9s ease-out 1}
+@keyframes wbr-ready{0%{transform:scale(1)}40%{transform:scale(1.06)}100%{transform:scale(1)}}
+.wbr-mc[data-theme=light] .wbr-welcome-backdrop{background:rgba(12,10,18,.7)}
+.wbr-mc[data-theme=light] .wbr-welcome .mc-btn-primary:not(:disabled){color:#fff}
+@media (prefers-reduced-motion:reduce){.wbr-welcome-btn:not(:disabled){animation:none}.wbr-welcome-btn:disabled::before{transition:none}}
+@media (prefers-reduced-motion:reduce){.wbr-drop,.wbr-pop,.wbr-backdrop,.wbr-hero-kicker,.wbr-hero-portraits img{animation:none}.wbr-tab{transition:none}}
 .wbr-mc .atree-wrap{container-type:inline-size}
 .wbr-mc .atree{--cell:min(40px,10cqw);display:grid;grid-template-columns:repeat(9,var(--cell));grid-auto-rows:var(--cell);width:max-content;margin:0 auto;padding:calc(var(--cell) * .5)}
 .wbr-mc .atree-cell{position:relative;width:var(--cell);height:var(--cell)}
@@ -3024,6 +3156,23 @@ select.mc-input option{background:#000;color:#fff}
 .wbr-mc[data-theme=light] ::-webkit-scrollbar-track{background:#E4E1EA;border-color:#BDB8C8;box-shadow:none}
 .wbr-mc[data-theme=light] ::-webkit-scrollbar-thumb{background:#AEA9B9;border-color:#6E6A78;box-shadow:inset 2px 2px 0 #D6D2DE,inset -2px -2px 0 #8E899A}
 .wbr-mc[data-theme=light]{scrollbar-color:#AEA9B9 #E4E1EA}
+.wbr-mc[data-theme=light] .wbr-card{color:#E8E8E8;color-scheme:dark}
+.wbr-mc[data-theme=light] .wbr-card .text-zinc-50,.wbr-mc[data-theme=light] .wbr-card .text-zinc-100,.wbr-mc[data-theme=light] .wbr-card .text-white{color:#fff}
+.wbr-mc[data-theme=light] .wbr-card .text-zinc-200,.wbr-mc[data-theme=light] .wbr-card .text-zinc-300{color:#e0e0e0}
+.wbr-mc[data-theme=light] .wbr-card .text-zinc-400{color:#aaa}
+.wbr-mc[data-theme=light] .wbr-card .text-zinc-500{color:#8c8c8c}
+.wbr-mc[data-theme=light] .wbr-card .text-zinc-600{color:#555}
+.wbr-mc[data-theme=light] .wbr-card .text-amber-300,.wbr-mc[data-theme=light] .wbr-card .text-amber-400,.wbr-mc[data-theme=light] .wbr-card .mc-gold,.wbr-mc[data-theme=light] .wbr-card .mc-title{color:#FFAA00}
+.wbr-mc[data-theme=light] .wbr-card .text-red-400{color:#FF5555}
+.wbr-mc[data-theme=light] .wbr-card .text-sky-300{color:#55FFFF}
+.wbr-mc[data-theme=light] .wbr-card .mc-link{color:#FFAA00}
+.wbr-mc[data-theme=light] .wbr-card .mc-slot{background:#120f18;border-color:#08070b #3a3644 #3a3644 #08070b}
+.wbr-mc[data-theme=light] .wbr-card .mc-well{background:#0c0a10;border-color:#000;box-shadow:inset 2px 2px 0 #06050a,inset -2px -2px 0 #2c2836}
+.wbr-mc[data-theme=light] .wbr-card .mc-hr{border-top-color:#0a090c;box-shadow:inset 0 2px 0 #3a3644}
+.wbr-mc[data-theme=light] .wbr-card .mc-btn{color:#fff;background:#6c6c6c;border-color:#000;box-shadow:inset 2px 2px 0 #a8a8a8,inset -2px -2px 0 #383838}
+.wbr-mc[data-theme=light] .wbr-card .mc-btn:hover{background:#7286c7;box-shadow:inset 2px 2px 0 #b4c2f2,inset -2px -2px 0 #3a4677;color:#FFFFA0}
+.wbr-mc[data-theme=light] .wbr-card .mc-btn-on,.wbr-mc[data-theme=light] .wbr-card .mc-btn-on:hover{background:#2f2d36;box-shadow:inset 2px 2px 0 #161419,inset -2px -2px 0 #5a5566;color:#FFAA00}
+.wbr-mc[data-theme=light] .wbr-card .border-zinc-600,.wbr-mc[data-theme=light] .wbr-card .border-zinc-700{border-color:#55525e}
 `;
 const PIXEL_ICONS = {
   helmet: [
@@ -3278,7 +3427,7 @@ const ICON_THEME_COLORS = {
 // Kolory tooltipa z gry: granatowe tło, ramka w kolorze rzadkości, jasny tekst; czcionka Pixelify Sans (najbliższa
 // czcionce tooltipów w grze spośród otwartych), reszta interfejsu zostaje w Tiny5.
 const TOOLTIP = { text: "#F2EEFF", muted: "#A9AAC9", good: "#55FF55", bad: "#FF5555", ink: "#101228", bg: "#141A3C", bg2: "#0B0E22" };
-const CARD_FONT = '"VCR OSD Mono", "Pixelify Sans", "Tiny5", ui-monospace, SFMono-Regular, Menlo, monospace';
+const CARD_FONT = PIXEL_FONT;
 
 function mixColor(hex, target, amount) {
   const from = [1, 3, 5].map((index) => parseInt(hex.slice(index, index + 2), 16));
@@ -3351,6 +3500,7 @@ function GridPixelIcon({ item, size = 48 }) {
 
 // Ramka ikonki jak w tooltipie z gry: ciemny kwadrat ze skosem, w nim pikselowa ikonka.
 function IconBox({ item, size = 48 }) {
+  const ts = useTs();
   return (
     <div
       className="flex flex-shrink-0 items-center justify-center"
@@ -3362,6 +3512,7 @@ function IconBox({ item, size = 48 }) {
 }
 
 function TooltipBadge({ color, children }) {
+  const ts = useTs();
   return (
     <span className="px-1.5 text-sm uppercase leading-5" style={ts({ background: color, color: TOOLTIP.ink })}>
       {children}
@@ -3370,6 +3521,7 @@ function TooltipBadge({ color, children }) {
 }
 
 function TooltipDivider({ color }) {
+  const ts = useTs();
   return (
     <div className="flex items-center gap-1" aria-hidden="true">
       <div className="h-px flex-1" style={ts({ background: color, opacity: 0.45 })} />
@@ -3381,6 +3533,7 @@ function TooltipDivider({ color }) {
 }
 
 function ElementIcons({ elements, color }) {
+  const ts = useTs();
   if (elements.length === 0) return null;
   return (
     <div className="flex w-max gap-1 px-1 py-0.5" style={ts({ background: color })} aria-label={`Elements: ${elements.join(", ")}`}>
@@ -3400,6 +3553,7 @@ function ElementIcons({ elements, color }) {
 
 // Sloty powderów w prawym górnym rogu tooltipa (jak w grze): ciemne kwadraty, do 3 w rzędzie.
 function PowderSlots({ count, recommended = null, applied = null, level = 120 }) {
+  const ts = useTs();
   if (!count) return null;
   const element = applied ? applied.element : recommended;
   const style = element ? ELEMENT_STYLE[element] : null;
@@ -3425,6 +3579,7 @@ function PowderSlots({ count, recommended = null, applied = null, level = 120 })
 
 // Pole wyboru jak w grze: zielony ptaszek (spełnione), czerwony krzyżyk (niespełnione), puste (nie dotyczy).
 function CheckBox({ state }) {
+  const ts = useTs();
   const color = state === "yes" ? TOOLTIP.good : state === "no" ? TOOLTIP.bad : "#5A5470";
   return (
     <span
@@ -3531,19 +3686,27 @@ function overallRoll(item) {
 
 // Wiersz umiejętności jak w grze: wszystkie pięć rombów, wymagane podświetlone kolorem umiejętności, pod spodem
 // pole wyboru (spełnione/niespełnione przez Skill Pointy buildu) i wymagana wartość.
-function SkillRow({ reqs, totals }) {
+// equipOrderOk: zestaw przechodzi sprawdzenie Skill Pointów w kolejności zakładania z gry - wtedy każde wymaganie
+// było spełnione w chwili zakładania przedmiotu, nawet jeśli przedmiot z ujemnym bonusem (zakładany na końcu)
+// obniża potem sumę poniżej wymagania. Bez tego karta pokazywała czerwone ✗ przy poprawnym buildzie.
+function SkillRow({ reqs, totals, equipOrderOk = false }) {
+  const ts = useTs();
   return (
     <div className="grid grid-cols-5 gap-1">
       {SKILLS.map((skill) => {
         const req = reqs[skill] || 0;
         const required = req > 0;
-        const met = (totals[skill] || 0) >= req;
+        const met = equipOrderOk || (totals[skill] || 0) >= req;
         const skillColor = SKILL_STYLE[skill].color;
         return (
           <div
             key={skill}
             className="flex flex-col items-center gap-2"
-            title={required ? `${SKILL_LABELS[skill]} Min: ${req} (build has ${totals[skill] || 0})` : `No ${SKILL_LABELS[skill]} requirement`}
+            title={
+              required
+                ? `${SKILL_LABELS[skill]} Min: ${req} (build has ${totals[skill] || 0}${equipOrderOk && (totals[skill] || 0) < req ? "; met when equipped - items with negative skill points go on last" : ""})`
+                : `No ${SKILL_LABELS[skill]} requirement`
+            }
           >
             <span className="px-1 text-xs leading-5 tracking-wider" style={ts({ background: "#262A50", color: required ? TOOLTIP.text : "#6E6C8C" })}>
               {SKILL_STYLE[skill].short.toUpperCase()}
@@ -3572,6 +3735,85 @@ function SkillRow({ reqs, totals }) {
   );
 }
 
+// Najważniejsze identyfikacje przedmiotu do zwiniętej karty: największe dodatnie (względem typowej skali statystyki)
+// i jedna najgorsza ujemna, żeby od razu było widać, co przedmiot daje i co zabiera.
+function keyIdLines(item, limit = 4) {
+  const scored = ID_DISPLAY.filter((display) => item.ids[display.key]).map((display) => {
+    const value = item.ids[display.key];
+    const good = display.invert ? value < 0 : value > 0;
+    const meta = STAT_META[display.key];
+    const scale = (meta && meta.scale) || (display.unit === "%" ? 10 : 50);
+    return { display, value, good, weight: Math.abs(value) / scale };
+  });
+  const goodLines = scored.filter((entry) => entry.good).sort((a, b) => b.weight - a.weight).slice(0, limit);
+  const worst = scored.filter((entry) => !entry.good).sort((a, b) => b.weight - a.weight)[0];
+  return worst ? [...goodLines, worst] : goodLines;
+}
+
+// Zwinięta karta: wymagania jako małe plakietki (tylko niezerowe) + HP + kluczowe identyfikacje.
+function CompactItemSummary({ item, build, classOk, levelOk, playerClass }) {
+  const ts = useTs();
+  const equipOrderOk = Boolean(build.skillPoints.valid);
+  const chip = "inline-flex items-center gap-1 border px-1.5 py-0.5 text-sm tabular-nums leading-none";
+  const lines = keyIdLines(item);
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-wrap gap-1.5">
+        <span className={chip} style={ts({ borderColor: levelOk ? "#2F6B2F" : "#8A2A2A", color: TOOLTIP.text, background: "#0A0C1E" })} title={`Combat Level ${item.level}`}>
+          Lv {item.level}
+          <span style={ts({ color: levelOk ? TOOLTIP.good : TOOLTIP.bad })}>{levelOk ? "✓" : "✗"}</span>
+        </span>
+        {item.category === "weapon" && !classOk && (
+          <span className={chip} style={ts({ borderColor: "#8A2A2A", color: TOOLTIP.bad, background: "#0A0C1E" })}>
+            Wrong class ✗
+          </span>
+        )}
+        {SKILLS.filter((skill) => (item.reqs[skill] || 0) > 0).map((skill) => {
+          const req = item.reqs[skill];
+          const have = build.skillPoints.totals[skill] || 0;
+          const met = equipOrderOk || have >= req;
+          const skillColor = SKILL_STYLE[skill].color;
+          return (
+            <span
+              key={skill}
+              className={chip}
+              style={ts({ borderColor: skillColor, color: skillColor, background: mixColor(skillColor, "#0A0C1E", 0.85) })}
+              title={`${SKILL_LABELS[skill]} Min: ${req} (build has ${have}${equipOrderOk && have < req ? "; met when equipped - items with negative skill points go on last" : ""})`}
+            >
+              {SKILL_STYLE[skill].symbol} {SKILL_STYLE[skill].short.toUpperCase()} {req}
+              <span style={ts({ color: met ? TOOLTIP.good : TOOLTIP.bad })}>{met ? "✓" : "✗"}</span>
+            </span>
+          );
+        })}
+        {SKILLS.every((skill) => !(item.reqs[skill] > 0)) && (
+          <span className={chip} style={ts({ borderColor: "#33375C", color: TOOLTIP.muted, background: "#0A0C1E" })}>
+            No skill req.
+          </span>
+        )}
+        {item.base && item.base.hp ? (
+          <span className={chip} style={ts({ borderColor: "#8A2A2A", color: "#FF7777", background: "#1E0A10" })} title="Base Health">
+            ❤ {formatNumber(item.base.hp)}
+          </span>
+        ) : null}
+      </div>
+      {lines.length > 0 && (
+        <ul className="flex flex-col gap-0.5 text-sm">
+          {lines.map(({ display, value, good }) => (
+            <li key={display.key} className="flex items-baseline justify-between gap-3">
+              <span className="min-w-0 truncate" style={ts({ color: good ? TOOLTIP.text : TOOLTIP.muted })}>
+                {idLabel(display, playerClass)}
+              </span>
+              <span className="whitespace-nowrap font-bold tabular-nums" style={ts({ color: good ? TOOLTIP.good : TOOLTIP.bad })}>
+                {formatIdValue(display, value)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function formatIdValue(display, value) {
   return `${value > 0 ? "+" : ""}${formatNumber(value)}${display.unit}`;
 }
@@ -3594,6 +3836,7 @@ function weaponFocusShare(item, profile) {
 
 // Blok broni jak w grze: duży DPS, szybkość ataku z uderzeniami/s, zakresy obrażeń per żywioł w jednym wierszu.
 function WeaponBlock({ item, profile }) {
+  const ts = useTs();
   const hitsPerSecond = HITS_PER_SECOND[item.atkSpd];
   const withBonuses = Math.round(weaponMainAttackDps(item));
   return (
@@ -3655,6 +3898,7 @@ function WeaponBlock({ item, profile }) {
 }
 
 function BaseStats({ item }) {
+  const ts = useTs();
   const defences = ELEMENTS.map((element) => ({ element, value: item.base[`${element.charAt(0)}Def`] || 0 })).filter((entry) => entry.value);
   if (!item.base.hp && defences.length === 0) return null;
   return (
@@ -3709,6 +3953,7 @@ function idLabel(display, playerClass) {
 }
 
 function IdentificationList({ item, relevant, playerClass }) {
+  const ts = useTs();
   const lines = ID_DISPLAY.filter((display) => item.ids[display.key]);
   if (lines.length === 0) return <p className="text-sm" style={ts({ color: TOOLTIP.muted })}>No identifications</p>;
   const groups = ID_GROUP_ORDER.map((group) => lines.filter((display) => idGroup(display.key) === group)).filter((group) => group.length > 0);
@@ -3808,6 +4053,7 @@ const CARD_PAGES = [
 ];
 
 function CardPager({ page, onChange }) {
+  const ts = useTs();
   return (
     <div className="flex items-center justify-center gap-2" role="tablist" aria-label="Card pages">
       {CARD_PAGES.map((entry, index) => (
@@ -3832,6 +4078,7 @@ function CardPager({ page, onChange }) {
 }
 
 function ScorePage({ slot, build }) {
+  const ts = useTs();
   const entries = [...(slot.contributions || [])]
     .filter((entry) => Math.abs(entry.contribution) >= 0.05)
     .sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution))
@@ -3875,14 +4122,23 @@ function ScorePage({ slot, build }) {
 
 // Karta przedmiotu. Zwinięta (open = false): tylko nazwa, wymagania (Skill Pointy, klasa, poziom) i akcje;
 // strzałka ▼/▲ rozwija resztę (statystyki, identyfikacje, cena, strony karty).
-function ItemCard({ slot, build, actions, powder = null, open = true, onToggle = null }) {
+function ItemCard(props) {
+  return (
+    <GameCardContext.Provider value={true}>
+      <ItemCardInner {...props} />
+    </GameCardContext.Provider>
+  );
+}
+
+function ItemCardInner({ slot, build, actions, powder = null, open = true, onToggle = null }) {
+  const ts = useTs();
   const wide = "";
   const { attackSpeeds } = build.options;
   const [page, setPage] = useState(0);
   if (!slot.item && (slot.crafted || slot.missing)) {
     return (
       <article
-        className={`flex flex-col items-start gap-2 border-2 border-dashed border-zinc-600 p-4 text-sm ${wide}`}
+        className={`wbr-card flex flex-col items-start gap-2 border-2 border-dashed border-zinc-600 p-4 text-sm ${wide}`}
         style={ts({ fontFamily: CARD_FONT, background: TOOLTIP.bg2 })}
       >
         <span className="text-xs uppercase tracking-widest text-zinc-500">{slot.label}</span>
@@ -3902,7 +4158,7 @@ function ItemCard({ slot, build, actions, powder = null, open = true, onToggle =
     const speedFiltered = slot.id === "weapon" && attackSpeeds.length > 0;
     return (
       <article
-        className={`flex flex-col justify-center gap-1 border-2 border-dashed border-zinc-700 p-4 text-sm ${wide}`}
+        className={`wbr-card flex flex-col justify-center gap-1 border-2 border-dashed border-zinc-700 p-4 text-sm ${wide}`}
         style={ts({ fontFamily: CARD_FONT, background: TOOLTIP.bg2 })}
       >
         <span className="text-xs uppercase tracking-widest text-zinc-500">{slot.label}</span>
@@ -3929,7 +4185,7 @@ function ItemCard({ slot, build, actions, powder = null, open = true, onToggle =
   const collapsed = Boolean(onToggle) && !open;
   const requirements = (
     <>
-      <SkillRow reqs={item.reqs} totals={build.skillPoints.totals} />
+      <SkillRow reqs={item.reqs} totals={build.skillPoints.totals} equipOrderOk={Boolean(build.skillPoints.valid)} />
       <div className="flex flex-col gap-0.5 text-base">
         {item.category === "weapon" && (
           <div className="flex items-baseline justify-between gap-3">
@@ -3952,8 +4208,14 @@ function ItemCard({ slot, build, actions, powder = null, open = true, onToggle =
   );
   return (
     <article
-      className={`relative flex flex-col border-2 ${wide}`}
-      style={ts({ borderColor: color, background: `linear-gradient(180deg, ${TOOLTIP.bg} 0%, ${TOOLTIP.bg2} 100%)`, boxShadow: "inset 0 0 0 2px #070919", fontFamily: CARD_FONT })}
+      className={`wbr-card relative flex flex-col border-[3px] ${wide}`}
+      style={{
+        ...ts({ background: `linear-gradient(180deg, ${TOOLTIP.bg} 0%, ${TOOLTIP.bg2} 100%)`, fontFamily: CARD_FONT }),
+        // ramka w kolorze rzadkości zawsze w oryginalnym (jasnym) kolorze; w jasnym motywie obwiedziona ciemną linią
+        // z obu stron, żeby była wyraźna na jasnym tle
+        borderColor: color,
+        boxShadow: THEME === "light" ? "0 0 0 2px #1B1822, inset 0 0 0 2px #1B1822, 0 3px 0 rgba(27,24,34,.18)" : `inset 0 0 0 2px #070919, 0 0 12px ${color}22`,
+      }}
     >
       <div className="flex items-center justify-between gap-2 px-3 py-1 text-xs uppercase tracking-widest" style={ts({ background: "#070919", color: TOOLTIP.muted })}>
         <span>
@@ -4021,7 +4283,7 @@ function ItemCard({ slot, build, actions, powder = null, open = true, onToggle =
         </div>
 
         {collapsed ? (
-          requirements
+          <CompactItemSummary item={item} build={build} classOk={classOk} levelOk={levelOk} playerClass={build.playerClass} />
         ) : page === 1 ? (
           <ObtainInfo item={item} color={color} />
         ) : page === 2 ? (
@@ -4163,6 +4425,7 @@ function wikiLink(name) {
 
 // Strona "How to get it" karty: źródła z danych Wynnbuildera, Trade Market, link do wiki.
 function ObtainInfo({ item, color }) {
+  const ts = useTs();
   const tradeable = !item.source.restrict;
   const restriction = item.source.restrict === "quest_item" ? "Quest item: can't be traded" : "Untradable: can't be sold or traded";
   return (
@@ -4676,13 +4939,13 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
   );
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black bg-opacity-70 px-4 py-6"
+      className="wbr-backdrop fixed inset-0 z-50 flex items-start justify-center overflow-y-auto px-4 py-6"
       role="dialog"
       aria-modal="true"
       aria-label={slot ? `Other picks for ${slot.label}` : "Browse items"}
       onKeyDown={(event) => event.key === "Escape" && onClose()}
     >
-      <div className="mc-panel flex w-full max-w-4xl flex-col gap-3 p-4">
+      <div className="wbr-pop mc-panel flex w-full max-w-4xl flex-col gap-3 p-4">
         <div className="flex items-start justify-between gap-3">
           <div>
             <h2 className="mc-title text-lg">{slot ? `Other picks for ${slot.label}` : "Browse items"}</h2>
@@ -4969,13 +5232,13 @@ function RollsDialog({ item, rolls, onChange, onClose }) {
   const setOne = (key, value) => onChange({ ...current, [key]: value });
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black bg-opacity-70 px-4 py-8"
+      className="wbr-backdrop fixed inset-0 z-50 flex items-start justify-center overflow-y-auto px-4 py-8"
       role="dialog"
       aria-modal="true"
       aria-label={`Rolls of ${item.name}`}
       onKeyDown={(event) => event.key === "Escape" && onClose()}
     >
-      <div className="mc-panel flex w-full max-w-2xl flex-col gap-4 p-4">
+      <div className="wbr-pop mc-panel flex w-full max-w-2xl flex-col gap-4 p-4">
         <div className="flex items-start justify-between gap-3">
           <div>
             <h2 className="mc-title text-lg">
@@ -5075,7 +5338,7 @@ function ScoreGuide({ build }) {
         {open ? "▾" : "▸"} How is the score calculated?
       </button>
       {open && (
-        <div className="mc-slot flex flex-col gap-3 p-3 text-sm text-zinc-200">
+        <div className="wbr-drop mc-slot flex flex-col gap-3 p-3 text-sm text-zinc-200">
           <p>
             Every identification becomes points: <span className="mc-gold">value ÷ unit × weight × 10</span>. The unit makes stats comparable
             (1,000 Health, 10% damage or defence, 100 raw spell damage, 150 raw main attack damage, 5 Mana Regen, 5 skill points…) and the
@@ -6170,7 +6433,7 @@ function DamagePanel({ build, stats, onOpenTree }) {
             )}
           </ul>
           {stats.hundred && (
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <div className="grid grid-cols-1 gap-2">
               {[
                 ["spell", "[100%] Spell Damage", "#FF55FF"],
                 ["melee", "[100%] Main Attack Damage", "#FFAA00"],
@@ -6231,7 +6494,11 @@ function DamagePanel({ build, stats, onOpenTree }) {
           <button type="button" onClick={() => setCycleOpen(!cycleOpen)} className="mc-link self-start text-xs" aria-expanded={cycleOpen}>
             {cycleOpen ? "▾" : "▸"} Spell cycle calculator
           </button>
-          {cycleOpen && <SpellCyclePanel stats={stats} />}
+          {cycleOpen && (
+            <div className="wbr-drop">
+              <SpellCyclePanel stats={stats} />
+            </div>
+          )}
         </>
       ) : (
         <p className="text-sm text-zinc-500">No weapon in this build.</p>
@@ -6765,8 +7032,8 @@ function PinItemSearch({ options, onChange, weaponType, level, onBrowse = null }
           id="pin-search"
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder={`e.g. a ${weaponType || "weapon"} name - pins it, the rest fits around it`}
-          className="mc-input min-w-[11rem] flex-1"
+          placeholder={`Item name, e.g. a ${weaponType || "weapon"}`}
+          className="mc-input w-full min-w-0 flex-1 basis-40"
           autoComplete="off"
           spellCheck={false}
         />
@@ -6990,6 +7257,9 @@ function DamageForm({
   progress,
   result,
   outdated,
+  options,
+  onOptions,
+  onBrowse,
 }) {
   const classConfig = playerClass ? CLASSES[playerClass] : null;
   const set = (patch) => onForm({ ...form, ...patch });
@@ -7002,6 +7272,11 @@ function DamageForm({
   const step = ehpStep(ehpMax);
   const label = "mc-title text-xs uppercase";
   const hint = "text-xs text-zinc-500";
+  // pole "cps" trzyma tekst, żeby dało się je wyczyścić i wpisać nową liczbę (wartość przyjmujemy, gdy ma sens)
+  const [cpsText, setCpsText] = useState(String(form.cps));
+  useEffect(() => {
+    setCpsText((text) => (Number(text.replace(",", ".")) === form.cps ? text : String(form.cps)));
+  }, [form.cps]);
   const pct = Math.round((minEhp / Math.max(1, ehpMax)) * 100);
   return (
     <div className="flex flex-col gap-3.5">
@@ -7132,7 +7407,22 @@ function DamageForm({
               className="mc-input w-0 min-w-0 flex-1 tabular-nums"
             />
             <label htmlFor="new-cps" className="flex items-center gap-1 text-xs text-zinc-400" title="Clicks per second. A spell is 3 clicks, so the cycle takes 3 × spells ÷ clicks per second.">
-              <input id="new-cps" type="number" min={0.5} max={12} step={0.5} value={form.cps} onChange={(event) => set({ cps: Math.min(12, Math.max(0.5, Number(event.target.value) || 3)) })} className="mc-input w-12 px-1 text-center tabular-nums" />
+              <input
+                id="new-cps"
+                type="number"
+                min={0.5}
+                max={12}
+                step={0.5}
+                value={cpsText}
+                onChange={(event) => {
+                  const text = event.target.value;
+                  setCpsText(text);
+                  const value = Number(text.replace(",", "."));
+                  if (text.trim() !== "" && Number.isFinite(value) && value >= 0.5 && value <= 12) set({ cps: value });
+                }}
+                onBlur={() => setCpsText(String(form.cps))}
+                className="mc-input w-14 px-1 text-center tabular-nums"
+              />
               cps
             </label>
             {form.cycle && (
@@ -7149,6 +7439,7 @@ function DamageForm({
               <input type="checkbox" className="mc-check" checked={form.gain} onChange={() => set({ gain: !form.gain })} /> Mana from abilities
             </label>
           </div>
+          {cycleIds.length > 0 && <CycleSteps cycle={cycleIds.join("")} playerClass={playerClass} spells={goals.filter((entry) => entry.kind === "spell" && typeof entry.id === "number" && entry.id <= 4)} compact />}
           <p className={hint}>
             {cycleIds.length > 0 ? `${cycleIds.length} spells every ${((3 * cycleIds.length) / Math.max(0.5, form.cps)).toFixed(1)} s must pay for themselves.` : "Empty = no mana filter. Suggested cycles are in the class panel."}
           </p>
@@ -7164,14 +7455,12 @@ function DamageForm({
           <label className="flex items-center gap-2 text-xs text-zinc-200" title="Only items that can be bought and sold on the Trade Market: no untradable or quest items. Pinned items stay.">
             <input id="new-tradeable" type="checkbox" className="mc-check" checked={Boolean(form.tradeable)} onChange={() => set({ tradeable: !form.tradeable })} /> Tradeable only <span className="text-zinc-500">· Trade Market</span>
           </label>
+          <div className="mt-2">
+            <ItemFilters options={options} onChange={onOptions} weaponType={classConfig ? classConfig.weapon : null} level={level || 120} onBrowse={onBrowse} />
+          </div>
         </fieldset>
       )}
 
-      {restrictions && (
-        <p className={`wbr-fade ${hint}`} title="Set in the Old tab's Custom stats; they apply here too.">
-          From Custom stats: {restrictions}
-        </p>
-      )}
 
       <div className="flex flex-col gap-1.5">
         <button
@@ -7202,6 +7491,73 @@ function DamageForm({
         )}
       </div>
     </div>
+  );
+}
+
+// Cykl czarów narysowany krok po kroku: numer czaru, nazwa (pogrubiona), kombinacja kliknięć i mana, połączone
+// strzałkami - tak, żeby od razu było widać, co i w jakiej kolejności rzucać. M = atak podstawowy, F = ultimate.
+function CycleSteps({ cycle, playerClass, spells = [], names = null, compact = false }) {
+  const clicks = SPELL_CLICKS[playerClass] || SPELL_CLICKS.default;
+  const spellNames = names || CLASS_SPELL_NAMES[playerClass] || [];
+  const steps = [...String(cycle || "")].filter((char) => "1234MF".includes(char));
+  if (steps.length === 0) return null;
+  return (
+    <ol className="flex flex-wrap items-center gap-x-1 gap-y-1.5" aria-label="Spell cycle, in order">
+      {steps.map((char, index) => {
+        const id = Number(char);
+        const spell = id ? spells.find((entry) => entry.id === id) : null;
+        const main = char === "M";
+        const ult = char === "F";
+        const color = main ? "#FFAA00" : ult ? "#FF55FF" : "#55FFFF";
+        const name = main ? "Main attack" : ult ? "Ultimate" : spell ? spell.name : spellNames[id - 1] || `Spell ${id}`;
+        const combo = main ? (playerClass === "Archer" ? "R" : "L") : ult ? "F" : clicks[id - 1];
+        const cost = spell && spell.cost !== null && spell.cost !== undefined ? spell.cost : null;
+        return (
+          <li key={index} className="flex items-center gap-1">
+            {index > 0 && (
+              <span className="text-base font-bold" style={ts({ color: "#FFAA00" })} aria-hidden="true">
+                ➜
+              </span>
+            )}
+            <span className="wbr-step mc-slot flex items-center gap-1.5 px-1.5 py-0.5" title={cost !== null ? `${name}: ${combo}, ${cost.toFixed(1)} mana` : `${name}: ${combo}`}>
+              <span className="flex h-5 min-w-[1.25rem] items-center justify-center px-1 text-xs font-bold" style={{ ...ts({ background: color }), color: THEME === "light" ? "#FFFFFF" : "#101228", textShadow: "none" }}>
+                {main ? "M" : ult ? "F" : id}
+              </span>
+              <span className={`${compact ? "text-xs" : "text-sm"} font-bold`} style={ts({ color })}>
+                {name}
+              </span>
+              {!compact && <span className="text-xs text-zinc-500">{combo}</span>}
+              {!compact && cost !== null && <span className="text-xs tabular-nums text-zinc-400">{cost.toFixed(0)}</span>}
+            </span>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+// Ekran startowy: pięć klas z portretami - klik wybiera klasę (to samo co lista w formularzu).
+function ClassPicker({ onPick }) {
+  return (
+    <section className="mc-panel wbr-fade flex flex-col gap-4 p-5">
+      <div className="flex flex-col gap-1">
+        <h2 className="mc-title text-xl">Choose your class</h2>
+        <p className="text-sm text-zinc-300">
+          Then your rank, level and ability tree. The generator looks for the strongest hit of the spell (or main attack) you pick, among builds that
+          survive your effective HP and pay for your spell cycle.
+        </p>
+      </div>
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
+        {Object.entries(CLASSES).map(([name, config]) => (
+          <button key={name} type="button" onClick={() => onPick(name)} className="wbr-class-tile mc-slot flex flex-col items-center gap-2 p-3 text-center">
+            {CLASS_PORTRAITS[name] && <img src={CLASS_PORTRAITS[name]} alt="" width={57} height={80} />}
+            <span className="text-lg font-bold text-zinc-100">{name}</span>
+            <span className="text-xs text-zinc-400">{capitalize(config.weapon)}</span>
+            <span className="text-xs text-zinc-500">{config.archetypes.join(" · ")}</span>
+          </button>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -7332,17 +7688,16 @@ function ClassOverview({ playerClass, level, levelKnown, apCap, preset, treeIds,
               const mana = digits.length > 0 ? cycleMana(spells, digits, form.cps, form.gain) : null;
               const current = typed.join("") === digits.join("") && arch === preset;
               return (
-                <li key={entry.name} className="flex flex-col gap-0.5">
+                <li key={entry.name} className="flex flex-col gap-1">
                   <div className="flex flex-wrap items-baseline justify-between gap-x-2">
-                    <span className="mc-gold text-sm">
-                      {entry.name} <span className="tabular-nums text-zinc-300">{entry.cycle}</span>
-                    </span>
+                    <span className="mc-gold text-sm font-bold">{entry.name}</span>
                     {digits.length > 0 && (
                       <button type="button" className={`mc-btn mc-btn-sm ${current ? "mc-btn-on" : ""}`} onClick={() => onUseCycle(arch, digits.join(""))} title="Use as the mana filter (and this archetype's tree)">
                         {current ? "In use" : "Use"}
                       </button>
                     )}
                   </div>
+                  <CycleSteps cycle={entry.cycle} playerClass={playerClass} spells={spells} />
                   <span className="text-xs text-zinc-400">{entry.note}</span>
                   <span className="text-xs text-zinc-500">
                     {mana ? (
@@ -7360,9 +7715,13 @@ function ClassOverview({ playerClass, level, levelKnown, apCap, preset, treeIds,
             })}
           </ul>
           {typedMana && (
-            <p className="mc-slot px-2 py-1 text-xs text-zinc-300">
-              Your cycle <span className="tabular-nums text-zinc-100">{typed.join("")}</span>: {typedMana.used.toFixed(1)} mana/s → {need(typedMana)}
-            </p>
+            <div className="mc-well flex flex-col gap-1.5 p-2">
+              <span className="text-xs font-bold text-zinc-200">Your cycle</span>
+              <CycleSteps cycle={typed.join("")} playerClass={playerClass} spells={spells} />
+              <span className="text-xs text-zinc-300">
+                {typedMana.used.toFixed(1)} mana/s → {need(typedMana)}
+              </span>
+            </div>
           )}
         </div>
       </div>
@@ -7382,8 +7741,18 @@ function DamageSummary({ build }) {
   const metrics = build.metrics;
   const cycle = metrics.cycle || { ids: [] };
   const chip = (label, value, ok, title) => (
-    <span key={label} className="mc-slot px-2 py-1 text-xs" style={ts({ color: ok === false ? "#FF5555" : ok === true ? "#55FF55" : undefined })} title={title}>
-      {label} <span className="tabular-nums">{value}</span>
+    <span
+      key={label}
+      className="mc-slot inline-flex items-center gap-1.5 px-2 py-1 text-xs"
+      style={ts({ color: ok === false ? "#FF5555" : ok === true ? "#55FF55" : undefined, borderColor: ok === false ? "#FF5555" : ok === true ? "#2F8F2F" : undefined })}
+      title={title}
+    >
+      {ok !== null && (
+        <span aria-hidden="true" className="font-bold">
+          {ok ? "✓" : "✗"}
+        </span>
+      )}
+      {label} <span className="font-bold tabular-nums">{value}</span>
     </span>
   );
   return (
@@ -7410,6 +7779,127 @@ function DamageSummary({ build }) {
           `Health Regen ${formatNumber(Math.round(metrics.hpr))}/4s + Life Steal ${formatNumber(Math.round(metrics.lifeSteal))}/3s${metrics.requireSustain ? " - the filter asks for more than 0" : ""}`
         )}
       {chip("Skill points", `${build.skillPoints.required} / ${build.skillPoints.available}`, build.skillPoints.valid, "Skill points this set needs, checked in the game's equip order")}
+    </div>
+  );
+}
+
+// Przypięte i wykluczone przedmioty (z kart: Pin/Exclude albo z wyszukiwarki) - z możliwością cofnięcia.
+function PinnedList({ options, onChange }) {
+  options = { ...options, excluded: options.excluded || [], locked: options.locked || {} };
+  return (
+    <>
+      {(Object.keys(normalizeOptions(options).locked).length > 0 || options.excluded.length > 0) && (
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-zinc-300">Pinned and excluded items</span>
+            <button
+              type="button"
+              onClick={() => onChange({ ...options, locked: {}, excluded: [] })}
+              className="mc-link text-xs"
+            >
+              Clear
+            </button>
+          </div>
+          <ul className="flex flex-wrap gap-2">
+            {Object.entries(normalizeOptions(options).locked).map(([slotId, name]) => (
+              <li key={slotId} className="mc-slot mc-gold flex items-center gap-1 px-2 py-0.5 text-xs">
+                {SLOTS.find((slot) => slot.id === slotId).label}: {name}
+                <button
+                  type="button"
+                  aria-label={`Unpin ${name}`}
+                  onClick={() => {
+                    const locked = { ...options.locked };
+                    delete locked[slotId];
+                    onChange({ ...options, locked });
+                  }}
+                  className="px-1 text-zinc-400 hover:text-white"
+                >
+                  ✕
+                </button>
+              </li>
+            ))}
+            {options.excluded.map((name) => (
+              <li key={name} className="mc-slot flex items-center gap-1 px-2 py-0.5 text-xs text-zinc-400 line-through">
+                {name}
+                <button
+                  type="button"
+                  aria-label={`Allow ${name} again`}
+                  onClick={() => onChange({ ...options, excluded: options.excluded.filter((entry) => entry !== name) })}
+                  className="px-1 text-zinc-400 no-underline hover:text-white"
+                >
+                  ✕
+                </button>
+              </li>
+            ))}
+          </ul>
+          <p className="text-xs text-zinc-500">Applies on Generate Build.</p>
+        </div>
+      )}
+    </>
+  );
+}
+
+// Klucz filtrów przedmiotów (do wykrywania, że wynik jest nieaktualny).
+function itemFilterKey(normalized) {
+  if (!normalized) return "";
+  return JSON.stringify([normalized.excludedTiers, normalized.budget, normalized.onlyListed, normalized.locked, normalized.excluded, normalized.attackSpeeds, normalized.avoidNegativeDefences]);
+}
+
+// Filtry przedmiotów zakładki głównej: przedmiot do zbudowania wokół, rzadkości, budżet i rynek.
+function ItemFilters({ options, onChange, weaponType, level, onBrowse }) {
+  const normalized = normalizeOptions(options);
+  const excludedTiers = normalized.excludedTiers;
+  const active = Object.keys(normalized.locked).length + normalized.excluded.length + excludedTiers.length + (normalized.budget ? 1 : 0) + (normalized.onlyListed ? 1 : 0);
+  const [open, setOpen] = useState(active > 0);
+  const market = hasPriceData() || hasLiveData();
+  const live = hasLiveData();
+  return (
+    <div className="flex flex-col gap-2.5">
+      <div className="flex flex-col gap-1.5">
+        <span className="text-xs text-zinc-300">Weapon attack speed</span>
+        <div className="flex flex-wrap gap-1">
+          {ATTACK_SPEEDS.map((speed) => (
+            <ToggleChip key={speed} pressed={normalized.attackSpeeds.includes(speed)} onClick={() => onChange({ ...options, attackSpeeds: toggleValue(normalized.attackSpeeds, speed) })}>
+              {ATTACK_SPEED_LABELS[speed]}
+            </ToggleChip>
+          ))}
+        </div>
+        <span className="text-xs text-zinc-500">{normalized.attackSpeeds.length > 0 ? "Only weapons with the checked speeds." : "None checked = any speed."}</span>
+      </div>
+      <label className="flex items-center gap-2 text-xs text-zinc-200" title="Skips armour, accessories and weapons with a negative elemental defence. Pinned items stay.">
+        <input id="new-no-negdef" type="checkbox" className="mc-check" checked={normalized.avoidNegativeDefences} onChange={() => onChange({ ...options, avoidNegativeDefences: !normalized.avoidNegativeDefences })} /> Avoid negative defences
+      </label>
+      <label
+        className="flex items-center gap-2 text-xs text-zinc-200"
+        style={ts(live ? undefined : { opacity: 0.55 })}
+        title={live ? "Only items listed on the Trade Market right now (WynnVentory snapshot). Pinned items stay." : "Needs live Trade Market data: the GitHub Pages version fetches it from WynnVentory (WYNNVENTORY_KEY secret, see the README)."}
+      >
+        <input id="new-live" type="checkbox" className="mc-check" disabled={!live} checked={live && normalized.onlyListed} onChange={() => onChange({ ...options, onlyListed: !normalized.onlyListed })} />
+        <span>
+          Live on the Trade Market <span className="whitespace-nowrap text-zinc-500">{live ? `· ${formatClock(PRICE_DATA.liveAt)}` : "· no data here"}</span>
+        </span>
+      </label>
+      <button type="button" className="mc-link self-start text-xs" aria-expanded={open} onClick={() => setOpen(!open)}>
+        {open ? "▾" : "▸"} Pin items · rarities{market ? " · budget" : ""}
+        {active > 0 ? ` (${active} set)` : ""}
+      </button>
+      {open && (
+    <div className="wbr-drop flex flex-col gap-3">
+      <PinItemSearch options={options} onChange={onChange} weaponType={weaponType} level={level} onBrowse={onBrowse} />
+      <PinnedList options={options} onChange={onChange} />
+      <div className="flex flex-col gap-1.5">
+        <span className="text-xs text-zinc-300">Allowed rarities</span>
+        <div className="flex flex-wrap gap-1.5">
+          {ITEM_TIERS.map((tier) => (
+            <ToggleChip key={tier} pressed={!excludedTiers.includes(tier)} color={RARITY_COLORS[tier]} onClick={() => onChange({ ...options, excludedTiers: toggleValue(excludedTiers, tier) })}>
+              {tier}
+            </ToggleChip>
+          ))}
+        </div>
+      </div>
+      {hasPriceData() && <BudgetInput options={options} onChange={onChange} />}
+    </div>
+      )}
     </div>
   );
 }
@@ -8595,6 +9085,173 @@ function loadSavedTheme() {
 }
 
 // Przełącznik motywu w prawym górnym rogu.
+// ============================ POWITANIE (pierwsza wizyta) ============================
+// Popup pokazuje się tylko przy pierwszej wizycie: potwierdzenie zapisujemy w localStorage. Przycisk "I confirm"
+// odblokowuje się dopiero po 5 s i po przewinięciu treści do końca (jeśli treść w ogóle się przewija).
+// Gdy localStorage nie działa (prywatne okno, zablokowane dane strony), popup po prostu pojawi się przy kolejnej wizycie.
+const WELCOME_KEY = "wbr-welcome-confirmed-v1";
+const WELCOME_WAIT_MS = 5000;
+const ULTIMATE_BUILD_GUIDE_URL = "https://forums.wynncraft.com/threads/the-ultimate-build-guide.320092/";
+const SITE_SOURCES = [
+  ["Wynnbuilder", "https://wynnbuilder.github.io/", "item and ability tree data, damage formulas, the 16×16 item sprites and ability tree textures (GPL-3.0)"],
+  ["Build Solver (rawfish69)", "https://rawfish69.github.io/build-solver/", "the model for the Build Solver tab"],
+  ["Wynncraft Wiki", "https://wynncraft.wiki.gg/", "weapon DPS, identification rolls, ability trees, powders, class portraits and festival item lists"],
+  ["Wynncraft forums", "https://forums.wynncraft.com/", "Stats and Identifications Guide, The Ultimate Build Guide, How Damage Is Calculated – Rekindled Edition"],
+  ["Wynnguides (afeenah)", "https://afeenah.github.io/wynnguides/", "class and build guides"],
+  ["WynnVentory", "https://wynnventory.com", "Trade Market prices and today's listings"],
+  ["Wynnpool", "https://www.wynnpool.com", "community item weights (MIT)"],
+  ["Fonts", null, "“Minecraft” by Pwnage_Block (FontStruct, CC BY-SA 3.0) and Pixelify Sans (OFL)"],
+];
+
+function readWelcomeConfirmed() {
+  if (typeof window !== "undefined" && window.WBR_SKIP_WELCOME) return true;
+  try {
+    return window.localStorage.getItem(WELCOME_KEY) === "1";
+  } catch (error) {
+    return false;
+  }
+}
+
+function WelcomeDialog() {
+  const [open, setOpen] = useState(() => !readWelcomeConfirmed());
+  const [remaining, setRemaining] = useState(Math.ceil(WELCOME_WAIT_MS / 1000));
+  const [atBottom, setAtBottom] = useState(false);
+  const bodyRef = useRef(null);
+  const buttonRef = useRef(null);
+
+  // 5-sekundowe odliczanie od pokazania popupu
+  useEffect(() => {
+    if (!open) return undefined;
+    const start = Date.now();
+    const timer = setInterval(() => {
+      const left = Math.max(0, Math.ceil((WELCOME_WAIT_MS - (Date.now() - start)) / 1000));
+      setRemaining(left);
+      if (left === 0) clearInterval(timer);
+    }, 200);
+    return () => clearInterval(timer);
+  }, [open]);
+
+  // tło strony nie przewija się, dopóki popup jest otwarty
+  useEffect(() => {
+    if (!open || typeof document === "undefined") return undefined;
+    const { body, documentElement } = document;
+    const previous = [body.style.overflow, documentElement.style.overflow];
+    body.style.overflow = "hidden";
+    documentElement.style.overflow = "hidden";
+    return () => {
+      body.style.overflow = previous[0];
+      documentElement.style.overflow = previous[1];
+    };
+  }, [open]);
+
+  // "dojechał do końca": treść bez paska przewijania liczy się od razu jako przeczytana
+  useEffect(() => {
+    if (!open) return undefined;
+    const check = () => {
+      const node = bodyRef.current;
+      if (!node) return;
+      if (node.scrollTop + node.clientHeight >= node.scrollHeight - 4) setAtBottom(true);
+    };
+    check();
+    window.addEventListener("resize", check);
+    const node = bodyRef.current;
+    if (node) node.focus({ preventScroll: true });
+    return () => window.removeEventListener("resize", check);
+  }, [open]);
+
+  if (!open) return null;
+  const waiting = remaining > 0;
+  const ready = !waiting && atBottom;
+  const label = waiting ? `Wait ${remaining}s...` : !atBottom ? "Scroll to bottom..." : "I confirm";
+  const progress = Math.round(((WELCOME_WAIT_MS / 1000 - remaining) / (WELCOME_WAIT_MS / 1000)) * 100);
+
+  function confirm() {
+    if (!ready) return;
+    try {
+      window.localStorage.setItem(WELCOME_KEY, "1");
+    } catch (error) {
+      // bez localStorage popup wróci przy następnej wizycie - nic więcej nie da się zrobić
+    }
+    setOpen(false);
+  }
+
+  return (
+    <div className="wbr-backdrop wbr-welcome-backdrop fixed inset-0 z-[60] flex items-center justify-center p-3 sm:p-6" role="dialog" aria-modal="true" aria-labelledby="wbr-welcome-title">
+      <div className="wbr-pop wbr-welcome flex max-h-full w-full max-w-2xl flex-col">
+        <div className="wbr-welcome-head flex items-center gap-3 px-5 pb-4 pt-5">
+          <div className="wbr-hero-portraits hidden sm:flex" aria-hidden="true">
+            {Object.keys(CLASSES)
+              .slice(0, 3)
+              .map((name) => (CLASS_PORTRAITS[name] ? <img key={name} src={CLASS_PORTRAITS[name]} alt="" width={26} height={36} /> : null))}
+          </div>
+          <div className="flex min-w-0 flex-col gap-1">
+            <span className="wbr-hero-kicker">Welcome to</span>
+            <h2 id="wbr-welcome-title" className="wbr-hero-title wbr-welcome-title">
+              Builder Wynncraft!
+            </h2>
+          </div>
+        </div>
+        <div
+          ref={bodyRef}
+          tabIndex={0}
+          onScroll={(event) => {
+            const node = event.currentTarget;
+            if (node.scrollTop + node.clientHeight >= node.scrollHeight - 4) setAtBottom(true);
+          }}
+          className="wbr-welcome-body flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-5 py-4 text-base"
+        >
+          <p>
+            This site is designed to generate build suggestions for levelling from <b className="wbr-welcome-hl">lvl ~30</b> to <b className="wbr-welcome-hl">lvl ~100</b>.
+          </p>
+          <p>
+            To find out what the best endgame (Fruma+) builds are, I highly recommend visiting this guide:{" "}
+            <a href={ULTIMATE_BUILD_GUIDE_URL} target="_blank" rel="noopener noreferrer" className="wbr-welcome-link">
+              The Ultimate Build Guide
+            </a>{" "}
+            <span className="wbr-welcome-url">({ULTIMATE_BUILD_GUIDE_URL})</span>
+          </p>
+          <p>I recommend using the optional settings and generating build suggestions multiple times with different options to maximize your results.</p>
+          <div className="flex flex-col gap-2">
+            <h3 className="wbr-welcome-sub">Sources used</h3>
+            <ul className="flex flex-col gap-2 text-sm">
+              {SITE_SOURCES.map(([name, url, what]) => (
+                <li key={name} className="wbr-welcome-source">
+                  {url ? (
+                    <a href={url} target="_blank" rel="noopener noreferrer" className="wbr-welcome-link">
+                      {name}
+                    </a>
+                  ) : (
+                    <span className="wbr-welcome-hl">{name}</span>
+                  )}{" "}
+                  <span className="wbr-welcome-muted">– {what}</span>
+                </li>
+              ))}
+            </ul>
+            <p className="wbr-welcome-muted text-xs">Wynncraft textures and names © Wynncraft. This is a fan-made tool, not affiliated with Wynncraft.</p>
+          </div>
+        </div>
+        <div className="wbr-welcome-foot flex flex-col gap-2 px-5 pb-5 pt-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-col gap-1 text-xs">
+            <span className={waiting ? "wbr-welcome-muted" : "wbr-welcome-ok"}>{waiting ? `○ Read for ${remaining}s` : "✓ 5 seconds passed"}</span>
+            <span className={atBottom ? "wbr-welcome-ok" : "wbr-welcome-muted"}>{atBottom ? "✓ Scrolled to the bottom" : "○ Scroll to the bottom"}</span>
+          </div>
+          <button
+            ref={buttonRef}
+            type="button"
+            onClick={confirm}
+            disabled={!ready}
+            aria-disabled={!ready}
+            className="mc-btn mc-btn-primary wbr-welcome-btn relative overflow-hidden"
+            style={{ "--wbr-progress": `${ready ? 100 : waiting ? progress : 100}%` }}
+          >
+            <span className="relative">{label}</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ThemeToggle({ theme, onChange, className = "" }) {
   return (
     <div className={`flex gap-1 ${className}`} role="group" aria-label="Colour theme">
@@ -10056,7 +10713,8 @@ export default function BuildRecommender() {
   const [initialOptions] = useState(() => ({ ...DEFAULT_OPTIONS, scoring: loadSavedScoring() }));
   const [options, setOptions] = useState(initialOptions);
   const [result, setResult] = useState(null);
-  const [buildMode, setBuildMode] = useState("old"); // "old" = wagi archetypu, "new" = generator nastawiony na obrażenia
+  // Stary generator (wagi archetypu) został usunięty z interfejsu - strona to generator "damage first".
+  const buildMode = "new";
   const [damageForm, setDamageForm] = useState(DEFAULT_DAMAGE_FORM);
   const [damageRunning, setDamageRunning] = useState(false);
   const [damageProgress, setDamageProgress] = useState(null);
@@ -10160,6 +10818,7 @@ export default function BuildRecommender() {
           Boolean(generated.metrics.requireSustain) !== Boolean(damageForm.sustain) ||
           Boolean(generated.metrics.excludeEvents) !== (damageForm.noEvents !== false) ||
           Boolean(generated.metrics.tradeableOnly) !== Boolean(damageForm.tradeable) ||
+          itemFilterKey(generated.options) !== itemFilterKey(normalizeOptions(options)) ||
           generated.treeSettings.selected.length !== treeIds.length
         : generated.level !== level || generated.playerClass !== playerClass || generated.archetype !== archetype || !sameOptions(generated.options, options))
   );
@@ -10342,189 +11001,42 @@ export default function BuildRecommender() {
   }
 
   function handleLevelKeyDown(event) {
-    if (event.key === "Enter") handleGenerate();
+    if (event.key === "Enter") handleGenerateDamage();
   }
 
   return (
     <div className="wbr-mc min-h-screen px-4 py-6 sm:px-6" data-theme={theme}>
       <style>{MC_STYLES}</style>
+      <WelcomeDialog />
       <div className="mx-auto flex max-w-[1720px] flex-col gap-4">
-        <header className="mc-hr-bottom flex flex-wrap items-center justify-between gap-x-6 gap-y-2 pb-3">
-          <div className="flex items-baseline gap-3">
-            <h1 className="text-2xl leading-none text-white">
-              <span className="mc-gold mr-2 text-sm uppercase">Wynncraft</span>Build Recommender
-            </h1>
+        <header className="wbr-hero">
+          <div className="wbr-hero-inner flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
+            <div className="flex min-w-0 flex-1 basis-80 items-center gap-4">
+              <div className="wbr-hero-portraits hidden sm:flex" aria-hidden="true">
+                {Object.keys(CLASSES).map((name, index) =>
+                  CLASS_PORTRAITS[name] ? <img key={name} src={CLASS_PORTRAITS[name]} alt="" width={34} height={48} style={{ animationDelay: `${index * 0.12}s` }} /> : null
+                )}
+              </div>
+              <div className="flex min-w-0 flex-col gap-1">
+                <span className="wbr-hero-kicker">Wynncraft</span>
+                <h1 className="wbr-hero-title">Build Recommender</h1>
+                <p className="wbr-hero-sub hidden md:block">Best-in-slot 9-piece loadouts for your level, class and ability tree, checked against your skill points.</p>
+              </div>
+            </div>
+            <div className="flex shrink-0 flex-col items-end gap-2">
+              <ThemeToggle theme={theme} onChange={setTheme} />
+              <div className="hidden flex-wrap justify-end gap-1.5 sm:flex">
+                <span className="wbr-hero-chip">{ITEM_DB.length.toLocaleString("en-US")} items</span>
+                <span className="wbr-hero-chip">5 classes · 15 trees</span>
+                <span className="wbr-hero-chip wbr-hero-chip-gold">lv 1–120</span>
+              </div>
+            </div>
           </div>
-          <p className="hidden flex-1 text-xs text-zinc-500 md:block">
-            The strongest 9-piece loadout for your level, class and ability tree, checked against your skill points.
-          </p>
-          <ThemeToggle theme={theme} onChange={setTheme} />
         </header>
 
         <div className="flex flex-col gap-4 lg:grid lg:grid-cols-12 lg:items-start">
           <aside className="flex flex-col gap-4 lg:col-span-4 xl:col-span-3">
             <section className="mc-panel flex flex-col gap-4 p-4">
-              {/* Dwa generatory: "Old" (wagi archetypu) i "New" (maksimum obrażeń, EHP i mana jako twarde filtry). */}
-              <div className="mc-hr-bottom flex flex-wrap items-center gap-2 pb-3" role="group" aria-label="Build generator">
-                <span className="mc-title text-xs uppercase">Generator</span>
-                {[
-                  ["old", "Old", "Archetype weights: one score per item, balanced damage, EHP and sustain"],
-                  ["new", "New", "Damage first: maximises one spell or the main attack, with EHP and mana as hard filters"],
-                ].map(([id, label, title]) => (
-                  <button
-                    key={id}
-                    type="button"
-                    aria-pressed={buildMode === id}
-                    onClick={() => {
-                      setBuildMode(id);
-                      setBuildError(null);
-                    }}
-                    className={`mc-btn mc-btn-sm ${buildMode === id ? "mc-btn-on" : ""}`}
-                    title={title}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-              {buildMode === "old" ? (
-                <>
-              <div className={`flex flex-col gap-2 ${rankConfirmed ? "" : "mc-slot p-3"}`}>
-                <label htmlFor="rank" className="mc-title text-xs uppercase">
-                  Rank
-                </label>
-                <select
-                  id="rank"
-                  value={rankConfirmed ? rank : ""}
-                  onChange={(event) => {
-                    setRank(event.target.value);
-                    setRankConfirmed(true);
-                    saveRank(event.target.value);
-                  }}
-                  className={fieldClass}
-                >
-                  {!rankConfirmed && (
-                    <option value="" disabled>
-                      Choose your rank
-                    </option>
-                  )}
-                  {RANKS.map((entry) => (
-                    <option key={entry.id} value={entry.id}>
-                      {entry.label}
-                      {entry.loan ? ` (+${entry.loan} AP early)` : ""}
-                    </option>
-                  ))}
-                </select>
-                <p className={`text-xs ${rankConfirmed ? "text-zinc-500" : "text-amber-300"}`}>
-                  {rankConfirmed
-                    ? level
-                      ? `${abilityPointCap(level, (RANKS.find((entry) => entry.id === rank) || RANKS[0]).loan)} ability points.`
-                      : "Depends on your level."
-                    : "Pick your rank first."}
-                </p>
-              </div>
-
-              {showLevel && (
-              <div className="wbr-fade flex flex-col gap-2">
-                <label htmlFor="level" className="mc-title text-xs uppercase">
-                  Level
-                </label>
-                <input
-                  id="level"
-                  type="number"
-                  min={1}
-                  max={120}
-                  value={levelInput}
-                  placeholder="1-120"
-                  onChange={(event) => setLevelInput(event.target.value)}
-                  onBlur={() => levelInput !== "" && setLevelInput(String(level))}
-                  onKeyDown={handleLevelKeyDown}
-                  className={`${fieldClass} tabular-nums`}
-                />
-                <McRange
-                  id="level-slider"
-                  min={1}
-                  max={120}
-                  value={level ?? 1}
-                  onChange={(event) => setLevelInput(event.target.value)}
-                  className="w-full"
-                  accent="#7FE828"
-                  aria-label="Level slider"
-                />
-                <p className="text-xs text-zinc-500">{level ? `${availableSkillPoints(level)} skill points.` : "Type your combat level."}</p>
-              </div>
-              )}
-
-              {showClass && (
-              <div className="wbr-fade flex flex-col gap-2">
-                <label htmlFor="class" className="mc-title text-xs uppercase">
-                  Class
-                </label>
-                <select id="class" value={playerClass} onChange={handleClassChange} className={fieldClass}>
-                  <option value="">Choose a class</option>
-                  {Object.keys(CLASSES).map((name) => (
-                    <option key={name} value={name}>
-                      {name} ({capitalize(CLASSES[name].weapon)})
-                    </option>
-                  ))}
-                </select>
-              </div>
-              )}
-
-              {showArchetype && (
-              <div className="wbr-fade flex flex-col gap-2">
-                <label htmlFor="archetype" className="mc-title text-xs uppercase">
-                  Archetype
-                </label>
-                <select id="archetype" value={archetype} onChange={(event) => setArchetype(event.target.value)} className={fieldClass} disabled={!playerClass}>
-                  <option value="">{playerClass ? "Choose an archetype" : "Choose a class first"}</option>
-                  {(playerClass ? CLASSES[playerClass].archetypes : []).map((name) => (
-                    <option key={name} value={name}>
-                      {name}
-                    </option>
-                  ))}
-                </select>
-                <p className="text-xs text-zinc-400" title={profile ? profile.focus : "The archetype is the branch of the ability tree you play (e.g. Mage → Riftwalker)."}>
-                  {archetypeValid ? ARCHETYPE_TAGLINES[archetype] || profile.focus : "Your ability tree branch."}
-                </p>
-              </div>
-              )}
-
-              {showArchetype && (
-              <CustomStats
-                options={options}
-                onChange={setOptions}
-                archetype={archetype}
-                weaponType={weaponType}
-                weaponCounts={weaponCounts}
-                level={effectiveLevel}
-                onBrowse={() => setBrowseOpen(true)}
-              />
-              )}
-
-              {ready && (
-              <div className="wbr-fade flex flex-col gap-2">
-              <button
-                type="button"
-                onClick={handleGenerate}
-                className="mc-btn mc-btn-primary w-full py-3 text-lg"
-                style={ts(ready ? undefined : { opacity: 0.55 })}
-                title={ready ? undefined : "Type your level and choose a class and archetype first"}
-              >
-                Generate Build
-              </button>
-              {outdated ? (
-                <p className="text-xs text-amber-400">Settings changed: regenerate.</p>
-              ) : result ? (
-                <p className="text-xs text-zinc-500" title={`Generated at ${result.at.toLocaleTimeString("en-GB")}`}>
-                  Build #{result.run} · <span className="tabular-nums">{result.ms}</span> ms
-                </p>
-              ) : (
-                <p className="text-xs text-zinc-500">Ready to generate.</p>
-              )}
-              </div>
-              )}
-                </>
-              ) : (
                 <DamageForm
                   restrictions={damageRestrictions}
                   playerClass={playerClass}
@@ -10553,8 +11065,10 @@ export default function BuildRecommender() {
                   progress={damageProgress}
                   result={result && result.build.mode === "damage" ? result : null}
                   outdated={outdated && result && result.build.mode === "damage"}
+                  options={options}
+                  onOptions={setOptions}
+                  onBrowse={() => setBrowseOpen(true)}
                 />
-              )}
               {buildError && <p className="text-xs text-red-400">{buildError}</p>}
             </section>
 
@@ -10565,25 +11079,28 @@ export default function BuildRecommender() {
           </aside>
 
           <main className="flex flex-col gap-4 lg:col-span-8 xl:col-span-9" aria-live="polite">
-            <div className="mc-hr-bottom flex flex-wrap gap-1.5 pb-2.5" role="tablist">
+            <div className="wbr-tabs" role="tablist" aria-label="Views">
               {[
-                ["build", guideView ? "Guide build" : solverView ? "Solver build" : "Build", null],
-                ["tree", "Ability tree", playerClass],
-                ["guides", "Guide builds", archetype],
-                ["solver", "Build Solver", null],
-                ["info", "Build info", build ? build.archetype : archetype],
-                ["score", "Score calculation", null],
-              ].map(([id, label, context]) => (
+                ["build", guideView ? "Guide build" : solverView ? "Solver build" : "Build", null, "◈"],
+                ["tree", "Ability tree", playerClass, "❋"],
+                ["guides", "Guide builds", archetype, "★"],
+                ["solver", "Build Solver", null, "⚙"],
+                ["info", "Build info", build ? build.archetype : archetype, "☰"],
+              ].map(([id, label, context, icon]) => (
                 <button
                   key={id}
                   type="button"
                   role="tab"
                   aria-selected={tab === id}
                   onClick={() => setTab(id)}
-                  className={`mc-btn mc-btn-sm ${tab === id ? "mc-btn-on" : ""}`}
+                  className={`wbr-tab ${tab === id ? "wbr-tab-on" : ""}`}
                   title={context ? `${label} · ${context}` : label}
                 >
+                  <span className="wbr-tab-icon" aria-hidden="true">
+                    {icon}
+                  </span>
                   {label}
+                  {context && id !== "build" && <span className="wbr-tab-ctx">{context}</span>}
                 </button>
               ))}
             </div>
@@ -10612,7 +11129,7 @@ export default function BuildRecommender() {
             {tab === "guides" && !archetypeValid && <NeedsPick what="a class and archetype" why="Guide builds are listed per archetype." />}
             {tab === "guides" && archetypeValid && <GuideBuilds archetype={archetype} activeUrl={guideView ? guideView.url : null} onShow={showGuideBuild} />}
             {tab === "info" && !build && (
-              <NeedsPick what={ready ? "a generated build" : "your level, class and archetype, then a generated build"} why="Build info uses the build's spells, tree and powders." onGenerate={ready ? handleGenerate : null} />
+              <NeedsPick what={ready ? "a generated build" : "your level, class and archetype, then a generated build"} why="Build info uses the build's spells, tree and powders." onGenerate={playerClass && level && treeIds.length > 0 ? handleGenerateDamage : null} />
             )}
             {tab === "info" && build && (
               <BuildInfoPanel
@@ -10656,25 +11173,8 @@ export default function BuildRecommender() {
                 onUseCycle={useCycle}
               />
             )}
-            {tab === "build" && !build && !(buildMode === "new" && playerClass) && (
-              <section className="mc-panel flex flex-col gap-3 p-6">
-                <h2 className="mc-title text-xl">No build yet</h2>
-                <p className="max-w-2xl text-sm text-zinc-300">
-                  Type your level, choose a class and the archetype you play, then press <span className="mc-gold">Generate Build</span>. To build
-                  around gear you already have, pin it first with "Build around an item" in Custom stats.
-                </p>
-                <ul className="flex flex-col gap-1 text-sm text-zinc-400">
-                  <li>• Level: {level ? <span className="text-zinc-100">{level}</span> : <span className="text-amber-300">missing</span>}</li>
-                  <li>• Class: {playerClass ? <span className="text-zinc-100">{playerClass}</span> : <span className="text-amber-300">missing</span>}</li>
-                  <li>• Archetype: {archetypeValid ? <span className="text-zinc-100">{archetype}</span> : <span className="text-amber-300">missing</span>}</li>
-                </ul>
-                {ready && (
-                  <button type="button" onClick={handleGenerate} className="mc-btn mc-btn-primary self-start">
-                    Generate Build
-                  </button>
-                )}
-                {buildError && <p className="text-sm text-red-400">{buildError}</p>}
-              </section>
+            {tab === "build" && !build && !playerClass && (
+              <ClassPicker onPick={(name) => handleClassChange({ target: { value: name } })} />
             )}
             {tab === "build" && build && (
             <>

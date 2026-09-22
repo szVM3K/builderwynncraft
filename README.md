@@ -41,7 +41,7 @@ npm run update-event-items               # re-fetch the list of limited-time eve
 
 ## Trade Market prices (budget)
 
-The **Budget** field (Custom stats, under Allowed rarities) uses Trade Market prices from
+The **Budget** field (Items → Pin items · rarities · budget) uses Trade Market prices from
 [WynnVentory](https://wynnventory.com) (API v2, `/market/rankings`: the average of the middle 80 % of listings
 over the last 7 archived days). Their API needs a free key, so the prices are fetched when the site is built,
 never in the browser:
@@ -63,135 +63,81 @@ field is disabled and everything else works as before.
 
 ## Features
 
+### Welcome popup
+
+The first visit shows a short welcome (what the site is for – levelling from about level 30 to 100 – a link to
+The Ultimate Build Guide for endgame builds, and the list of sources). **I confirm** unlocks after 5 seconds and
+once the text has been scrolled to the end; the page behind it doesn't scroll meanwhile. The confirmation is kept
+in `localStorage` (`wbr-welcome-confirmed-v1`), so the popup doesn't come back; if the browser blocks storage it
+simply shows again on the next visit.
+
 ### Generating a build
 
-- The page starts blank and the form opens step by step: rank → level → class → archetype. Options that only
-  need the class (build around an item, rarities, budget, item level, attack speed, powders) appear with the
-  archetype choice; options that need the archetype (build focus, damage and defence focus, guide items, extra
-  priorities) appear together with the Generate Build button. Nothing is suggested until then (the ability tree,
-  guide builds, Build info and Score calculation tabs also wait for the class/archetype they need).
-- **Budget** in emeralds (E / EB / LE / STX; 1 LE = 64 EB = 4,096 E): the build's total Trade Market price stays
-  under it. Pinned items don't count (you have them), untradable/quest items cost nothing, Fabled and Mythic
-  items without listings are skipped when a budget is set. The build header shows the cost, cards and the item
-  browser show each item's price, and the browser can sort by price.
-- **Trade Market availability**: the dot next to the slot name (● N on market / ○ not on market) says whether the
-  item was listed on the Trade Market today; the expanded card shows the listing count and the lowest price, and
-  the item browser has a **● Listed today** filter. Needs the `WYNNVENTORY_KEY` secret like the prices.
-- **Only items on the market** (checkbox under Budget): the build uses only items listed on the Trade Market today.
-  Pinned items stay (you have them), untradable and quest items are skipped, and a slot with nothing listed stays
-  empty (with a note above the build). Other picks and the item browser start with the same filter.
-- **Build around an item**: type a name in Custom stats (weapons of the class, armour, accessories up to your level)
-  and pick it – the item is pinned to its slot and the rest of the build is fitted around it. This is how most
-  builds start in practice (you have the weapon, you need the gear).
-- **Browse items…** (next to that box) opens the item browser: every weapon of your class, armour piece and
-  accessory up to your level with filters for name, slot, element (damage the weapon deals / the item's element),
-  rarity, level range, attack speed and minimum DPS, sorted by score in the current build, weapon DPS, level,
-  health or name. With a build on screen every row shows its score in that build, the change in the summary and
-  whether it fits your skill points; Pin puts it in its slot and re-fits the rest.
-- **Identification filter** (item browser and Other picks): "+ Add identification" opens a searchable list of every
-  identification that exists in the item data (grouped: skill points, spell costs, health & sustain, mana, spell
-  damage, main attack, damage, defence %, movement, other), plus base health and defences and every major ID. Pick
-  several, set an optional minimum for each, match all or any; an item matches when the identification helps
-  (a spell cost goes down) at its best roll. "Selected identifications" sorts by how much of them an item has.
-- **Weapon powders** (Custom stats): every weapon of your class is compared with powders in all its slots (the
-  highest tier for its level, VII from level 70, VI from 55), like in game and in Wynnbuilder – a 3-slot weapon gets
-  more than a 2-slot one. "Auto" uses the element of your damage focus; "None" compares bare weapons. The damage,
-  the score and the summary include them; cards show the base DPS next to the powdered one.
-- **Set bonuses** as in Wynnbuilder: wearing several items of a set (Morph, Moirai, Petal, Visceral, …) adds the
-  set's bonus for that many pieces (identifications, health, skill points). The search counts it in the build score,
-  Other picks show it as "set bonus", cards say which set an item belongs to and the summary lists the active
-  bonuses. Items that can't be worn together (sets marked illegal, e.g. the Hive sets) are never combined.
-- **Allowed rarities**: turn off Mythic (or Fabled…) items for a build you can afford; pinned items always stay.
-- Quest-reward items that can't be traded (e.g. Intensity from The Qira Hive) can only be owned once, so they are
-  never put on both ring slots; shop items (e.g. Zhight Shiny Ring) can be doubled.
-- **Custom stats** in the form: damage focus (Neutral/Earth/Thunder/Water/Fire/Air) as a preference, weapon attack
-  speed checkboxes (the weapon is picked among the checked speeds), preferring items from guide builds, extra
-  stat priorities (e.g. Mana Regen, Life Steal), defence focus (chosen elemental defences count toward the score;
-  "Avoid negative defences" penalises negative ones).
-- **Build focus**: three 0–100 % sliders – Main attack DPS, Spell DPS and EHP & sustain. X % means X % of the
-  group's full weight (0 % ignores the group, 100 % is full priority); the "meta" mark is the archetype's position
-  derived from the calibrated weights (an untouched slider reproduces the calibration exactly). Above meta the
-  main attack is scored as the real DPS of the whole set during the search (attack-speed tiers add up, raw × hits
-  per second, Strength, crits), with a wider candidate pool and a second pass tuned to the chosen weapon.
-- **Item level** window: "Prefer items within 10 levels" (default) lowers the score of items older than the window
-  by 4 % per level outside it (never more than half), so an old item wins only when nothing newer comes close;
-  also "within 20", "Any item level" or "Only …" (hard cut-off). Pinned items always stay. The solver has its own
-  minimum-level field (empty = level − 10).
-- **Other picks / Exclude / Unpin** on every card: the next candidates for the slot (score, whether they fit the
-  skill points, and the change in the summary – DPS, spell hit, EHP, HP, mana, regen, speed – after the swap).
-  With nothing typed it is the ranking for the slot with your settings; the same filters as the item browser
-  (name, element, rarity, level, attack speed, DPS, sort) search every item for the slot – weapons of your class
-  only – still scored in this build. Using one pins it and re-fits the rest of the build around it; Exclude
-  removes an item from the pool. Pinned and excluded items are listed in Custom stats.
-- The score shown on a card and in Other picks is the item's value **in this build**: its identification points,
-  its share of the set's real main attack DPS (with the main attack slider above meta), minus the value of the
-  skill points the set has to spend because of it and the health-deficit penalty – exactly what the search
-  optimises.
-- **Score ×10** everywhere in the UI; "How is the score calculated?" above the cards explains the rules
-  (value ÷ unit × weight × 10, weapon, penalties, bonuses) on an item from the current build.
-- **Score calculation** tab: every stat weight and build-level term (weapon DPS weight, guide-item bonus,
-  off-archetype skill point penalty, health deficit, free skill point value, level window) the generator uses
-  right now for the chosen archetype and settings, each of them editable (empty field = calculated value).
-  Overrides (`options.scoring`) are saved in the browser and apply to the search, Other picks and the Build
-  Solver's archetype fit.
-- Damage focus is a preference, not a filter: a weapon's DPS counts 70 % + 30 % × the share of its damage in the
-  chosen elements (off-focus damage still hits, it just misses the +% element bonuses), so a strong rainbow weapon
-  can beat a weaker single-element one.
-- Raw damage identifications are worth more at low levels: their weights are multiplied by (typical endgame
-  weapon DPS ÷ typical weapon DPS at your level), up to ×2.5 – flat raw damage doesn't scale with the weapon,
-  % does. The Score calculation tab shows the multiplier.
-- Weapons without base damage (e.g. The Specialist, which only deals powder damage) keep only 10 % of their
-  identification score: their huge % bonuses multiply a few points of powder damage. Builds whose items take away
-  health in total get a penalty.
-- "Elemental …" and per-element damage identifications (e.g. Elemental Spell Damage, Water Main Attack Damage)
-  count toward the score.
+The generator asks *what is the strongest build that still survives and still pays for its spells?* (Until
+0.29.0 there was also an "Old", weight-based generator; it was removed in 0.30.0.)
 
-### Old and New generator
+1. **Class** → the main panel immediately shows the class overview: its archetypes (tabs), the spells of the
+   suggested tree for each archetype with their mana costs, click combos and damage, and the archetype's usual
+   spell cycles – drawn as numbered steps with arrows (spell name, clicks, mana) – with how much mana per second
+   they burn and how much Mana Regen *or* Mana Steal your items would need to sustain them. **Use** on a cycle puts
+   it into the mana filter (and loads that archetype's tree). Before a class is chosen the page shows the five
+   class portraits to pick from.
+2. **Rank** and **level**, then an **ability tree** preset (or your own tree from the Ability tree tab).
+3. **Maximise**: the main attack or one spell from the tree. That single number is what the search maximises.
+4. **Must have** (pass/fail, never weights):
+   - **Effective HP** – a slider in 5% steps of the most EHP your level can reach (`src/ehp-range.json`).
+   - **Life sustain > 0** (optional) – Health Regen per second (raw × (1 + %), ÷ 4 s) plus Life Steal (÷ 3 s)
+     must stay above zero, so the build doesn't drain your health.
+   - **Mana: spell cycle** – spells you cast, clicks per second, Mana Steal and ability mana on/off. Income is
+     `(Mana Regen + 25) / 5 + Mana Steal / 3`, the cycle lasts `3 × spells / clicks per second`. The clicks field
+     can be cleared and retyped (0.5–12); leaving it empty puts the last valid value back.
+5. **Items** (pinned items always stay):
+   - *No limited-time event items* (on by default) skips the items you can only get during a festival (74 in the
+     current `src/event-items.json`).
+   - *Tradeable only* keeps only items that can be bought and sold on the Trade Market (no untradable or quest items).
+   - *Weapon attack speed*: the weapon is picked only among the checked base speeds (none checked = any). The
+     main attack line in the summary shows the speed *after* attack speed tier IDs, which can differ.
+   - *Avoid negative defences* skips armour, accessories and weapons with any negative elemental defence.
+   - *Live on the Trade Market*: only items listed on the Trade Market right now (needs the `WYNNVENTORY_KEY`
+     secret, see above; disabled without data).
+   - *Pin items · rarities · budget* (folded): pin an item to its slot (the rest is fitted around it), allowed
+     rarities, and the emerald budget when prices are available.
 
-The **Generator** switch at the top of the left panel picks how a build is put together. Only the New one changed
-in 0.29.0; the Old generator gives exactly the same builds as before.
-
-- **Old** is the weight-based generator described above: every item gets a score from the archetype's stat
-  weights and your own priorities, and the best-scoring set wins.
-- **New** asks *what is the strongest build that still survives and still pays for its spells?*
-
-  1. **Class** → the main panel immediately shows the class overview: its archetypes (tabs), the spells of the
-     suggested tree for each archetype with their mana costs, click combos and damage, and the archetype's usual
-     spell cycles with how much mana per second they burn and how much Mana Regen *or* Mana Steal your items would
-     need to sustain them. **Use** on a cycle puts it into the mana filter (and loads that archetype's tree).
-  2. **Rank** and **level**, then an **ability tree** preset (or your own tree from the Ability tree tab).
-  3. **Maximise**: the main attack or one spell from the tree. That single number is what the search maximises.
-  4. **Must have** (pass/fail, never weights):
-     - **Effective HP** – a slider in 5% steps of the most EHP your level can reach (`src/ehp-range.json`).
-     - **Life sustain > 0** (optional) – Health Regen per second (raw × (1 + %), ÷ 4 s) plus Life Steal (÷ 3 s)
-       must stay above zero, so the build doesn't drain your health.
-     - **Mana: spell cycle** – spells you cast, clicks per second, Mana Steal and ability mana on/off. Income is
-       `(Mana Regen + 25) / 5 + Mana Steal / 3`, the cycle lasts `3 × spells / clicks per second`.
-  5. **Items**: *No limited-time event items* (on by default) skips the items you can only get during a festival
-     (74 in the current `src/event-items.json`); *Tradeable only* keeps only items that can be bought and sold on the Trade Market
-     (no untradable or quest items). Pinned items always stay.
-
-  **How the search works.** Everything is evaluated with the same damage and EHP formulas as the rest of the site
-  (checked against `computeBuildStats`). The search is a beam over the whole database, one weapon at a time
-  (candidates per slot are pre-scored with numeric stat weights derived from your goal, then the best few get the
-  exact evaluation with skill points), run twice: once at your EHP and once at +20% EHP, because a set that passes
-  a higher threshold also passes yours and the "tankier" beam finds other combinations. The best set of *every*
-  weapon (not just the top three overall) is kept, all of them get a short polish, the best six a full one, and
-  the winner then gets single swaps against every item of every slot, weapon swaps (every top weapon with its best
-  powder) and **pair swaps** (two slots at once — the move a single swap can't make: a stronger item plus the
-  item that pays for its skill points or EHP). Builds found earlier in the same session with the same settings
-  (only the EHP threshold differs) are fed back in as starting points, so dragging the EHP slider never loses a
-  better build you already found. A progress bar shows the stage; a search takes about 5-10 s at level 100+.
-
-  Measured on four archetypes at level 106/120 and seven EHP thresholds each (10-40% of the reachable maximum),
-  compared with 0.28.0: never worse in these runs, typically +5-20% damage at the same EHP (e.g. Fallen at 35% EHP 545k → 722k,
-  Acolyte lv 120 at 30% EHP 35.3k → 44.3k), and the "higher EHP gives more damage" jumps that made the slider feel
-  harsh are gone within a session.
+**How the search works.** Everything is evaluated with the same damage and EHP formulas as the summary (checked
+against `computeBuildStats`). The search is a beam over the whole database, one weapon at a time (candidates per
+slot are pre-scored with numeric stat weights derived from your goal, then the best few get the exact evaluation
+with skill points), run twice: once at your EHP and once at +20% EHP, because a set that passes a higher threshold
+also passes yours and the "tankier" beam finds other combinations. The best set of *every* weapon is kept, all of
+them get a short polish, the best six a full one, and the winner then gets single swaps against every item of
+every slot, weapon swaps (every top weapon with its best powder) and **pair swaps** (two slots at once). Builds
+found earlier in the same session with the same settings (only the EHP threshold differs) are fed back in as
+starting points, so dragging the EHP slider never loses a better build you already found. A progress bar shows
+the stage; a search takes about 5-10 s at level 100+.
 
 - **Guide builds at level 100+**: from level 100 the generator treats the Wynnbuilder guide builds as the
   reference for that class — at high level nothing in the database beats them. Their weapons join the weapon list
-  (with the powder element that suits the goal), and every complete guide build is evaluated as a finished
-  candidate, so the result is never worse than the guide it starts from.
+  (with the powder element that suits the goal), and every complete guide build that passes your item filters is
+  evaluated as a finished candidate, so the result is never worse than the guide it starts from.
+
+### Item tools
+
+- **Budget** in emeralds (E / EB / LE / STX; 1 LE = 64 EB = 4,096 E): the build's total Trade Market price stays
+  under it. Pinned items don't count (you have them), untradable/quest items cost nothing, Fabled and Mythic
+  items without listings are skipped when a budget is set.
+- **Trade Market availability**: the dot next to the slot name (● N on market / ○ not on market) says whether the
+  item was listed on the Trade Market today; the expanded card shows the listing count and the lowest price, and
+  the item browser has a **● Listed today** filter.
+- **Browse items…** opens the item browser: every weapon of your class, armour piece and accessory up to your
+  level with filters for name, slot, element, rarity, level range, attack speed and minimum DPS, sorted by value
+  in the current build, weapon DPS, level, health or name. Pin puts an item in its slot and re-fits the rest.
+- **Identification filter** (item browser and Other picks): "+ Add identification" opens a searchable list of
+  every identification in the item data; set an optional minimum for each, match all or any.
+- **Weapon powders**: every weapon is compared with the best powder element for your goal in all its slots (the
+  highest tier for its level, VII from level 70, VI from 55), like in game and in Wynnbuilder.
+- **Set bonuses** as in Wynnbuilder (Morph, Moirai, Petal, Visceral, …); sets marked illegal (e.g. the Hive sets)
+  are never combined. Quest-reward items that can't be traded are never put on both ring slots.
+- **Other picks / Exclude / Unpin** on every card: the next candidates for the slot with the change in damage and
+  EHP after the swap and whether they fit your skill points. Using one pins it and re-fits the rest.
 
 ### Wynnpool item weights
 
@@ -210,17 +156,20 @@ keeps a community rating of **which identifications actually matter on a given i
 
 ### Item cards
 
-- Cards start collapsed: name, skill point requirements, class and combat level, and the Other picks / Rolls /
-  Exclude buttons. The ▼ Details arrow opens the rest (stats, identifications, price, the Obtain and Score pages);
-  ▲ closes it. "Expand all" / "Collapse all" above the cards switches every card; clicking the score opens the
-  card on its Score page.
-
-- Cards are the in-game tooltip (Wynncraft 2.1 layout) in VCR OSD Mono: icon in a frame, name in the rarity colour with the average roll "[50.0%]", rarity and type
+- Cards start collapsed: name, level, the skill point requirements as small chips (only the skills the item
+  needs, ✓ when met), base health, the item's four strongest identifications and its worst negative one, and the
+  Other picks / Rolls / Exclude buttons. The ▼ Details arrow opens the full tooltip; "Expand all" / "Collapse all"
+  above the cards switches every card.
+- A requirement is ✓ whenever the build can be equipped: an item may need more of a skill than the build's final
+  total when another item with negative skill points goes on after it (the game equips in order), so the check
+  follows the equip order, not just the totals.
+- Cards are the in-game tooltip (Wynncraft 2.1 layout) and stay dark in both themes, with a 3 px rarity border:
+  icon in a frame, name in the rarity colour with the average roll "[50.0%]", rarity and type
   badges, elements, powder slots in the corner, big DPS with attack speed (hits/s) and per-element damage ranges,
-  or big health with defences; five skill diamonds with check boxes (met by the build's skill points), Class Type
+  or big health with defences; five skill diamonds with check boxes, Class Type
   and Combat Level, identifications in groups (skill points, damage, health/mana/defences, misc, spell costs with
   the class's spell names) with roll tags, Major IDs. The dots at the bottom switch the card's pages: item,
-  how to get it (source, Trade Market, wiki link), score breakdown.
+  how to get it (source, Trade Market, wiki link), damage breakdown.
 - **Identification rolls**: every ID is shown and scored at its 50 % roll (positive = 80 % of base, negative = base)
   with a [xx%] tag like in game; the **Rolls** button sets the roll of the whole item or of each ID separately
   (0–100 %). Rules as in the game / Wynnbuilder: 30–130 % of base for positive IDs, 130–70 % for negative ones,
@@ -331,20 +280,26 @@ of the site):
 ### UI
 
 - Hints under the controls are a few words each; hover them for the full explanation.
-- The whole interface follows the game's GUI: the VCR OSD Mono pixel font with a Minecraft-style outline, bevelled panels
-  and buttons like the Wynncraft menus, gold titles, black text fields, XP-bar-style bars (`mc-*` classes in
+- The whole interface follows the game's GUI: the **Minecraft font** (the one the game uses – clear digits, 5 ≠ S,
+  3 ≠ 8; characters it lacks such as · – ✓ come from Pixelify Sans) with a Minecraft-style drop shadow, bevelled
+  panels and buttons like the Wynncraft menus, gold titles, black text fields, XP-bar-style bars (`mc-*` classes in
   `MC_STYLES` in `BuildRecommender.jsx`).
+- A banner header with the class portraits, and the views (Build, Ability tree, Guide builds, Build Solver, Build
+  info) as large folder tabs; on a phone the tab row scrolls sideways.
+- Dialogs fade the page behind them and pop in; folded sections slide open; drop-down lists use the browser's
+  customisable `<select>` (`appearance: base-select`, Chrome/Edge 135+) with a pixel-style list, and fall back to
+  the native list elsewhere. All animations are off with "reduce motion".
 - **Dark / Light** switch in the top right corner. The choice is remembered in the browser; without one the site
   follows the system setting. Light mode is a light, inventory-like version of the same GUI: the `mc-*` classes have
   light overrides under `.wbr-mc[data-theme=light]`, and every inline style goes through `ts()`, which swaps the
-  game's bright chat colours for darker ones readable on light panels (`LIGHT_COLOR_MAP`) and flips the lightness of
-  any other colour in OKLab, keeping its hue. Item icons and the ability tree sprites look the same in both modes.
+  game's bright chat colours for darker ones readable on light panels (`LIGHT_COLOR_MAP`); white text (Air,
+  Agility, Normal items) stays white with a dark 1 px outline. Item cards keep the dark tooltip look
+  (`GameCardContext`). Item icons and the ability tree sprites look the same in both modes.
 
 ## Where things are
 
-- `src/BuildRecommender.jsx`: archetype weights (`ARCHETYPES`), personalisation options (`DAMAGE_FOCUS_OPTIONS`,
-  `ATTACK_SPEEDS`, `STAT_BOOSTS`), data normalisation, the `generateOptimizedBuild()` algorithm with skill point
-  validation, and the whole UI. The weight system is described in the comment at the top of the file.
+- `src/BuildRecommender.jsx`: data normalisation, the damage-first generator (`generateDamageBuild()`) with skill
+  point validation, the stat weights it pre-scores candidates with (`ARCHETYPES`), and the whole UI.
 - `src/wynncraft-items.json`: 5,414 items (Wynnbuilder data 2.2.4.0) with `fixID`, the list of static IDs and the
   item's set, plus the 79 sets with their bonuses.
 - `src/guide-builds.json`: the guide builds (items, tomes, authors, Wynnbuilder links).
@@ -384,7 +339,8 @@ of the site):
 - Wynnbuilder `media/items/old.png` – the 16×16 item-type sprites (GPL-3.0)
 - Wynnpool – community item weights (which identifications matter on an item): https://www.wynnpool.com
   (code and data MIT, https://github.com/AiverAiva/Wynnpool)
-- Fonts: VCR OSD Mono by Riciery Leal (freeware, `src/fonts/VCR_OSD_MONO.woff2`); Tiny5 and Pixelify Sans
-  (@fontsource, OFL licence) as fallbacks.
+- Fonts: "Minecraft" by Pwnage_Block (FontStruct, fontstruct.com/fontstructions/show/432966, CC BY-SA 3.0,
+  `src/fonts/minecraft.woff2`, from the `typeface-minecraft` npm package); Pixelify Sans (@fontsource, OFL) for
+  the characters it lacks.
 - Ability tree sprites (`icons.png`, `connectors.png`, embedded in `BuildRecommender.jsx`): Wynncraft's ability tree
   textures as shipped in Wynnbuilder's `media/atree`; © Wynncraft, used here as in other fan-made tools.
