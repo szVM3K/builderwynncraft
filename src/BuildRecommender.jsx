@@ -1085,6 +1085,46 @@ function formatEmeralds(value) {
   if (value >= 64) return `${Math.round(value / 64)} EB`;
   return `${Math.round(value)} E`;
 }
+// Oferty widziane dziś na Trade Markecie (WynnVentory, snapshot przy każdym buildzie strony, co 2 h).
+const LIVE_ITEMS = (PRICE_DATA && PRICE_DATA.live) || {};
+function hasLiveData() {
+  return Boolean(PRICE_DATA && PRICE_DATA.liveAt);
+}
+function formatClock(iso) {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+// { state: "listed" | "none" | "untradable", count, low, at }
+function marketStatus(item) {
+  if (!item) return { state: "none" };
+  if (isUntradable(item)) return { state: "untradable" };
+  const entry = LIVE_ITEMS[item.name];
+  return entry && entry.n > 0 ? { state: "listed", count: entry.n, low: entry.low, at: entry.at } : { state: "none" };
+}
+function marketText(item, short = false) {
+  const status = marketStatus(item);
+  if (status.state === "untradable") return short ? "" : "Untradable";
+  if (status.state === "none") return short ? "not listed" : "Not listed on the Trade Market today";
+  if (short) return `${status.count} listed${status.low ? ` from ${formatEmeralds(status.low)}` : ""}`;
+  return `${status.count} listing${status.count === 1 ? "" : "s"} on the Trade Market today${status.low ? `, lowest ${formatEmeralds(status.low)}` : ""}${status.at ? ` (last seen ${formatClock(status.at)})` : ""}`;
+}
+function marketTitle() {
+  return `Trade Market listings seen today by WynnVentory users, snapshot ${PRICE_DATA.liveAt ? formatClock(PRICE_DATA.liveAt) : ""}. Listings can sell in the meantime.`;
+}
+// Mały znacznik "na rynku": zielona kropka = wystawiony dziś, szara = brak ofert.
+function MarketDot({ item, withText = true }) {
+  if (!hasLiveData()) return null;
+  const status = marketStatus(item);
+  if (status.state === "untradable") return null;
+  const listed = status.state === "listed";
+  return (
+    <span className="inline-flex items-center gap-1 normal-case tracking-normal" style={{ color: listed ? "#55FF55" : "#6B6F94" }} title={`${marketText(item)}. ${marketTitle()}`}>
+      <span aria-hidden="true">{listed ? "●" : "○"}</span>
+      {withText ? (listed ? `${status.count} on market` : "not on market") : <span className="sr-only">{listed ? "on the market" : "not on the market"}</span>}
+    </span>
+  );
+}
+
 function priceLabel(item) {
   const { price, untradable } = itemPrice(item);
   if (untradable) return "untradable";
@@ -2703,7 +2743,9 @@ function ScorePage({ slot, build }) {
   );
 }
 
-function ItemCard({ slot, build, actions, powder = null }) {
+// Karta przedmiotu. Zwinięta (open = false): tylko nazwa, wymagania (Skill Pointy, klasa, poziom) i akcje;
+// strzałka ▼/▲ rozwija resztę (statystyki, identyfikacje, cena, strony karty).
+function ItemCard({ slot, build, actions, powder = null, open = true, onToggle = null }) {
   const wide = "";
   const { attackSpeeds } = build.options;
   const [page, setPage] = useState(0);
@@ -2753,6 +2795,30 @@ function ItemCard({ slot, build, actions, powder = null }) {
   const overall = overallRoll(item);
   const levelOk = item.level <= build.level;
   const classOk = item.category !== "weapon" || WEAPON_CLASS[item.type] === build.playerClass;
+  const collapsed = Boolean(onToggle) && !open;
+  const requirements = (
+    <>
+      <SkillRow reqs={item.reqs} totals={build.skillPoints.totals} />
+      <div className="flex flex-col gap-0.5 text-base">
+        {item.category === "weapon" && (
+          <div className="flex items-baseline justify-between gap-3">
+            <span className="flex items-center gap-1.5" style={{ color: TOOLTIP.text }}>
+              <CheckBox state={classOk ? "yes" : "no"} /> Class Type
+            </span>
+            <span style={{ color: TOOLTIP.muted }}>{CLASS_TYPE_NAMES[WEAPON_CLASS[item.type]] || WEAPON_CLASS[item.type]}</span>
+          </div>
+        )}
+        <div className="flex items-baseline justify-between gap-3">
+          <span className="flex items-center gap-1.5" style={{ color: TOOLTIP.text }}>
+            <CheckBox state={levelOk ? "yes" : "no"} /> Combat Level
+          </span>
+          <span className="tabular-nums" style={{ color: TOOLTIP.muted }}>
+            {item.level}
+          </span>
+        </div>
+      </div>
+    </>
+  );
   return (
     <article
       className={`relative flex flex-col border-2 ${wide}`}
@@ -2763,12 +2829,18 @@ function ItemCard({ slot, build, actions, powder = null }) {
           {slot.label}
           {pinned && <span style={{ color: "#FFAA00" }}> · pinned</span>}
         </span>
+        <MarketDot item={item} />
         <button
           type="button"
           className="tabular-nums normal-case tracking-normal hover:text-white focus:outline-none focus:ring-2 focus:ring-amber-500"
           title={scoreBreakdownTitle(slot)}
-          onClick={() => setPage(page === 2 ? 0 : 2)}
-          style={{ color: page === 2 ? "#FFAA00" : TOOLTIP.muted }}
+          onClick={() => {
+            if (collapsed) {
+              onToggle();
+              setPage(2);
+            } else setPage(page === 2 ? 0 : 2);
+          }}
+          style={{ color: page === 2 && !collapsed ? "#FFAA00" : TOOLTIP.muted }}
         >
           score {formatScore(slot.score)}
         </button>
@@ -2785,21 +2857,27 @@ function ItemCard({ slot, build, actions, powder = null }) {
                 </span>
               )}
             </h3>
-            <div className="flex flex-wrap gap-1">
-              <TooltipBadge color={color}>{item.tier}</TooltipBadge>
-              <TooltipBadge color={color}>{item.type}</TooltipBadge>
-              {guideCount ? (
-                <span title="Used in guide builds for this archetype">
-                  <TooltipBadge color="#FFAA00">Guide ×{guideCount}</TooltipBadge>
-                </span>
-              ) : null}
-            </div>
-            <ElementIcons elements={item.elements} color={color} />
+            {!collapsed && (
+              <>
+                <div className="flex flex-wrap gap-1">
+                  <TooltipBadge color={color}>{item.tier}</TooltipBadge>
+                  <TooltipBadge color={color}>{item.type}</TooltipBadge>
+                  {guideCount ? (
+                    <span title="Used in guide builds for this archetype">
+                      <TooltipBadge color="#FFAA00">Guide ×{guideCount}</TooltipBadge>
+                    </span>
+                  ) : null}
+                </div>
+                <ElementIcons elements={item.elements} color={color} />
+              </>
+            )}
           </div>
-          <PowderSlots count={item.slots} recommended={powder} applied={item.powders || null} level={item.level} />
+          {!collapsed && <PowderSlots count={item.slots} recommended={powder} applied={item.powders || null} level={item.level} />}
         </div>
 
-        {page === 1 ? (
+        {collapsed ? (
+          requirements
+        ) : page === 1 ? (
           <ObtainInfo item={item} color={color} />
         ) : page === 2 ? (
           <ScorePage slot={slot} build={build} />
@@ -2808,25 +2886,7 @@ function ItemCard({ slot, build, actions, powder = null }) {
             {item.category === "weapon" ? <WeaponBlock item={item} profile={build.profile} /> : <BaseStats item={item} />}
 
             <TooltipDivider color={color} />
-            <SkillRow reqs={item.reqs} totals={build.skillPoints.totals} />
-            <div className="flex flex-col gap-0.5 text-base">
-              {item.category === "weapon" && (
-                <div className="flex items-baseline justify-between gap-3">
-                  <span className="flex items-center gap-1.5" style={{ color: TOOLTIP.text }}>
-                    <CheckBox state={classOk ? "yes" : "no"} /> Class Type
-                  </span>
-                  <span style={{ color: TOOLTIP.muted }}>{CLASS_TYPE_NAMES[WEAPON_CLASS[item.type]] || WEAPON_CLASS[item.type]}</span>
-                </div>
-              )}
-              <div className="flex items-baseline justify-between gap-3">
-                <span className="flex items-center gap-1.5" style={{ color: TOOLTIP.text }}>
-                  <CheckBox state={levelOk ? "yes" : "no"} /> Combat Level
-                </span>
-                <span className="tabular-nums" style={{ color: TOOLTIP.muted }}>
-                  {item.level}
-                </span>
-              </div>
-            </div>
+            {requirements}
             <TooltipDivider color={color} />
 
             <IdentificationList item={item} relevant={relevant} playerClass={build.playerClass} />
@@ -2842,12 +2902,32 @@ function ItemCard({ slot, build, actions, powder = null }) {
         )}
 
         <div className="mt-auto flex flex-col gap-2 pt-1">
-          {item && hasPriceData() && (
+          {!collapsed && item && hasPriceData() && (
             <p className="text-xs" style={{ color: TOOLTIP.muted }} title="Trade Market price (WynnVentory, average of the middle 80% of listings)">
               {priceLabel(item)}
             </p>
           )}
-          <CardPager page={page} onChange={setPage} />
+          {!collapsed && item && hasLiveData() && !isUntradable(item) && (
+            <p className="text-xs" style={{ color: marketStatus(item).state === "listed" ? "#55FF55" : TOOLTIP.muted }} title={marketTitle()}>
+              {marketText(item)}
+            </p>
+          )}
+          {!collapsed && <CardPager page={page} onChange={setPage} />}
+          {onToggle && (
+            <button
+              type="button"
+              onClick={onToggle}
+              aria-expanded={open}
+              aria-label={open ? `Hide ${item.name} details` : `Show ${item.name} details`}
+              className="flex w-full items-center justify-center gap-2 py-0.5 text-xs hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+              style={{ color: TOOLTIP.muted }}
+            >
+              <span aria-hidden="true" style={{ color }}>
+                {open ? "▲" : "▼"}
+              </span>
+              {open ? "Hide details" : "Details"}
+            </button>
+          )}
           {actions && (
             <div className="flex flex-wrap gap-2 border-t pt-3" style={{ borderColor: "#1C2044" }}>
               {actions.onAlternatives && (
@@ -3297,6 +3377,7 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
   const [types, setTypes] = useState(slot ? [slot.type] : []);
   const [elements, setElements] = useState([]);
   const [tiers, setTiers] = useState([]);
+  const [onlyListed, setOnlyListed] = useState(false);
   const [speeds, setSpeeds] = useState([]);
   const [levelMin, setLevelMin] = useState("");
   const [levelMax, setLevelMax] = useState("");
@@ -3311,7 +3392,7 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
     setAffixFilters(next);
   };
   const needle = query.trim().toLowerCase();
-  const filtering = (Boolean(build) && sort !== "score") || needle.length > 0 || elements.length > 0 || tiers.length > 0 || speeds.length > 0 || levelMin !== "" || levelMax !== "" || minDps !== "" || affixFilters.length > 0 || (!slot && types.length > 0);
+  const filtering = (Boolean(build) && sort !== "score") || needle.length > 0 || elements.length > 0 || tiers.length > 0 || speeds.length > 0 || levelMin !== "" || levelMax !== "" || minDps !== "" || affixFilters.length > 0 || onlyListed || (!slot && types.length > 0);
   const weaponsOnly = slot ? slot.type === "weapon" : types.length > 0 && types.every((type) => type === "weapon");
 
   const results = useMemo(() => {
@@ -3327,6 +3408,7 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
       if (wantedTypes.length > 0 && !wantedTypes.includes(typeKey)) return false;
       if (needle && !item.name.toLowerCase().includes(needle)) return false;
       if (tiers.length > 0 && !tiers.includes(item.tier)) return false;
+      if (onlyListed && marketStatus(item).state !== "listed") return false;
       if (elements.length > 0 && !elements.some((element) => itemHasElement(item, element))) return false;
       if (speeds.length > 0 && (item.category !== "weapon" || !speeds.includes(item.atkSpd))) return false;
       if (dpsFloor > 0 && (item.category !== "weapon" || (item.dps || 0) < dpsFloor)) return false;
@@ -3381,7 +3463,7 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
     });
     const rows = shown.map((item) => scored.get(item.name) || { item, score: null, contributions: [], deltas: [], overflow: 0, current: true });
     return { rows, total: matches.length, currentScore: null, suggested: false };
-  }, [build, slotId, slot, types, elements, tiers, speeds, levelMin, levelMax, minDps, needle, sort, level, weaponType, filtering, showAll, normalized.excluded, normalized.locked, affixFilters, affixMode]);
+  }, [build, slotId, slot, types, elements, tiers, speeds, levelMin, levelMax, minDps, needle, sort, level, weaponType, filtering, showAll, normalized.excluded, normalized.locked, affixFilters, affixMode, onlyListed]);
 
   const current = slot && build ? build.slots.find((entry) => entry.id === slotId).item : null;
   const chip = (pressed, color, onClick, label, key) => (
@@ -3460,6 +3542,12 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
             )}
             <span className="ml-2 text-xs text-zinc-500">Rarity</span>
             {ITEM_TIERS.map((tier) => chip(tiers.includes(tier), RARITY_COLORS[tier], () => setTiers(toggleValue(tiers, tier)), tier, tier))}
+            {hasLiveData() && (
+              <>
+                <span className="ml-2 text-xs text-zinc-500">Market</span>
+                {chip(onlyListed, "#55FF55", () => setOnlyListed(!onlyListed), "● Listed today", "listed")}
+              </>
+            )}
           </div>
           <AffixPicker selected={affixFilters} onChange={changeAffixes} mode={affixMode} onModeChange={setAffixMode} />
           {(weaponsOnly || (!slot && types.length === 0)) && weaponType && (
@@ -3515,6 +3603,13 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
                       {item.elements && item.elements.length > 0 ? ` · ${item.elements.map((element) => ELEMENT_STYLE[element].symbol).join(" ")}` : ""}
                       {entry.slotId && !slot ? ` · → ${SLOTS.find((s) => s.id === entry.slotId).label}` : ""}
                       {hasPriceData() ? ` · ${priceLabel(item)}` : ""}
+                      {hasLiveData() && !isUntradable(item) ? (
+                        <span style={{ color: marketStatus(item).state === "listed" ? "#55FF55" : undefined }} title={marketTitle()}>
+                          {" · "}
+                          {marketStatus(item).state === "listed" ? "● " : "○ "}
+                          {marketText(item, true)}
+                        </span>
+                      ) : null}
                     </span>
                     <span className="text-xs" style={{ color: TOOLTIP.text }}>
                       {stats.map((c) => `${formatStatValue(c.key, c.value)} ${STAT_META[c.key].label}`).join(" · ")}
@@ -5409,6 +5504,8 @@ function PinItemSearch({ options, onChange, weaponType, level, onBrowse = null }
                   <span className="whitespace-nowrap text-xs text-zinc-500">
                     {item.tier} {item.type} · Lv. {item.level}
                     {item.category === "weapon" ? ` · ${formatNumber(item.dps || 0)} DPS` : ""}
+                    {hasLiveData() && marketStatus(item).state === "listed" ? " · " : ""}
+                    {hasLiveData() && marketStatus(item).state === "listed" ? <MarketDot item={item} /> : null}
                   </span>
                 </button>
               </li>
@@ -7857,6 +7954,7 @@ export default function BuildRecommender() {
   const [guideView, setGuideView] = useState(null);
   const [tab, setTab] = useState("build");
   const [alternativesFor, setAlternativesFor] = useState(null);
+  const [openCards, setOpenCards] = useState({}); // { slotId: true } - rozwinięte karty przedmiotów (domyślnie zwinięte)
   const [browseOpen, setBrowseOpen] = useState(false); // przeglądarka przedmiotów z Custom stats ("Browse items")
   const [savedTree] = useState(loadSavedTree);
   const [treeSelections, setTreeSelections] = useState(savedTree.selections);
@@ -8436,10 +8534,29 @@ export default function BuildRecommender() {
             </section>
 
             <div key={guideView ? guideView.url : solverView ? `solver-${solverView.candidate.rank}` : result ? result.run : 0} className="wbr-fade flex flex-col gap-4 xl:grid xl:grid-cols-[minmax(0,1fr)_400px] xl:items-start">
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-[repeat(auto-fill,minmax(300px,1fr))]">
-                {build.slots.map((slot) => (
-                  <ItemCard key={slot.id} slot={slot} build={build} actions={cardActions} powder={powderBySlot[slot.id] || null} />
-                ))}
+              <div className="flex flex-col gap-2">
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => setOpenCards(SLOTS.every((slot) => openCards[slot.id]) ? {} : Object.fromEntries(SLOTS.map((slot) => [slot.id, true])))}
+                    className="mc-link text-xs"
+                  >
+                    {SLOTS.every((slot) => openCards[slot.id]) ? "▲ Collapse all" : "▼ Expand all"}
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 items-start gap-3 sm:grid-cols-[repeat(auto-fill,minmax(300px,1fr))]">
+                  {build.slots.map((slot) => (
+                    <ItemCard
+                      key={slot.id}
+                      slot={slot}
+                      build={build}
+                      actions={cardActions}
+                      powder={powderBySlot[slot.id] || null}
+                      open={Boolean(openCards[slot.id])}
+                      onToggle={() => setOpenCards((current) => ({ ...current, [slot.id]: !current[slot.id] }))}
+                    />
+                  ))}
+                </div>
               </div>
 
               <div className="flex flex-col gap-3 xl:sticky xl:top-4 xl:max-h-[calc(100vh-2rem)] xl:overflow-y-auto xl:pr-1">

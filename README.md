@@ -46,8 +46,14 @@ never in the browser:
 1. Create a key at https://wynnventory.com/developer/api-key (read-only).
 2. On GitHub: repository → Settings → Secrets and variables → Actions → New repository secret, name
    `WYNNVENTORY_KEY`, value = the key. Don't commit the key or paste it anywhere else.
-3. Re-run the "Deploy to GitHub Pages" workflow (Actions tab). From then on every deploy and a daily run
-   (05:23 UTC) fetch fresh prices into `src/item-prices.json` before building.
+3. Re-run the "Deploy to GitHub Pages" workflow (Actions tab). From then on every deploy and a scheduled run
+   every 2 hours (at :23) fetch fresh data into `src/item-prices.json` before building.
+
+The same run also reads `/market/listings` (gear listings WynnVentory users have seen on the Trade Market since
+the last nightly archive) and stores, per item, how many listings were seen and the lowest listing price. The app
+shows this as **● N on market** (green) or **○ not on market** (grey) on item cards, in Other picks, in the item
+browser and in the "build around an item" search, plus a **● Listed today** filter chip in the browser. It is a
+snapshot from the last build (the time is in the tooltip) – a listing may have sold in the meantime.
 
 Locally: `WYNNVENTORY_KEY=... npm run update-prices` (optionally `-- 14` for 14 days). Without prices the budget
 field is disabled and everything else works as before.
@@ -65,6 +71,9 @@ field is disabled and everything else works as before.
   under it. Pinned items don't count (you have them), untradable/quest items cost nothing, Fabled and Mythic
   items without listings are skipped when a budget is set. The build header shows the cost, cards and the item
   browser show each item's price, and the browser can sort by price.
+- **Trade Market availability**: the dot next to the slot name (● N on market / ○ not on market) says whether the
+  item was listed on the Trade Market today; the expanded card shows the listing count and the lowest price, and
+  the item browser has a **● Listed today** filter. Needs the `WYNNVENTORY_KEY` secret like the prices.
 - **Build around an item**: type a name in Custom stats (weapons of the class, armour, accessories up to your level)
   and pick it – the item is pinned to its slot and the rest of the build is fitted around it. This is how most
   builds start in practice (you have the weapon, you need the gear).
@@ -132,6 +141,11 @@ field is disabled and everything else works as before.
   count toward the score.
 
 ### Item cards
+
+- Cards start collapsed: name, skill point requirements, class and combat level, and the Other picks / Rolls /
+  Exclude buttons. The ▼ Details arrow opens the rest (stats, identifications, price, the Obtain and Score pages);
+  ▲ closes it. "Expand all" / "Collapse all" above the cards switches every card; clicking the score opens the
+  card on its Score page.
 
 - Cards are the in-game tooltip (Wynncraft 2.1 layout) in VCR OSD Mono: icon in a frame, name in the rarity colour with the average roll "[50.0%]", rarity and type
   badges, elements, powder slots in the corner, big DPS with attack speed (hits/s) and per-element damage ranges,
@@ -246,8 +260,9 @@ of the site):
 - `src/wynncraft-items.json`: 5,414 items (Wynnbuilder data 2.2.4.0) with `fixID`, the list of static IDs and the
   item's set, plus the 79 sets with their bonuses.
 - `src/guide-builds.json`: the guide builds (items, tomes, authors, Wynnbuilder links).
-- `src/item-prices.json`: Trade Market prices written by `scripts/update-prices.mjs` (empty in the repository;
-  filled by the Pages workflow when the `WYNNVENTORY_KEY` secret exists).
+- `src/item-prices.json`: Trade Market prices (`items`) and today's listings (`live`, `liveAt`) written by
+  `scripts/update-prices.mjs` (empty in the repository; filled by the Pages workflow when the `WYNNVENTORY_KEY`
+  secret exists).
 - `src/ability-trees.json`: the ability trees (from Wynnbuilder's atree.json for 2.2.4.0), the AP-per-level table
   and the node effects (`effects`, `props`, `base`) from the same file.
 - `scripts/update-items.mjs`: downloads and trims `items.json` from the Wynnbuilder repository.
@@ -263,7 +278,7 @@ of the site):
 - Wynncraft forums – Stats and Identifications Guide (thread 246308), The Ultimate Build Guide (thread 320092),
   How Damage Is Calculated – Rekindled Edition (thread 320808)
 - Wynnguides (afeenah): https://afeenah.github.io/wynnguides/
-- WynnVentory – Trade Market prices for the budget: https://wynnventory.com
+- WynnVentory – Trade Market prices for the budget and today's listings: https://wynnventory.com
 - Fonts: VCR OSD Mono by Riciery Leal (freeware, `src/fonts/VCR_OSD_MONO.woff2`); Tiny5 and Pixelify Sans
   (@fontsource, OFL licence) as fallbacks.
 - Ability tree sprites (`icons.png`, `connectors.png`, embedded in `BuildRecommender.jsx`): Wynncraft's ability tree
