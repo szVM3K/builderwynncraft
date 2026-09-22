@@ -35,6 +35,7 @@ Ability-tree node effects (bonuses, toggles, sliders, spells) for a new data ver
 npm run update-tree-effects             # atree.json for the version recorded in src/ability-trees.json
 npm run update-tree-effects -- 2.2.4.0  # a specific version
 npm run update-guide-trees               # re-check the guide builds' trees against the new tree data
+npm run update-item-weights              # re-fetch the Wynnpool item weights
 ```
 
 ## Trade Market prices (budget)
@@ -143,6 +144,51 @@ field is disabled and everything else works as before.
   health in total get a penalty.
 - "Elemental …" and per-element damage identifications (e.g. Elemental Spell Damage, Water Main Attack Damage)
   count toward the score.
+
+### Old and New generator
+
+The **Generator** switch at the top of the left panel picks how a build is put together.
+
+- **Old** is the weight-based generator described above: every item gets a score from the archetype's stat
+  weights and your own priorities, and the best-scoring set wins.
+- **New** turns the question around: *what is the strongest build that still survives and still sustains its
+  spells?* You pick the class, rank, level and ability tree (the tree presets come from `suggestAbilityTree`, the
+  same suggestions as the Ability tree tab), and the tree decides which spells exist. Then you set two hard
+  filters and one goal:
+  - **Goal** – the main attack or one spell from your tree. That single number is what the search maximises.
+  - **Effective HP** – a slider from the lowest to the highest EHP reachable on that class and level
+    (`src/ehp-range.json`, precomputed per class × level). Builds under the threshold are not results, they are
+    simply not shown.
+  - **Mana** – the spell cycle from the Mana calculator: the spells you cast, clicks per second, and whether mana
+    steal and ability mana gain count. Income is `(Mana Regen + 25) / 5 + Mana Steal / 3`, the cycle lasts
+    `3 × spells / clicks per second`, and a build that cannot pay for that cycle is rejected. No weights here —
+    EHP and mana are pass/fail, damage is the only thing being optimised.
+
+  The search runs a two-tier beam over the whole item database: candidates per slot are first scored with a fast
+  linear proxy plus exact skill points, only the best few get the exact damage/EHP/mana evaluation, and the
+  finished set is then polished with single swaps against the *full* pool until nothing improves. If nothing
+  passes the filters, a second pass maximises EHP instead and the message says how far off the closest build was.
+
+- **Guide builds at level 100+**: from level 100 the generator treats the Wynnbuilder guide builds as the
+  reference for that class — at high level nothing in the database beats them. Their weapons join the weapon list
+  (with the powder element that suits the goal), and every complete guide build is evaluated as a finished
+  candidate, so the result is never worse than the guide it starts from. Measured over all 15 archetypes at level
+  106: 7 builds got better (up to +172 % damage), 8 unchanged, none worse.
+
+### Wynnpool item weights
+
+[Wynnpool](https://www.wynnpool.com) (MIT, [github.com/AiverAiva/Wynnpool](https://github.com/AiverAiva/Wynnpool))
+keeps a community rating of **which identifications actually matter on a given item**. Each profile — "Main",
+"Riftwalker", "Lootrun", "Spellsteal"… — is a set of weights whose absolute values sum to 1, and the score is
+`sum(roll percentage × weight)` on a 0-100 scale, exactly the number wynnpool.com shows (a negative weight wants a
+*low* roll, e.g. Bloodbath "Low HP"). 135 profiles for 84 items ship in `src/item-weights.json`.
+
+- **Item card**: `WP nn` next to the item name is the best profile's score for the rolls currently set. Hover for
+  the profile name and its top weights.
+- **Rolls dialog**: a Wynnpool panel lists every profile for that item with a live score bar and a **Best roll**
+  button that maxes the weighted identifications (and minimises the negatively weighted ones). Each identification
+  row shows its weight (`WP 45%`), so you can see at a glance which rolls are worth rerolling for.
+- **Item browser**: a **Rated items** filter and a **Wynnpool score** sort.
 
 ### Item cards
 
@@ -286,6 +332,11 @@ of the site):
 - `src/guide-builds.json`: the guide builds (items, tomes, authors, Wynnbuilder links).
 - `src/guide-trees.json`: the ability trees decoded from those links that still match the current tree data
   (written by `scripts/update-guide-trees.mjs`; outdated ones are only counted).
+- `src/item-weights.json`: Wynnpool item weights (135 profiles for 84 items) written by
+  `scripts/update-item-weights.mjs`; the script maps the official API's identification names onto the
+  Wynnbuilder keys the app uses and checks that every weighted identification exists on the item.
+- `src/ehp-range.json`: the highest effective HP reachable per class and level, used for the New generator's EHP
+  slider range.
 - `src/item-prices.json`: Trade Market prices (`items`) and today's listings (`live`, `liveAt`) written by
   `scripts/update-prices.mjs` (empty in the repository; filled by the Pages workflow when the `WYNNVENTORY_KEY`
   secret exists).
@@ -293,6 +344,7 @@ of the site):
   and the node effects (`effects`, `props`, `base`) from the same file.
 - `scripts/update-items.mjs`: downloads and trims `items.json` from the Wynnbuilder repository.
 - `scripts/update-tree-effects.mjs`: adds node effects from `atree.json` to `src/ability-trees.json`.
+- `scripts/update-item-weights.mjs`: downloads the Wynnpool weights and translates them to the app's keys.
 - Item and tree data come from the Wynnbuilder project (github.com/wynnbuilder/wynnbuilder.github.io, GPL-3.0).
 
 ## Sources
@@ -305,6 +357,8 @@ of the site):
   How Damage Is Calculated – Rekindled Edition (thread 320808)
 - Wynnguides (afeenah): https://afeenah.github.io/wynnguides/
 - WynnVentory – Trade Market prices for the budget and today's listings: https://wynnventory.com
+- Wynnpool – community item weights (which identifications matter on an item): https://www.wynnpool.com
+  (code and data MIT, https://github.com/AiverAiva/Wynnpool)
 - Fonts: VCR OSD Mono by Riciery Leal (freeware, `src/fonts/VCR_OSD_MONO.woff2`); Tiny5 and Pixelify Sans
   (@fontsource, OFL licence) as fallbacks.
 - Ability tree sprites (`icons.png`, `connectors.png`, embedded in `BuildRecommender.jsx`): Wynncraft's ability tree
