@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import WYNNBUILDER_DATA from "./wynncraft-items.json";
 import GUIDE_DATA from "./guide-builds.json";
+import PRICE_DATA from "./item-prices.json";
 import TREE_DATA from "./ability-trees.json";
 
 /*
@@ -325,6 +326,9 @@ const DEFAULT_OPTIONS = {
   locked: {}, // { slotId: nazwa przedmiotu } - przypięte przez gracza, reszta buildu dopasowuje się do nich
   excluded: [], // nazwy przedmiotów, których gracz nie chce
   excludedTiers: [], // rzadkości wyłączone z puli (np. ["Mythic"] = tańszy build); przypięte przedmioty zostają
+  budget: null, // maksymalny koszt zestawu w emeraldach (ceny z Trade Marketu); null = bez limitu
+  budgetUnit: "le", // jednostka pola budżetu: e | eb | le | stx
+  powders: "auto", // powdery broni w wyniku i obrażeniach: auto (żywioł focusu) | earth..air | none
   scoring: { weights: {}, tuning: {} }, // zakładka "Score calculation": własne wagi statystyk i stałe wyniku
 };
 const DEFENCE_PREF_SHARE = 0.75; // wybrana obrona: waga = 75% najważniejszej statystyki archetypu
@@ -509,6 +513,9 @@ function normalizeOptions(options = DEFAULT_OPTIONS) {
     ),
     excluded: [...new Set((options.excluded || []).filter((name) => typeof name === "string"))].sort(),
     excludedTiers: ITEM_TIERS.filter((tier) => (options.excludedTiers || []).includes(tier)),
+    budget: Number(options.budget) > 0 ? Math.round(Number(options.budget)) : null,
+    budgetUnit: EMERALD_UNITS.some((unit) => unit.id === options.budgetUnit) ? options.budgetUnit : "le",
+    powders: options.powders === "none" || ["earth", "thunder", "water", "fire", "air"].includes(options.powders) ? options.powders : "auto",
     scoring: normalizeScoring(options.scoring),
   };
 }
@@ -724,6 +731,7 @@ function getArchetypeProfile(archetype, rawOptions = DEFAULT_OPTIONS) {
     weaponFactor: focusResult.weaponFactor,
     weaponWeight: baseWeaponWeight * focusResult.weaponFactor,
   };
+  profile.powderElement = powderElementFor(profile);
   setMeleeModelWeights(profile);
   return profile;
 }
@@ -926,6 +934,7 @@ function normalizeWynnbuilderItem(raw) {
     elements: Array.isArray(raw.elements) ? raw.elements : [],
     slots: Number(raw.slots) || 0,
     majorIds: Array.isArray(raw.majorIds) ? raw.majorIds : [],
+    set: raw.set || null,
     icon: iconTheme(raw.icon),
     source: {
       drop: raw.drop || null,
@@ -984,7 +993,7 @@ function scoreItem(item, profile) {
   if (isWeapon) {
     // Broń: jaka część jej obrażeń korzysta z bonusów wybranych żywiołów. Przy własnym focusie to preferencja:
     // broń innego typu obrażeń traci część wyniku, ale nadal może wygrać.
-    const weaponScore = profile.weaponWeight * ((item.dps || 0) / 100) * weaponElementFactor(item, profile);
+    const weaponScore = profile.weaponWeight * (profile.powderNorm || 1) * ((item.dps || 0) / 100) * weaponElementFactor(item, profile);
     score += weaponScore;
     contributions.push({ key: "dps", value: item.dps || 0, contribution: weaponScore });
   }
@@ -998,8 +1007,9 @@ function scoreItem(item, profile) {
       meleeScore *= factor;
     }
   }
-  // Broń bez bazowych obrażeń zadaje je tylko z powderów (aplikacja ich nie modeluje), więc jej bonusy % nie mają na co działać.
-  if (item.category === "weapon" && !(item.dps > 0) && score > 0) {
+  // Broń bez bazowych obrażeń (np. The Specialist) bije tylko powderami: jej ogromne bonusy % mnożą kilka punktów
+  // obrażeń z powderów, więc liniowy wynik ID ją przeceniał - zostaje 10% (także z włączonymi powderami).
+  if (item.category === "weapon" && !((item.baseWeapon ? item.baseWeapon.dps : item.dps) > 0) && score > 0) {
     score *= POWDER_ONLY_WEAPON_FACTOR;
     meleeScore *= POWDER_ONLY_WEAPON_FACTOR;
     contributions.forEach((entry) => {
@@ -1044,6 +1054,123 @@ function scoreItem(item, profile) {
   return { score, contributions, meleeScore };
 }
 
+// CENY Z TRADE MARKETU (src/item-prices.json, skrypt scripts/update-prices.mjs z WynnVentory API): średnia środkowych
+// 80% ofert z ostatnich dni, w emeraldach. Przedmioty niehandlowalne (untradable / quest item) kosztują 0 - zdobywa
+// się je ze źródła. Bez danych (pusty plik) budżet jest wyłączony.
+const EMERALD_UNITS = [
+  { id: "e", label: "E", value: 1 },
+  { id: "eb", label: "EB", value: 64 },
+  { id: "le", label: "LE", value: 4096 },
+  { id: "stx", label: "STX", value: 262144 },
+];
+const PRICE_ITEMS = (PRICE_DATA && PRICE_DATA.items) || {};
+function hasPriceData() {
+  return Object.keys(PRICE_ITEMS).length > 0;
+}
+function isUntradable(item) {
+  const restrict = item.source && item.source.restrict;
+  return restrict === "untradable" || restrict === "quest_item";
+}
+// { price: emeraldy | null (brak ofert), untradable }
+function itemPrice(item) {
+  if (!item) return { price: null };
+  if (isUntradable(item)) return { price: 0, untradable: true };
+  const entry = PRICE_ITEMS[item.name];
+  return entry && entry.price > 0 ? { price: entry.price, count: entry.count || 0 } : { price: null };
+}
+function formatEmeralds(value) {
+  if (value === null || value === undefined) return "?";
+  if (value >= 262144) return `${(value / 262144).toFixed(value >= 262144 * 10 ? 1 : 2)} STX`;
+  if (value >= 4096) return `${(value / 4096).toFixed(value >= 4096 * 10 ? 0 : 1)} LE`;
+  if (value >= 64) return `${Math.round(value / 64)} EB`;
+  return `${Math.round(value)} E`;
+}
+function priceLabel(item) {
+  const { price, untradable } = itemPrice(item);
+  if (untradable) return "untradable";
+  return price === null ? "no market price" : `≈ ${formatEmeralds(price)}`;
+}
+// Koszt zestawu: znane ceny (bez przypiętych przedmiotów - "masz je"), liczba przedmiotów bez ceny.
+function buildCost(items, freeNames = new Set()) {
+  let total = 0;
+  const unknown = [];
+  items.forEach((item) => {
+    if (!item || freeNames.has(item.name)) return;
+    const { price } = itemPrice(item);
+    if (price === null) unknown.push(item.name);
+    else total += price;
+  });
+  return { total, unknown };
+}
+// Przy budżecie nie da się sprawdzić ceny przedmiotów Fabled/Mythic bez ofert - zakładamy, że są za drogie.
+function withinBudget(item, budget) {
+  const { price } = itemPrice(item);
+  if (price === null) return !["Fabled", "Mythic"].includes(item.tier);
+  return price <= budget;
+}
+
+// ZESTAWY (sety) jak w Wynnbuilderze: bonuses[n - 1] to bonus za n założonych przedmiotów zestawu (duplikaty, np.
+// dwa takie same pierścienie, liczą się podwójnie). Bonusy Skill Pointów dochodzą do sum na końcu (nie pomagają
+// spełnić wymagań), reszta to zwykłe identyfikacje. "illegal" = tych przedmiotów nie można nosić razem.
+const ITEM_SETS = WYNNBUILDER_DATA.sets || {};
+function activeSets(items) {
+  const counts = new Map();
+  items.forEach((item) => {
+    if (item && item.set && ITEM_SETS[item.set]) counts.set(item.set, (counts.get(item.set) || 0) + 1);
+  });
+  return [...counts].map(([name, count]) => {
+    const bonuses = ITEM_SETS[name].bonuses || [];
+    const bonus = bonuses[Math.min(count, bonuses.length) - 1] || {};
+    return { name, count, size: ITEM_SETS[name].items.length, bonus, illegal: Boolean(bonus.illegal) };
+  });
+}
+// Identyfikacje z bonusów setów (bez Skill Pointów i major ID) - dokładnie to, co Wynnbuilder dodaje w initBuildStats.
+function setBonusIds(items) {
+  const ids = {};
+  activeSets(items).forEach(({ bonus }) => {
+    Object.entries(bonus).forEach(([key, value]) => {
+      if (SKILLS.includes(key) || typeof value !== "number" || !value) return;
+      ids[key] = (ids[key] || 0) + value;
+    });
+  });
+  return ids;
+}
+function setBonusSkills(items) {
+  const skills = [0, 0, 0, 0, 0];
+  activeSets(items).forEach(({ bonus }) => SKILLS.forEach((skill, index) => (skills[index] += Number(bonus[skill]) || 0)));
+  return skills;
+}
+// Bonusy setów w kluczach statystyk aplikacji (STAT_META: hp = Health, Skill Pointy pod str/dex/...).
+function setBonusStats(items) {
+  const stats = {};
+  Object.entries(setBonusIds(items)).forEach(([key, value]) => {
+    const target = key === "hpBonus" ? "hp" : key;
+    if (STAT_META[target]) stats[target] = (stats[target] || 0) + value;
+  });
+  setBonusSkills(items).forEach((value, index) => {
+    if (value) stats[SKILLS[index]] = (stats[SKILLS[index]] || 0) + value;
+  });
+  return stats;
+}
+// Sumy statystyk przedmiotów razem z bonusami setów.
+function itemStatTotals(items) {
+  const totals = {};
+  items.forEach((item) => Object.entries(item.stats).forEach(([key, value]) => (totals[key] = (totals[key] || 0) + value)));
+  Object.entries(setBonusStats(items)).forEach(([key, value]) => (totals[key] = (totals[key] || 0) + value));
+  return totals;
+}
+// Liniowy wynik bonusów setów dla profilu (te same wagi co identyfikacje przedmiotów).
+function setBonusScore(items, profile) {
+  if (!profile) return 0;
+  let score = 0;
+  Object.entries(setBonusStats(items)).forEach(([key, value]) => {
+    const meta = STAT_META[key];
+    const weight = profile.weights[key];
+    if (meta && weight) score += (weight * value) / meta.scale;
+  });
+  return score;
+}
+
 // SKILL POINTY JAK W GRZE (te same zasady co calculate_skillpoints w Wynnbuilderze, inny algorytm):
 // przedmioty zakłada się po kolei, bonusy SP przedmiotu liczą się dopiero po jego założeniu, broń na końcu;
 // na koniec żaden przedmiot nie może "spaść" (jego wymagania muszą być spełnione przez przydzielone punkty
@@ -1053,17 +1180,19 @@ function scoreItem(item, profile) {
 // dynamicznym po podzbiorach (wektory Pareto przydzielonych punktów). Preferowane są rozwiązania z ≤ 100
 // punktami na umiejętność (limit ręcznego przydziału), jak w Wynnbuilderze.
 const SKILL_POINT_CACHE = new Map();
-function computeSkillPoints(items) {
-  const key = items.map((item) => item.name).sort().join("|");
+// exact = true: przydział identyczny z Wynnbuilderem także przy remisach (build pokazywany graczowi); false (w trakcie
+// przeszukiwania): ta sama suma punktów i ważność buildu, szybciej.
+function computeSkillPoints(items, exact = false) {
+  const key = (exact ? "=" : "~") + items.map((item) => item.name).sort().join("|");
   const cached = SKILL_POINT_CACHE.get(key);
   if (cached) return cached;
-  const result = computeSkillPointsUncached(items);
+  const result = computeSkillPointsUncached(items, exact);
   if (SKILL_POINT_CACHE.size > 50000) SKILL_POINT_CACHE.clear();
   SKILL_POINT_CACHE.set(key, result);
   return result;
 }
 
-function computeSkillPointsUncached(items) {
+function computeSkillPointsUncached(items, exact = false) {
   const gear = items.filter((item) => item.category !== "weapon");
   const weapon = items.find((item) => item.category === "weapon");
   const bonusOf = (item) => SKILLS.map((skill) => item.stats[skill] || 0);
@@ -1179,15 +1308,140 @@ function computeSkillPointsUncached(items) {
     if (!best || (under && !best.under) || (under === best.under && total < best.total)) best = { assigned, total, under };
   };
   (dp[size - 1] || [[0, 0, 0, 0, 0]]).forEach(finish);
+  // Gra zakłada przedmioty w stałej kolejności (buty, spodnie, napierśnik, hełm, pierścienie, bransoleta, naszyjnik)
+  // i przedmiot, który da się założyć, zakłada od razu - nie można "odłożyć" np. Broken Balance (-7 do wszystkiego)
+  // na koniec. Gdy w zestawie jest przedmiot z ujemnym bonusem SP (tylko wtedy kolejność zmienia wynik) albo nasz
+  // przydział nie przechodzi zakładania w kolejności gry, ostateczny przydział liczy algorytm Wynnbuildera (ten sam
+  // wynik co w Wynnbuilderze, także przy remisach); gdyby przeszukiwanie trwało za długo, zostaje przydział z DP.
+  const equipment = wynnEquipOrder(gear).map((item) => ({ reqs: reqOf(item), bonus: bonusOf(item) }));
+  const weaponEntry = weapon ? { reqs: reqOf(weapon), bonus: bonusOf(weapon) } : null;
+  const orderMatters = equipment.some((entry) => entry.bonus.some((value) => value < 0)) || (weaponEntry && weaponEntry.bonus.some((value) => value < 0));
+  if ((exact && orderMatters) || !equipsInWynnOrder(best.assigned, equipment, weaponEntry)) {
+    const exact = wynnSkillPointSearch(equipment, weaponEntry, SP_SEARCH_BUDGET);
+    if (exact) best = exact;
+  }
+  const setSkills = setBonusSkills(items);
   const assigned = {};
   const totals = {};
   let capOverflow = 0;
   SKILLS.forEach((skill, index) => {
     assigned[skill] = best.assigned[index];
     capOverflow += Math.max(0, assigned[skill] - MAX_ASSIGNED_PER_SKILL);
-    totals[skill] = assigned[skill] + allGearBonus[index] + ((weapon && weapon.stats[skill]) || 0);
+    totals[skill] = assigned[skill] + allGearBonus[index] + ((weapon && weapon.stats[skill]) || 0) + setSkills[index];
   });
   return { assigned, totals, total: best.total, capOverflow };
+}
+
+const WYNN_EQUIP_ORDER = { boots: 0, leggings: 1, chestplate: 2, helmet: 3, ring: 4, bracelet: 6, necklace: 7 };
+function wynnEquipOrder(gear) {
+  return gear
+    .map((item, index) => ({ item, index }))
+    .sort((a, b) => (WYNN_EQUIP_ORDER[a.item.type] ?? 8) - (WYNN_EQUIP_ORDER[b.item.type] ?? 8) || a.index - b.index)
+    .map((entry) => entry.item);
+}
+function canEquipWith(points, entry) {
+  for (let i = 0; i < 5; i += 1) if (entry.reqs[i] > 0 && entry.reqs[i] > points[i]) return false;
+  return true;
+}
+// Czy przy tych przydzielonych punktach gra założy wszystko: przechodzi przedmioty po kolei (w kółko), zakłada każdy,
+// którego wymagania są spełnione; potem broń; na końcu żaden przedmiot nie może spaść (wymaganie + własny bonus).
+function equipsInWynnOrder(assigned, equipment, weapon) {
+  const points = assigned.slice();
+  const done = equipment.map(() => false);
+  let left = equipment.length;
+  let progress = true;
+  while (left > 0 && progress) {
+    progress = false;
+    for (let index = 0; index < equipment.length; index += 1) {
+      if (done[index] || !canEquipWith(points, equipment[index])) continue;
+      done[index] = true;
+      left -= 1;
+      progress = true;
+      for (let i = 0; i < 5; i += 1) points[i] += equipment[index].bonus[i];
+    }
+  }
+  if (left > 0 || (weapon && !canEquipWith(points, weapon))) return false;
+  return equipment.every((entry) => entry.reqs.every((req, i) => req <= 0 || req + entry.bonus[i] <= points[i]));
+}
+// Port calculate_skillpoints z Wynnbuildera (js/skillpoints.js): przeszukanie kolejności zakładania zgodnych z grą
+// (przedmiot pominięty, bo nie dało się go założyć, nie może stać się możliwy do założenia przez punkty dodane
+// później), punkty przydzielane "na żądanie", broń na końcu, poprawka przedmiotów, które by spadły; najmniejsza suma,
+// preferowane ≤ 100 w każdej umiejętności.
+const SP_SEARCH_BUDGET = 60000; // wywołań rekurencji; typowy zestaw 9 przedmiotów to kilkaset
+function wynnSkillPointSearch(equipment, weapon, budget = Infinity) {
+  const held = weapon || { reqs: [0, 0, 0, 0, 0], bonus: [0, 0, 0, 0, 0] };
+  const add = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3], a[4] + b[4]];
+  const sum = (a) => a[0] + a[1] + a[2] + a[3] + a[4];
+  const applyToFit = (points, entry) => {
+    const applied = [0, 0, 0, 0, 0];
+    for (let i = 0; i < 5; i += 1) {
+      if (entry.reqs[i] > 0 && entry.reqs[i] > points[i]) {
+        applied[i] += entry.reqs[i] - points[i];
+        points[i] = entry.reqs[i];
+      }
+    }
+    return applied;
+  };
+  const fixPop = (points, entry) => {
+    const applied = [0, 0, 0, 0, 0];
+    for (let i = 0; i < 5; i += 1) {
+      if (entry.reqs[i] <= 0) continue;
+      const need = entry.reqs[i] + entry.bonus[i];
+      if (need > points[i]) {
+        applied[i] += need - points[i];
+        points[i] = need;
+      }
+    }
+    return applied;
+  };
+  if (equipment.length === 0) {
+    const applied = applyToFit([0, 0, 0, 0, 0], held);
+    return { assigned: applied, total: sum(applied), under: applied.every((value) => value <= MAX_ASSIGNED_PER_SKILL) };
+  }
+  let best = null;
+  let calls = 0;
+  let aborted = false;
+  const recurse = (applied, totals, totalApplied, skippedStates, priorSkipped, remains) => {
+    calls += 1;
+    if (calls > budget) aborted = true;
+    if (aborted) return;
+    if (remains.length === 1) {
+      const entry = equipment[remains[0]];
+      const points = totals.slice();
+      let deltas = applyToFit(points, entry);
+      for (let i = 0; i < 5; i += 1) points[i] += entry.bonus[i];
+      deltas = add(deltas, applyToFit(points, held));
+      for (let e = 0; e < equipment.length; e += 1) deltas = add(deltas, fixPop(points, equipment[e]));
+      for (let j = 0; j < priorSkipped.length; j += 1) if (canEquipWith(add(skippedStates[j], deltas), equipment[priorSkipped[j]])) return;
+      const assigned = add(applied, deltas);
+      const total = totalApplied + sum(deltas);
+      const under = assigned.every((value) => value <= MAX_ASSIGNED_PER_SKILL);
+      if (best && best.under && !under) return;
+      if (!best || total < best.total || (under && !best.under)) best = { assigned, total, under };
+      return;
+    }
+    tryItem: for (let i = 0; i < remains.length; i += 1) {
+      const head = remains.slice(0, i);
+      const points = totals.slice();
+      const entry = equipment[remains[i]];
+      const deltas = applyToFit(points, entry);
+      const simStates = [];
+      for (let j = 0; j < priorSkipped.length; j += 1) {
+        const sim = add(skippedStates[j], deltas);
+        if (canEquipWith(sim, equipment[priorSkipped[j]])) continue tryItem;
+        simStates.push(sim);
+      }
+      for (let j = 0; j < head.length; j += 1) {
+        if (canEquipWith(points, equipment[head[j]])) continue tryItem;
+        simStates.push(points);
+      }
+      const next = points.slice();
+      for (let k = 0; k < 5; k += 1) next[k] += entry.bonus[k];
+      recurse(add(applied, deltas), next, totalApplied + sum(deltas), simStates, priorSkipped.concat(head), remains.slice(i + 1).concat(head));
+    }
+  };
+  recurse([0, 0, 0, 0, 0], [0, 0, 0, 0, 0], 0, [], [], equipment.map((_, index) => index));
+  return aborted ? null : best;
 }
 
 // Kara, gdy przedmioty razem zabierają HP (zestaw ma mniej zdrowia niż postać bez ekwipunku):
@@ -1205,14 +1459,25 @@ function buildMainAttackDps(weapon, items, skills) {
 // Przy focusie main attacku powyżej mety liniowe wagi main attacku (osobno dla każdego przedmiotu) są stopniowo
 // zastępowane dokładnym DPS zestawu: raw i % z całego ekwipunku, tiery szybkości sumują się (np. -7 tierów
 // z jednych spodni zamienia Super Fast na Super Slow), Strength i crit z przydzielonych Skill Pointów.
+const ILLEGAL_SET_OVERFLOW = 200; // przedmioty zestawu, których nie można nosić razem: jak brak 200 SP (build odpada)
 function evaluateState(picks, available, baseHp = 0, profile = null) {
   const items = Object.values(picks).filter(Boolean).map((pick) => pick.item);
   const sp = computeSkillPoints(items);
-  const overflow = Math.max(0, sp.total - available) + sp.capOverflow;
-  const itemHp = items.reduce((sum, item) => sum + (item.stats.hp || 0), 0);
+  const sets = activeSets(items);
+  const illegalSets = sets.filter((entry) => entry.illegal).length;
+  const spOverflow = Math.max(0, sp.total - available) + sp.capOverflow;
+  let cost = 0;
+  let costOverflow = 0;
+  if (profile && profile.budget) {
+    cost = buildCost(items, profile.budgetFree).total;
+    if (cost > profile.budget) costOverflow = 1 + Math.ceil(((cost - profile.budget) / profile.budget) * 20);
+  }
+  const overflow = spOverflow + illegalSets * ILLEGAL_SET_OVERFLOW + costOverflow;
+  const itemHp = items.reduce((sum, item) => sum + (item.stats.hp || 0), 0) + ((sets.length > 0 && setBonusStats(items).hp) || 0);
   const tuning = profile ? profile.tuning : scoreTuning(null);
   const hpPenalty = baseHp > 0 && itemHp < 0 ? (tuning.hpDeficitPenalty * -itemHp) / baseHp : 0;
-  let base = Object.values(picks).reduce((sum, pick) => sum + (pick ? pick.score : 0), 0) - hpPenalty;
+  const setScore = sets.length > 0 ? setBonusScore(items, profile) : 0;
+  let base = Object.values(picks).reduce((sum, pick) => sum + (pick ? pick.score : 0), 0) - hpPenalty + setScore;
   let meleeDps = 0;
   if (profile && profile.meleeBlend > 0) {
     const blend = profile.meleeBlend;
@@ -1225,7 +1490,7 @@ function evaluateState(picks, available, baseHp = 0, profile = null) {
       base += (blend * profile.meleeModelWeight * meleeDps * focusFactor) / 100;
     }
   }
-  return { picks, base, sp, overflow, hpPenalty, meleeDps, leftoverSp: tuning.leftoverSp };
+  return { picks, base, sp, overflow, spOverflow, illegalSets, cost, costOverflow, setScore, hpPenalty, meleeDps, leftoverSp: tuning.leftoverSp };
 }
 
 function finalValue(state, available) {
@@ -1246,9 +1511,18 @@ function inBuildScore(picks, slotId, entry, available, baseHp, profile) {
   if (extraSp !== 0) contributions.push({ key: "skillPoints", value: extraSp, contribution: skillPoints });
   const hpDeficit = -(withItem.hpPenalty - without.hpPenalty);
   if (Math.abs(hpDeficit) >= 0.005) contributions.push({ key: "hpDeficit", value: entry.item.stats.hp || 0, contribution: hpDeficit });
-  const mainAttack = marginal - entry.score - hpDeficit - skillPoints;
+  const setBonus = withItem.setScore - without.setScore;
+  if (Math.abs(setBonus) >= 0.005) contributions.push({ key: "setBonus", value: entry.item.set, contribution: setBonus });
+  const mainAttack = marginal - entry.score - hpDeficit - skillPoints - setBonus;
   if (Math.abs(mainAttack) >= 0.005) contributions.push({ key: "mainAttack", value: withItem.meleeDps - without.meleeDps, contribution: mainAttack });
-  return { score: marginal, contributions, meleeDps: withItem.meleeDps, overflow: withItem.overflow };
+  return {
+    score: marginal,
+    contributions,
+    meleeDps: withItem.meleeDps,
+    overflow: withItem.spOverflow,
+    illegalSet: withItem.illegalSets > without.illegalSets ? entry.item.set : null,
+    overBudget: withItem.costOverflow > 0,
+  };
 }
 
 function repairState(state, available, lockedSlots = new Set(), baseHp = 0, profile = null) {
@@ -1276,12 +1550,25 @@ function generateOptimizedBuild(level, playerClass, archetype, allItems = ITEM_D
   if (!classConfig.archetypes.includes(archetype)) throw new Error(`${archetype} is not a ${playerClass} archetype`);
   const profile = getArchetypeProfile(archetype, options);
   const available = availableSkillPoints(playerLevel);
+  // Powdery broni (Custom stats › Weapon powders): każda broń klasy dostaje powdery najwyższego tieru dla swojego
+  // poziomu w każdym slocie, więc wynik i obrażenia widzą np. 5 slotów Lightshow kontra 2 sloty Jolt.
+  const pool = profile.powderElement
+    ? allItems.map((item) => (item.category === "weapon" && item.type === classConfig.weapon ? powderedWeapon(item, profile.powderElement) : item))
+    : allItems;
   // Typowa broń na tym poziomie (80. percentyl DPS broni klasy z ostatnich 20 poziomów) i uderzenia/s dla pancerza.
-  const recentWeapons = allItems
-    .filter((item) => item.type === classConfig.weapon && item.level <= playerLevel && item.level >= playerLevel - 20)
-    .map((item) => item.dps || 0)
-    .sort((a, b) => a - b);
-  if (recentWeapons.length > 0) profile.refDps = recentWeapons[Math.floor(recentWeapons.length * 0.8)] || profile.refDps;
+  const typicalDps = (items) => {
+    const recent = items
+      .filter((item) => item.type === classConfig.weapon && item.level <= playerLevel && item.level >= playerLevel - 20)
+      .map((item) => item.dps || 0)
+      .sort((a, b) => a - b);
+    return recent.length > 0 ? recent[Math.floor(recent.length * 0.8)] || 0 : 0;
+  };
+  const baseRefDps = typicalDps(allItems);
+  const poolRefDps = pool === allItems ? baseRefDps : typicalDps(pool);
+  if (poolRefDps > 0) profile.refDps = poolRefDps;
+  // Waga broni była kalibrowana na DPS bez powderów: skala typowej broni bez/z powderami trzyma równowagę broń-pancerz,
+  // a ranking broni między sobą liczy już obrażenia z powderami.
+  profile.powderNorm = baseRefDps > 0 && poolRefDps > 0 ? baseRefDps / poolRefDps : 1;
   applyRawBoost(profile, playerClass, playerLevel, allItems);
   if (profile.options.attackSpeeds.length > 0) {
     profile.gearHps = profile.options.attackSpeeds.reduce((sum, speed) => sum + HITS_PER_SECOND[speed], 0) / profile.options.attackSpeeds.length;
@@ -1291,6 +1578,9 @@ function generateOptimizedBuild(level, playerClass, archetype, allItems = ITEM_D
   const { attackSpeeds, locked, excluded } = profile.options;
   const excludedNames = new Set(excluded);
   const lockedNames = new Set(Object.values(locked));
+  // Budżet (ceny z Trade Marketu): przypięte przedmioty się nie liczą (gracz je ma).
+  profile.budget = hasPriceData() && profile.options.budget > 0 ? profile.options.budget : null;
+  profile.budgetFree = lockedNames;
   profile.playerLevel = playerLevel;
   const levelWindow = LEVEL_WINDOWS.find((entry) => entry.id === profile.options.levelWindow) || LEVEL_WINDOWS[0];
   const minLevel = levelWindow.strict ? playerLevel - levelWindow.window : -Infinity;
@@ -1298,11 +1588,12 @@ function generateOptimizedBuild(level, playerClass, archetype, allItems = ITEM_D
   // Krok 1: filtrowanie po poziomie (i oknie poziomu w trybie "only"), klasie broni, zaznaczonych szybkościach ataku
   // (brak zaznaczenia = każda) i przedmiotach wykluczonych przez gracza.
   const excludedTiers = new Set(profile.options.excludedTiers);
-  const eligible = allItems.filter((item) => {
+  const eligible = pool.filter((item) => {
     if (item.level > playerLevel) return false;
     if (item.level < minLevel && !lockedNames.has(item.name)) return false;
     if (excludedNames.has(item.name) && !lockedNames.has(item.name)) return false;
     if (excludedTiers.has(item.tier) && !lockedNames.has(item.name)) return false;
+    if (profile.budget && !lockedNames.has(item.name) && !withinBudget(item, profile.budget)) return false;
     if (item.category !== "weapon") return true;
     return item.type === classConfig.weapon && (attackSpeeds.length === 0 || attackSpeeds.includes(item.atkSpd));
   });
@@ -1349,6 +1640,23 @@ function generateOptimizedBuild(level, playerClass, archetype, allItems = ITEM_D
           });
         });
       }
+    }
+
+    // Budżet: do puli dochodzą najlepsze przedmioty w tańszych przedziałach (≤ 1/3 i ≤ 1/9 budżetu), żeby wiązka
+    // miała z czego złożyć zestaw mieszczący się w limicie.
+    if (searchProfile.budget) {
+      [3, 9].forEach((share) => {
+        const cap = searchProfile.budget / share;
+        const added = {};
+        scored.forEach((entry) => {
+          if (entry.score <= 0) return;
+          const key = typeKey(entry.item);
+          if ((added[key] || 0) >= Math.ceil(perSlot / 2) || (itemPrice(entry.item).price || 0) > cap) return;
+          const list = candidatesByType[key] || (candidatesByType[key] = []);
+          if (!list.includes(entry)) list.push(entry);
+          added[key] = (added[key] || 0) + 1;
+        });
+      });
     }
 
     // Przypięte przedmioty: slot ma tylko jedną opcję. Przypięcie, którego nie da się użyć, trafia do ostrzeżeń.
@@ -1412,13 +1720,8 @@ function generateOptimizedBuild(level, playerClass, archetype, allItems = ITEM_D
   const { best, lockedSlots, warnings } = result;
   const finalProfile = result.profile;
 
-  const totals = {};
-  Object.values(best.picks).forEach((pick) => {
-    if (!pick) return;
-    Object.entries(pick.item.stats).forEach(([key, value]) => {
-      totals[key] = (totals[key] || 0) + value;
-    });
-  });
+  const totals = itemStatTotals(Object.values(best.picks).filter(Boolean).map((pick) => pick.item));
+  const finalSp = computeSkillPoints(Object.values(best.picks).filter(Boolean).map((pick) => pick.item), true);
 
   return {
     level: playerLevel,
@@ -1427,7 +1730,8 @@ function generateOptimizedBuild(level, playerClass, archetype, allItems = ITEM_D
     options: profile.options,
     profile: finalProfile,
     mainAttack: finalProfile.meleeBlend > 0 ? { dps: best.meleeDps, weight: finalProfile.meleeModelWeight * finalProfile.meleeBlend, blend: finalProfile.meleeBlend } : null,
-    warnings: best.overflow > 0 ? [...warnings, "The pinned items need more skill points than this level gives."] : warnings,
+    warnings: best.overflow > 0 ? [...warnings, best.costOverflow > 0 ? "No build fits the budget with these settings; the closest one is shown." : "The pinned items need more skill points than this level gives."] : warnings,
+    cost: hasPriceData() ? { ...buildCost(Object.values(best.picks).filter(Boolean).map((pick) => pick.item), lockedNames), budget: profile.budget } : null,
     lockedSlots: [...lockedSlots],
     score: finalValue(best, available),
     slots: SLOTS.map((slot) => {
@@ -1438,10 +1742,10 @@ function generateOptimizedBuild(level, playerClass, archetype, allItems = ITEM_D
     }),
     skillPoints: {
       available,
-      assigned: best.sp.assigned,
-      totals: best.sp.totals,
-      required: best.sp.total,
-      remaining: available - best.sp.total,
+      assigned: finalSp.assigned,
+      totals: finalSp.totals,
+      required: finalSp.total,
+      remaining: available - finalSp.total,
       valid: best.overflow === 0,
     },
     totals,
@@ -2006,17 +2310,22 @@ function ElementIcons({ elements, color }) {
 }
 
 // Sloty powderów w prawym górnym rogu tooltipa (jak w grze): ciemne kwadraty, do 3 w rzędzie.
-function PowderSlots({ count, recommended = null }) {
+function PowderSlots({ count, recommended = null, applied = null, level = 120 }) {
   if (!count) return null;
-  const style = recommended ? ELEMENT_STYLE[recommended] : null;
-  const title = style ? `${count} powder slot${count === 1 ? "" : "s"} · recommended: Tier VI ${style.label} powders (see the Powders panel)` : `${count} powder slot${count === 1 ? "" : "s"}`;
+  const element = applied ? applied.element : recommended;
+  const style = element ? ELEMENT_STYLE[element] : null;
+  const title = applied
+    ? `${count} powder slot${count === 1 ? "" : "s"} · ${powderLabel(applied)} powders, counted in the damage and the score`
+    : style
+      ? `${count} powder slot${count === 1 ? "" : "s"} · recommended: Tier ${ROMAN[powderTierFor(level) - 1]} ${style.label} powders (see the Powders panel)`
+      : `${count} powder slot${count === 1 ? "" : "s"}`;
   return (
     <div className="grid flex-shrink-0 gap-1" style={{ gridTemplateColumns: `repeat(${Math.min(3, count)}, 16px)` }} aria-label={title} title={title}>
       {Array.from({ length: count }, (_, index) => (
         <span
           key={index}
           className="flex h-4 w-4 items-center justify-center text-xs leading-none"
-          style={{ background: "#0A0C1E", border: "2px solid", borderColor: "#050612 #2C3160 #2C3160 #050612", color: style ? style.color : "transparent" }}
+          style={{ background: applied ? mixColor(style.color, "#0A0C1E", 0.7) : "#0A0C1E", border: "2px solid", borderColor: applied ? `${style.color} #050612 #050612 ${style.color}` : "#050612 #2C3160 #2C3160 #050612", color: style ? style.color : "transparent", opacity: applied ? 1 : 0.8 }}
         >
           {style ? style.symbol : ""}
         </span>
@@ -2125,7 +2434,11 @@ function WeaponBlock({ item, profile }) {
       <p
         className="leading-none"
         style={{ color: TOOLTIP.text }}
-        title="Damage per second as on the in-game tooltip: average base damage × hits per second (Normal = 2.05/s). Identifications, skill points, powders and the ability tree are not included."
+        title={
+          item.powders
+            ? `Damage per second as on the tooltip of the powdered weapon (${powderLabel(item.powders)}): average damage × hits per second. Identifications, skill points and the ability tree are not included.`
+            : "Damage per second as on the in-game tooltip: average base damage × hits per second (Normal = 2.05/s). Identifications, skill points, powders and the ability tree are not included."
+        }
       >
         <span className="text-3xl">{formatNumber(item.dps || 0)}</span> <span className="text-lg">DPS</span>
       </p>
@@ -2143,6 +2456,14 @@ function WeaponBlock({ item, profile }) {
           </span>
         ))}
       </p>
+      {item.powders && (
+        <div className="flex items-baseline justify-between gap-3 text-xs" title="Custom stats › Weapon powders: every slot gets the highest powder tier for the weapon's level. The damage above, the score and the summary include them.">
+          <span style={{ color: TOOLTIP.muted }}>With {powderLabel(item.powders)} powders</span>
+          <span className="tabular-nums" style={{ color: TOOLTIP.muted }}>
+            base {formatNumber(item.baseWeapon.dps || 0)} DPS
+          </span>
+        </div>
+      )}
       {withBonuses !== Math.round(item.dps || 0) && (
         <div className="flex items-baseline justify-between gap-3 text-xs" title="Main attack DPS with this weapon's own bonuses (raw per hit × hits per second, %), before skill points">
           <span style={{ color: TOOLTIP.muted }}>With its own bonuses</span>
@@ -2259,7 +2580,12 @@ function IdentificationList({ item, relevant, playerClass }) {
       ))}
       {item.fixed && (
         <p className="text-xs" style={{ color: TOOLTIP.muted }}>
-          Fixed identifications: this item doesn't roll.
+          Fixed IDs, no rolls.
+        </p>
+      )}
+      {item.set && ITEM_SETS[item.set] && (
+        <p className="text-xs" style={{ color: TOOLTIP.good }}>
+          {item.set} set item.
         </p>
       )}
     </div>
@@ -2283,6 +2609,8 @@ function contributionLabel(entry, profile = null) {
       };
     case "hpDeficit":
       return { label: "Build health below the class base", math: "health deficit penalty" };
+    case "setBonus":
+      return { label: `${entry.value} set bonus in this build`, math: "set bonus identifications × weights" };
     case "offSkill":
       return { label: `Requires ${entry.value} (skills the archetype doesn't use)`, math: `−${formatNumber(Math.round((profile ? profile.tuning.offSkillPenalty : OFF_SKILL_REQ_PENALTY) * SCORE_SCALE * 10) / 10)} per 25 points` };
     case "skillPoints":
@@ -2468,7 +2796,7 @@ function ItemCard({ slot, build, actions, powder = null }) {
             </div>
             <ElementIcons elements={item.elements} color={color} />
           </div>
-          <PowderSlots count={item.slots} recommended={powder} />
+          <PowderSlots count={item.slots} recommended={powder} applied={item.powders || null} level={item.level} />
         </div>
 
         {page === 1 ? (
@@ -2514,6 +2842,11 @@ function ItemCard({ slot, build, actions, powder = null }) {
         )}
 
         <div className="mt-auto flex flex-col gap-2 pt-1">
+          {item && hasPriceData() && (
+            <p className="text-xs" style={{ color: TOOLTIP.muted }} title="Trade Market price (WynnVentory, average of the middle 80% of listings)">
+              {priceLabel(item)}
+            </p>
+          )}
           <CardPager page={page} onChange={setPage} />
           {actions && (
             <div className="flex flex-wrap gap-2 border-t pt-3" style={{ borderColor: "#1C2044" }}>
@@ -2645,9 +2978,8 @@ function ObtainInfo({ item, color }) {
 function buildWithItem(build, slotId, item) {
   const slots = build.slots.map((slot) => (slot.id === slotId ? { ...slot, item, crafted: null, missing: null } : slot));
   const items = slots.filter((slot) => slot.item).map((slot) => slot.item);
-  const sp = computeSkillPoints(items);
-  const totals = {};
-  items.forEach((entry) => Object.entries(entry.stats).forEach(([key, value]) => (totals[key] = (totals[key] || 0) + value)));
+  const sp = computeSkillPoints(items, true);
+  const totals = itemStatTotals(items);
   return {
     ...build,
     slots,
@@ -2699,11 +3031,225 @@ function slotAlternatives(build, slotId, limit = 20, candidates = null) {
     });
   const list = pool
     .filter((item) => !(current && item.name === current.name) && !ringsClash(picks, slotId, item))
+    .map((item) => (slot.type === "weapon" ? powderForProfile(item, build.profile) : item))
     .map((item) => ({ item, ...rank(item) }))
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
     .map((entry) => ({ ...entry, deltas: summaryDeltas(build, slotId, entry.item, currentStats) }));
   return { list, currentScore: current ? rank(current).score : 0, total: pool.length };
+}
+
+// FILTR IDENTYFIKACJI (Other picks / Browse items): każda identyfikacja występująca w danych gry, bazowe HP i obrony
+// pancerza oraz major ID. Przedmiot pasuje, gdy identyfikacja mu pomaga (koszt czaru: obniżka) - przy najlepszym rollu,
+// bo to "czy da się to wylosować"; opcjonalne minimum per identyfikacja, tryb "wszystkie" albo "którakolwiek".
+const AFFIX_GROUPS = [
+  ["Skill points", (key) => SKILLS.includes(key)],
+  ["Spell costs", (key) => /^sp(Raw|Pct)\d$/.test(key)],
+  ["Health & sustain", (key) => ["hpBonus", "hprRaw", "hprPct", "ls", "healPct"].includes(key)],
+  ["Mana", (key) => ["mr", "ms", "maxMana"].includes(key)],
+  ["Spell damage", (key) => /(^sd|Sd)(Raw|Pct)$/.test(key)],
+  ["Main attack", (key) => /(^md|Md)(Raw|Pct)$/.test(key) || key === "atkTier" || key === "mainAttackRange"],
+  ["Damage", (key) => /(^dam|Dam)(Raw|Pct)$/.test(key)],
+  ["Defence %", (key) => /DefPct$/.test(key)],
+  ["Movement", (key) => ["spd", "sprint", "sprintReg", "jh"].includes(key)],
+  ["Other", () => true],
+];
+const AFFIXES = (() => {
+  const counts = {};
+  const best = {};
+  const majors = new Map();
+  ITEM_DB.forEach((item) => {
+    Object.entries(item.baseIds).forEach(([key, base]) => {
+      counts[key] = (counts[key] || 0) + 1;
+      const top = Math.abs(idRolls(item, key) ? rollRange(key, base)[1] : base);
+      best[key] = Math.max(best[key] || 0, top);
+    });
+    item.majorIds.forEach((major) => majors.set(major, (majors.get(major) || 0) + 1));
+  });
+  const labelCount = {};
+  ID_DISPLAY.forEach((display) => (labelCount[display.label] = (labelCount[display.label] || 0) + 1));
+  const ids = ID_DISPLAY.filter((display) => counts[display.key]).map((display) => {
+    const twin = labelCount[display.label] > 1;
+    const suffix = display.unit === "%" ? " %" : twin ? " (raw)" : display.unit ? ` ${display.unit.trim()}` : "";
+    return {
+      id: display.key,
+      kind: "id",
+      key: display.key,
+      display,
+      label: `${display.label}${suffix}`,
+      group: AFFIX_GROUPS.find(([, test]) => test(display.key))[0],
+      count: counts[display.key],
+      max: best[display.key] || 1,
+    };
+  });
+  const baseCount = (key) => ITEM_DB.filter((item) => (item.base[key] || 0) > 0).length;
+  const base = [
+    { id: "base:hp", kind: "base", key: "hp", label: "Health (base + bonus)", group: "Base stats", count: ITEM_DB.filter((item) => (item.base.hp || 0) + (item.baseIds.hpBonus || 0) > 0).length },
+    ...ELEMENTS.map((element) => ({ id: `base:${element.charAt(0)}Def`, kind: "base", key: `${element.charAt(0)}Def`, label: `${capitalize(element)} Defence (base)`, group: "Base stats", count: baseCount(`${element.charAt(0)}Def`) })),
+  ];
+  base.forEach((entry) => (entry.max = Math.max(1, ...ITEM_DB.map((item) => affixValue(item, entry)))));
+  const majorList = [...majors.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([major, count]) => ({ id: `major:${major}`, kind: "major", key: major, label: `Major ID: ${titleCase(major)}`, group: "Major IDs", count, max: 1 }));
+  return [...ids, ...base, ...majorList];
+})();
+const AFFIX_BY_ID = new Map(AFFIXES.map((affix) => [affix.id, affix]));
+const AFFIX_GROUP_ORDER = [...AFFIX_GROUPS.map(([name]) => name), "Base stats", "Major IDs"];
+
+// Najlepsza wartość identyfikacji w kierunku, który pomaga (koszty czarów: obniżka jako wartość dodatnia).
+function affixValue(item, affix) {
+  if (affix.kind === "major") return item.majorIds.includes(affix.key) ? 1 : 0;
+  if (affix.kind === "base") {
+    if (affix.key === "hp") {
+      const bonus = item.baseIds.hpBonus || 0;
+      return (item.base.hp || 0) + (idRolls(item, "hpBonus") ? rollRange("hpBonus", bonus)[1] : bonus);
+    }
+    return item.base[affix.key] || 0;
+  }
+  const base = item.baseIds[affix.key] || 0;
+  if (!base) return 0;
+  const top = idRolls(item, affix.key) ? rollRange(affix.key, base)[1] : base;
+  return affix.display.invert ? -top : top;
+}
+
+function affixMatches(item, filters, mode) {
+  if (filters.length === 0) return true;
+  const test = (filter) => {
+    const affix = AFFIX_BY_ID.get(filter.id);
+    if (!affix) return true;
+    const value = affixValue(item, affix);
+    const min = filter.min === "" || filter.min === undefined ? null : Number(filter.min);
+    return value > 0 && (min === null || !Number.isFinite(min) || value >= min);
+  };
+  return mode === "any" ? filters.some(test) : filters.every(test);
+}
+
+// Suma wybranych identyfikacji względem najlepszej wartości w grze (sortowanie "Selected identifications").
+function affixSortValue(item, filters) {
+  return filters.reduce((sum, filter) => {
+    const affix = AFFIX_BY_ID.get(filter.id);
+    return affix ? sum + Math.max(0, affixValue(item, affix)) / affix.max : sum;
+  }, 0);
+}
+
+function affixText(item, affix) {
+  if (affix.kind === "major") return titleCase(affix.key);
+  if (affix.kind === "base") return `${formatNumber(affixValue(item, affix))} ${affix.label}`;
+  const current = item.ids[affix.key] || item.baseIds[affix.key] || 0;
+  const top = idRolls(item, affix.key) ? rollRange(affix.key, item.baseIds[affix.key])[1] : null;
+  return `${formatIdValue(affix.display, current)}${top !== null && top !== current ? ` (max ${formatIdValue(affix.display, top)})` : ""} ${affix.display.label}`;
+}
+
+// Lista identyfikacji do wyboru: wyszukiwarka + grupy, wielokrotny wybór; wybrane jako chipy z polem minimum.
+function AffixPicker({ selected, onChange, mode, onModeChange }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const needle = query.trim().toLowerCase();
+  const chosen = new Set(selected.map((filter) => filter.id));
+  const visible = AFFIXES.filter((affix) => !needle || affix.label.toLowerCase().includes(needle) || affix.group.toLowerCase().includes(needle) || affix.key.toLowerCase() === needle);
+  const toggle = (affix) => onChange(chosen.has(affix.id) ? selected.filter((filter) => filter.id !== affix.id) : [...selected, { id: affix.id, min: "" }]);
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs text-zinc-500">Identifications</span>
+        <button type="button" onClick={() => setOpen(!open)} className="mc-btn mc-btn-sm" aria-expanded={open}>
+          {open ? "Close list" : `+ Add identification${selected.length > 0 ? ` (${selected.length})` : ""}`}
+        </button>
+        {selected.length > 1 && (
+          <span className="flex items-center gap-1 text-xs text-zinc-300">
+            Match
+            <ToggleChip pressed={mode === "all"} onClick={() => onModeChange("all")}>
+              all
+            </ToggleChip>
+            <ToggleChip pressed={mode === "any"} onClick={() => onModeChange("any")}>
+              any
+            </ToggleChip>
+          </span>
+        )}
+        {selected.length > 0 && (
+          <button type="button" onClick={() => onChange([])} className="mc-link text-xs">
+            Clear
+          </button>
+        )}
+      </div>
+      {selected.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {selected.map((filter) => {
+            const affix = AFFIX_BY_ID.get(filter.id);
+            if (!affix) return null;
+            return (
+              <span key={filter.id} className="mc-slot flex items-center gap-1 px-2 py-0.5 text-xs" style={{ color: "#FFAA00" }}>
+                {affix.label}
+                {affix.kind !== "major" && (
+                  <>
+                    <span className="text-zinc-500">≥</span>
+                    <input
+                      value={filter.min}
+                      onChange={(event) => onChange(selected.map((entry) => (entry.id === filter.id ? { ...entry, min: event.target.value } : entry)))}
+                      placeholder="any"
+                      inputMode="decimal"
+                      className="mc-input w-14 py-0 text-right text-xs"
+                      aria-label={`Minimum ${affix.label}`}
+                    />
+                  </>
+                )}
+                <button type="button" onClick={() => toggle(affix)} className="mc-link px-1" aria-label={`Remove ${affix.label}`}>
+                  ×
+                </button>
+              </span>
+            );
+          })}
+        </div>
+      )}
+      {open && (
+        <div className="mc-well flex flex-col gap-2 p-2">
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder={`Search ${AFFIXES.length} identifications, e.g. mana, thunder, cost, major`}
+            className="mc-input w-full"
+            aria-label="Search identifications"
+            autoFocus
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <div className="flex max-h-64 flex-col gap-2 overflow-y-auto pr-1" role="listbox" aria-multiselectable="true" aria-label="Identifications">
+            {AFFIX_GROUP_ORDER.map((group) => {
+              const entries = visible.filter((affix) => affix.group === group);
+              if (entries.length === 0) return null;
+              return (
+                <div key={group} className="flex flex-col gap-1">
+                  <span className="text-xs uppercase text-zinc-500">{group}</span>
+                  <div className="flex flex-wrap gap-1">
+                    {entries.map((affix) => (
+                      <button
+                        key={affix.id}
+                        type="button"
+                        role="option"
+                        aria-selected={chosen.has(affix.id)}
+                        onClick={() => toggle(affix)}
+                        className="mc-slot flex items-center gap-1 px-2 py-0.5 text-left text-xs"
+                        style={{ color: chosen.has(affix.id) ? "#FFAA00" : "#e0e0e0", borderColor: chosen.has(affix.id) ? "#FFAA00" : undefined }}
+                        title={`${affix.count} item${affix.count === 1 ? "" : "s"} in the game have it`}
+                      >
+                        {chosen.has(affix.id) ? "✓ " : ""}
+                        {affix.label}
+                        <span className="tabular-nums text-zinc-500">{affix.count}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+            {visible.length === 0 && <p className="text-xs text-zinc-500">No identification matches "{query}".</p>}
+          </div>
+          <p className="text-xs text-zinc-500">
+            Click to add or remove (several at once). An item matches when the identification helps at its best roll (spell costs: a reduction); the number after ≥ is a minimum at the best roll.
+          </p>
+        </div>
+      )}
+    </div>
+  );
 }
 
 // PRZEGLĄDARKA PRZEDMIOTÓW z filtrami (nazwa, typ, żywioły, rzadkość, poziom, szybkość ataku, DPS, sortowanie).
@@ -2722,9 +3268,11 @@ const BROWSE_TYPES = [
 ];
 const BROWSE_SORTS = [
   { id: "score", label: "Score in this build" },
+  { id: "affix", label: "Selected identifications" },
   { id: "dps", label: "Weapon DPS" },
   { id: "level", label: "Level" },
   { id: "hp", label: "Health" },
+  { id: "price", label: "Price (cheapest)" },
   { id: "name", label: "Name" },
 ];
 const BROWSE_LIMIT = 40;
@@ -2755,8 +3303,15 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
   const [minDps, setMinDps] = useState("");
   const [sort, setSort] = useState(build ? "score" : slot && slot.type === "weapon" ? "dps" : "level");
   const [showAll, setShowAll] = useState(false);
+  const [affixFilters, setAffixFilters] = useState([]); // [{ id, min }]
+  const [affixMode, setAffixMode] = useState("all");
+  const changeAffixes = (next) => {
+    if (next.length > 0 && affixFilters.length === 0 && !build) setSort("affix");
+    if (next.length === 0 && sort === "affix") setSort(build ? "score" : slot && slot.type === "weapon" ? "dps" : "level");
+    setAffixFilters(next);
+  };
   const needle = query.trim().toLowerCase();
-  const filtering = needle.length > 0 || elements.length > 0 || tiers.length > 0 || speeds.length > 0 || levelMin !== "" || levelMax !== "" || minDps !== "" || (!slot && types.length > 0);
+  const filtering = (Boolean(build) && sort !== "score") || needle.length > 0 || elements.length > 0 || tiers.length > 0 || speeds.length > 0 || levelMin !== "" || levelMax !== "" || minDps !== "" || affixFilters.length > 0 || (!slot && types.length > 0);
   const weaponsOnly = slot ? slot.type === "weapon" : types.length > 0 && types.every((type) => type === "weapon");
 
   const results = useMemo(() => {
@@ -2776,6 +3331,7 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
       if (speeds.length > 0 && (item.category !== "weapon" || !speeds.includes(item.atkSpd))) return false;
       if (dpsFloor > 0 && (item.category !== "weapon" || (item.dps || 0) < dpsFloor)) return false;
       if (normalized.excluded.includes(item.name)) return false;
+      if (!affixMatches(item, affixFilters, affixMode)) return false;
       return true;
     });
     // Propozycje bez filtrów: ranking na slot jak w "Other picks".
@@ -2803,10 +3359,29 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
       level: (item) => item.level,
       hp: (item) => (item.stats && item.stats.hp) || 0,
       name: (item) => item.name,
-    }[sort === "score" ? "level" : sort];
-    const sorted = [...matches].sort((a, b) => (sort === "name" ? key(a).localeCompare(key(b)) : key(b) - key(a)));
-    return { rows: sorted.slice(0, showAll ? 200 : BROWSE_LIMIT).map((item) => ({ item, score: null, contributions: [], deltas: [], overflow: 0 })), total: matches.length, currentScore: null, suggested: false };
-  }, [build, slotId, slot, types, elements, tiers, speeds, levelMin, levelMax, minDps, needle, sort, level, weaponType, filtering, showAll, normalized.excluded, normalized.locked]);
+      affix: (item) => affixSortValue(item, affixFilters),
+      // najtańsze pierwsze: odwrócony znak, przedmioty bez ceny na końcu
+      price: (item) => {
+        const { price } = itemPrice(item);
+        return price === null ? -Infinity : -price;
+      },
+    }[sort === "score" || (sort === "affix" && affixFilters.length === 0) ? "level" : sort];
+    const sorted = [...matches].sort((a, b) => (sort === "name" ? key(a).localeCompare(key(b)) : key(b) - key(a) || b.level - a.level));
+    const shown = sorted.slice(0, showAll ? 200 : BROWSE_LIMIT);
+    if (!build) return { rows: shown.map((item) => ({ item, score: null, contributions: [], deltas: [], overflow: 0 })), total: matches.length, currentScore: null, suggested: false };
+    // Z buildem: te same wiersze w tej kolejności, ale z wynikiem "w tym buildzie" i zmianą w podsumowaniu.
+    const bySlot = {};
+    shown.forEach((item) => {
+      const target = slot ? slotId : slotForItem(item, normalized.locked);
+      (bySlot[target] || (bySlot[target] = [])).push(item);
+    });
+    const scored = new Map();
+    Object.entries(bySlot).forEach(([target, items]) => {
+      slotAlternatives(build, target, items.length, items).list.forEach((entry) => scored.set(entry.item.name, { ...entry, slotId: target }));
+    });
+    const rows = shown.map((item) => scored.get(item.name) || { item, score: null, contributions: [], deltas: [], overflow: 0, current: true });
+    return { rows, total: matches.length, currentScore: null, suggested: false };
+  }, [build, slotId, slot, types, elements, tiers, speeds, levelMin, levelMax, minDps, needle, sort, level, weaponType, filtering, showAll, normalized.excluded, normalized.locked, affixFilters, affixMode]);
 
   const current = slot && build ? build.slots.find((entry) => entry.id === slotId).item : null;
   const chip = (pressed, color, onClick, label, key) => (
@@ -2859,7 +3434,7 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
             <label className="flex items-center gap-2 text-xs text-zinc-300">
               Sort
               <select value={sort} onChange={(event) => setSort(event.target.value)} className="mc-input" aria-label="Sort items">
-                {BROWSE_SORTS.filter((entry) => entry.id !== "score" || build).map((entry) => (
+                {BROWSE_SORTS.filter((entry) => (entry.id !== "score" || build) && (entry.id !== "affix" || affixFilters.length > 0) && (entry.id !== "price" || hasPriceData())).map((entry) => (
                   <option key={entry.id} value={entry.id}>
                     {entry.label}
                   </option>
@@ -2886,6 +3461,7 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
             <span className="ml-2 text-xs text-zinc-500">Rarity</span>
             {ITEM_TIERS.map((tier) => chip(tiers.includes(tier), RARITY_COLORS[tier], () => setTiers(toggleValue(tiers, tier)), tier, tier))}
           </div>
+          <AffixPicker selected={affixFilters} onChange={changeAffixes} mode={affixMode} onModeChange={setAffixMode} />
           {(weaponsOnly || (!slot && types.length === 0)) && weaponType && (
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-xs text-zinc-500">Attack speed</span>
@@ -2932,17 +3508,28 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
                     <span className="text-xs" style={{ color: TOOLTIP.muted }}>
                       {item.tier} {item.type} · Lv. {item.level}
                       {item.category === "weapon" ? ` · ${ATTACK_SPEED_LABELS[item.atkSpd] || item.atkSpd} · ${formatNumber(item.dps || 0)} DPS` : ""}
+                      {item.powders ? ` (${powderLabel(item.powders)} powders; base ${formatNumber(item.baseWeapon.dps || 0)})` : ""}
                       {item.category === "weapon" && Math.round(weaponMainAttackDps(item)) !== Math.round(item.dps || 0)
                         ? ` → ${formatNumber(Math.round(weaponMainAttackDps(item)))} main attack DPS`
                         : ""}
                       {item.elements && item.elements.length > 0 ? ` · ${item.elements.map((element) => ELEMENT_STYLE[element].symbol).join(" ")}` : ""}
                       {entry.slotId && !slot ? ` · → ${SLOTS.find((s) => s.id === entry.slotId).label}` : ""}
+                      {hasPriceData() ? ` · ${priceLabel(item)}` : ""}
                     </span>
                     <span className="text-xs" style={{ color: TOOLTIP.text }}>
                       {stats.map((c) => `${formatStatValue(c.key, c.value)} ${STAT_META[c.key].label}`).join(" · ")}
                       {fallbackStats.map((c) => `${formatStatValue(c.key, c.value)} ${STAT_META[c.key] ? STAT_META[c.key].label : c.key}`).join(" · ")}
                       {levelGap ? <span style={{ color: "#FFAA00" }}>{stats.length > 0 ? " · " : ""}far below your level ({formatScore(levelGap.contribution)})</span> : null}
                     </span>
+                    {affixFilters.length > 0 && (
+                      <span className="text-xs" style={{ color: "#FFAA00" }}>
+                        {affixFilters
+                          .map((filter) => AFFIX_BY_ID.get(filter.id))
+                          .filter((affix) => affix && affixValue(item, affix) > 0)
+                          .map((affix) => affixText(item, affix))
+                          .join(" · ")}
+                      </span>
+                    )}
                     {entry.score !== null && (
                       <span className="flex flex-wrap gap-x-3 text-xs" title="Change in the build summary if you use this item (without the ability tree)">
                         {!entry.deltas || entry.deltas.length === 0 ? (
@@ -2972,14 +3559,24 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
                       </span>
                     )}
                     {entry.score !== null && (
-                      <span style={{ color: entry.overflow === 0 ? "#55FF55" : "#FFAA00" }}>
-                        {entry.overflow === 0 ? "✓ fits your skill points" : `✗ ${entry.overflow} SP short, other slots get re-fitted`}
+                      <span style={{ color: entry.illegalSet || entry.overBudget ? "#FF5555" : entry.overflow === 0 ? "#55FF55" : "#FFAA00" }}>
+                        {entry.illegalSet
+                          ? `✗ can't be worn with your other ${entry.illegalSet} item`
+                          : entry.overBudget
+                            ? "✗ over your budget"
+                            : entry.overflow === 0
+                            ? "✓ fits your skill points"
+                            : `✗ ${entry.overflow} SP short, other slots get re-fitted`}
                       </span>
                     )}
                   </div>
-                  <button type="button" onClick={() => onPick(item, entry.slotId || slotId || slotForItem(item, normalized.locked))} className="mc-btn mc-btn-sm mc-btn-primary">
-                    {pickLabel}
-                  </button>
+                  {build && build.slots.some((buildSlot) => buildSlot.item && buildSlot.item.name === item.name && (!slot || buildSlot.id === slotId)) ? (
+                    <span className="mc-slot px-2 py-1 text-xs text-zinc-400">In build</span>
+                  ) : (
+                    <button type="button" onClick={() => onPick(item, entry.slotId || slotId || slotForItem(item, normalized.locked))} className="mc-btn mc-btn-sm mc-btn-primary">
+                      {pickLabel}
+                    </button>
+                  )}
                 </li>
               );
             })}
@@ -3081,8 +3678,7 @@ function applyBuildRolls(build, rolls) {
     return { ...slot, item: withRolls(slot.item, spec) };
   });
   if (!changed) return build;
-  const totals = {};
-  slots.filter((slot) => slot.item).forEach((slot) => Object.entries(slot.item.stats).forEach(([key, value]) => (totals[key] = (totals[key] || 0) + value)));
+  const totals = itemStatTotals(slots.filter((slot) => slot.item).map((slot) => slot.item));
   return { ...build, slots, totals };
 }
 
@@ -3179,8 +3775,8 @@ function SkillPointPanel({ skillPoints }) {
         <div className="mc-bar mt-1">
           <div className="mc-bar-fill" style={{ width: `${usedPct}%`, background: skillPoints.valid ? "#7FE828" : "#FF5555" }} />
         </div>
-        <p className="mt-1 text-xs text-zinc-500">
-          {skillPoints.remaining} free points left to put into your archetype's skills.
+        <p className="mt-1 text-xs text-zinc-500" title="Free points you can put into your archetype's skills.">
+          {skillPoints.remaining} free points.
         </p>
       </div>
       <ul className="flex flex-col gap-2">
@@ -3204,7 +3800,9 @@ function SkillPointPanel({ skillPoints }) {
           );
         })}
       </ul>
-      <p className="text-xs text-zinc-500">Columns: assigned points · total with item bonuses. Max 100 assigned per skill.</p>
+      <p className="text-xs text-zinc-500" title="Columns: assigned points · total with item bonuses. Max 100 assigned per skill.">
+        Assigned · total with items.
+      </p>
     </section>
   );
 }
@@ -3253,6 +3851,9 @@ function collectIds(items) {
     Object.entries(item.ids).forEach(([key, value]) => {
       totals[key] = (totals[key] || 0) + value;
     });
+  });
+  Object.entries(setBonusIds(items)).forEach(([key, value]) => {
+    totals[key] = (totals[key] || 0) + value;
   });
   return totals;
 }
@@ -3634,6 +4235,7 @@ function collectTreeSpells(edited, translate) {
 }
 
 function weaponDamageRanges(weapon) {
+  if (weapon.powderedRanges) return weapon.powderedRanges.map((range) => range.slice());
   const ranges = weapon.damageRanges || {};
   return ["neutral", "earth", "thunder", "water", "fire", "air"].map((element) => {
     if (ranges[element]) {
@@ -4222,9 +4824,13 @@ function DamagePanel({ build, stats, onOpenTree }) {
           </ul>
           <ul className="flex flex-col gap-1 font-mono text-sm">
             <SummaryRow
-              label="Weapon base DPS"
+              label={stats.weapon.powders ? `Weapon DPS (${powderLabel(stats.weapon.powders)})` : "Weapon base DPS"}
               value={formatNumber(stats.weapon.dps || 0)}
-              hint="The number on the weapon's tooltip: average base damage × hits per second, before any bonuses."
+              hint={
+                stats.weapon.powders
+                  ? `The weapon's tooltip DPS with its powders: average damage × hits per second, before any bonuses. Without powders: ${formatNumber(stats.weapon.baseWeapon.dps || 0)}.`
+                  : "The number on the weapon's tooltip: average base damage × hits per second, before any bonuses."
+              }
             />
             {stats.spells.length === 0 && (
               <SummaryRow
@@ -4252,27 +4858,28 @@ function DamagePanel({ build, stats, onOpenTree }) {
       ) : (
         <p className="text-sm text-zinc-500">No weapon in this build.</p>
       )}
-      <p className="text-xs text-zinc-500">
-        Item stats, current skill points
-        {build.skillPoints.remaining > 0 ? ` (${build.skillPoints.remaining} free points not assigned)` : ""} and{" "}
+      <p
+        className="text-xs text-zinc-500"
+        title={`Item stats, current skill points${build.skillPoints.remaining > 0 ? ` (${build.skillPoints.remaining} free points not assigned)` : ""} and ${treeNodes > 0 ? `${treeNodes} ability tree node${treeNodes === 1 ? "" : "s"} (${tree.points} AP)` : "no ability tree nodes"}. ${stats.weapon && stats.weapon.powders ? `Weapon powders: ${powderLabel(stats.weapon.powders)}; no armour powders or tomes.` : "No powders or tomes."}`}
+      >
         {treeNodes > 0 ? (
-          `${treeNodes} ability tree node${treeNodes === 1 ? "" : "s"} (${tree.points} AP)`
+          `With ${treeNodes} tree node${treeNodes === 1 ? "" : "s"}.`
         ) : (
           <>
-            no ability tree nodes
+            No tree nodes
             {onOpenTree && (
               <>
                 {" "}
                 (
                 <button type="button" onClick={onOpenTree} className="mc-link">
-                  pick them
+                  pick
                 </button>
                 )
               </>
             )}
+            .
           </>
         )}
-        . No powders or tomes.
       </p>
     </section>
   );
@@ -4529,7 +5136,56 @@ function BuildTotals({ build }) {
           <StatLine key={row.key} statKey={row.key} value={row.value} />
         ))}
       </ul>
+      <SetBonusList items={build.slots.filter((slot) => slot.item).map((slot) => slot.item)} playerClass={build.playerClass} />
     </section>
+  );
+}
+
+// Aktywne bonusy setów (jak "Set Bonus" w grze): liczba założonych przedmiotów zestawu i identyfikacje bonusu.
+function SetBonusList({ items, playerClass }) {
+  const sets = activeSets(items);
+  if (sets.length === 0) return null;
+  return (
+    <div className="mc-hr flex flex-col gap-2 pt-3">
+      {sets.map((set) => {
+        const lines = ID_DISPLAY.filter((display) => typeof set.bonus[display.key] === "number" && set.bonus[display.key] !== 0);
+        const majors = Array.isArray(set.bonus.majorIds) ? set.bonus.majorIds : [];
+        return (
+          <div key={set.name} className="flex flex-col gap-1 text-sm">
+            <span style={{ color: TOOLTIP.good }}>
+              {set.name} set bonus ({set.count}/{set.size})
+            </span>
+            {set.illegal ? (
+              <span className="text-xs" style={{ color: TOOLTIP.bad }}>
+                These items can't be worn together in game.
+              </span>
+            ) : lines.length === 0 && majors.length === 0 ? (
+              <span className="text-xs text-zinc-500">No bonus yet at {set.count} piece{set.count === 1 ? "" : "s"}.</span>
+            ) : (
+              <ul className="flex flex-col gap-0.5 font-mono text-xs">
+                {lines.map((display) => {
+                  const value = set.bonus[display.key];
+                  const good = display.invert ? value < 0 : value > 0;
+                  return (
+                    <li key={display.key} className="flex items-baseline justify-between gap-3">
+                      <span className="text-zinc-300">{idLabel(display, playerClass)}</span>
+                      <span className="tabular-nums" style={{ color: good ? TOOLTIP.good : TOOLTIP.bad }}>
+                        {formatIdValue(display, value)}
+                      </span>
+                    </li>
+                  );
+                })}
+                {majors.map((major) => (
+                  <li key={major} className="text-zinc-300">
+                    Major ID: {major}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -4691,9 +5347,11 @@ function FocusSliders({ options, onChange, archetype }) {
           </div>
         );
       })}
-      <p className="text-xs text-zinc-500">
-        X% = X% of the group's full priority: 0% ignores it, 100% is all-in, 50% is half of that. "Meta" is where this archetype's
-        guide builds sit. Above meta, Main attack DPS switches to the build's real DPS (attack speed tiers, raw × hits/s, Strength).
+      <p
+        className="text-xs text-zinc-500"
+        title={`X% = X% of the group's full priority: 0% ignores it, 100% is all-in, 50% is half of that. "Meta" is where this archetype's guide builds sit. Above meta, Main attack DPS switches to the build's real DPS (attack speed tiers, raw × hits/s, Strength).`}
+      >
+        Meta = guide builds' average.
       </p>
     </fieldset>
   );
@@ -4758,8 +5416,64 @@ function PinItemSearch({ options, onChange, weaponType, level, onBrowse = null }
           )}
         </ul>
       )}
-      <p className="text-xs text-zinc-500">
-        Type a name, or open <span className="text-zinc-300">Browse items…</span> to filter by type, element, rarity, level, attack speed and DPS. Pinned items show below and always stay in the build.
+      <p className="text-xs text-zinc-500" title="Type a name, or open Browse items… to filter by type, element, rarity, level, attack speed, DPS and identifications. Pinned items show below and always stay in the build.">
+        Pinned items always stay.
+      </p>
+    </div>
+  );
+}
+
+// Budżet w emeraldach (E / EB / LE / STX) pod "Allowed rarities"; ceny z Trade Marketu (WynnVentory).
+function BudgetInput({ options, onChange }) {
+  const normalized = normalizeOptions(options);
+  const unit = EMERALD_UNITS.find((entry) => entry.id === normalized.budgetUnit) || EMERALD_UNITS[2];
+  const [text, setText] = useState(normalized.budget ? String(Math.round((normalized.budget / unit.value) * 100) / 100) : "");
+  const prices = hasPriceData();
+  const apply = (value, unitId) => {
+    const nextUnit = EMERALD_UNITS.find((entry) => entry.id === unitId) || unit;
+    const amount = Number(String(value).replace(",", "."));
+    onChange({ ...options, budget: value === "" || !(amount > 0) ? null : Math.round(amount * nextUnit.value), budgetUnit: nextUnit.id });
+  };
+  const info = prices
+    ? `Trade Market prices from WynnVentory (average of the middle 80% of listings, ${PRICE_DATA.days || 7} days${PRICE_DATA.fetchedAt ? `, updated ${String(PRICE_DATA.fetchedAt).slice(0, 10)}` : ""}). Pinned items don't count (you have them); untradable items cost nothing; Fabled/Mythic items without listings are skipped. 1 EB = 64 E, 1 LE = 64 EB, 1 STX = 64 LE.`
+    : "No Trade Market prices in this copy of the site. The GitHub Pages version fetches them from WynnVentory when the repository has a WYNNVENTORY_KEY secret (see the README).";
+  return (
+    <div className="flex flex-col gap-2">
+      <label htmlFor="budget" className="text-xs text-zinc-300">
+        Budget
+      </label>
+      <div className="flex gap-2">
+        <input
+          id="budget"
+          type="text"
+          inputMode="decimal"
+          value={text}
+          disabled={!prices}
+          placeholder={prices ? "No limit" : "No price data"}
+          onChange={(event) => {
+            setText(event.target.value);
+            apply(event.target.value, unit.id);
+          }}
+          className="mc-input min-w-0 flex-1 tabular-nums"
+          style={prices ? undefined : { opacity: 0.5 }}
+        />
+        <select
+          aria-label="Budget unit"
+          value={unit.id}
+          disabled={!prices}
+          onChange={(event) => apply(text, event.target.value)}
+          className="mc-input w-20"
+          style={prices ? undefined : { opacity: 0.5 }}
+        >
+          {EMERALD_UNITS.map((entry) => (
+            <option key={entry.id} value={entry.id}>
+              {entry.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      <p className="text-xs text-zinc-500" title={info}>
+        {!prices ? "No price data yet." : normalized.budget ? `Max ${formatEmeralds(normalized.budget)}.` : "Trade Market prices."}
       </p>
     </div>
   );
@@ -4788,10 +5502,10 @@ function CustomStats({ options, onChange, archetype, weaponType, weaponCounts, l
 
       <PinItemSearch options={options} onChange={onChange} weaponType={weaponType} level={level} onBrowse={onBrowse} />
 
-      {archetypeConfig ? (
-        <FocusSliders options={options} onChange={onChange} archetype={archetype} />
-      ) : (
-        <p className="text-xs text-zinc-500">Build focus sliders (main attack / spell / EHP) appear once you choose an archetype.</p>
+      {archetypeConfig && (
+        <div className="wbr-fade">
+          <FocusSliders options={options} onChange={onChange} archetype={archetype} />
+        </div>
       )}
 
       <fieldset className="flex flex-col gap-2">
@@ -4808,10 +5522,12 @@ function CustomStats({ options, onChange, archetype, weaponType, weaponCounts, l
             </ToggleChip>
           ))}
         </div>
-        <p className="text-xs text-zinc-500">
-          {excludedTiers.length > 0 ? `Without ${excludedTiers.join(", ")} items - a cheaper build. ` : ""}Turn off Mythic (or Fabled) for a build you can actually afford; pinned items always stay.
+        <p className="text-xs text-zinc-500" title="Turn off Mythic (or Fabled) for a build you can actually afford; pinned items always stay.">
+          {excludedTiers.length > 0 ? `Without ${excludedTiers.join(", ")}.` : "Turn off = cheaper build."}
         </p>
       </fieldset>
+
+      <BudgetInput options={options} onChange={onChange} />
 
       <div className="flex flex-col gap-2">
         <label htmlFor="level-window" className="text-xs text-zinc-300">
@@ -4824,12 +5540,16 @@ function CustomStats({ options, onChange, archetype, weaponType, weaponCounts, l
             </option>
           ))}
         </select>
-        <p className="text-xs text-zinc-500">
-          "Prefer": an item loses {Math.round(scoreTuning(options.scoring).levelGapPenalty * 100)}% of its score for every level it is below the window (down to {Math.round(scoreTuning(options.scoring).levelGapFloor * 100)}%), so old items only win when nothing newer comes close. "Only" hides them. Pinned items always stay.
+        <p
+          className="text-xs text-zinc-500"
+          title={`"Prefer": an item loses ${Math.round(scoreTuning(options.scoring).levelGapPenalty * 100)}% of its score for every level it is below the window (down to ${Math.round(scoreTuning(options.scoring).levelGapFloor * 100)}%), so old items only win when nothing newer comes close. "Only" hides them. Pinned items always stay.`}
+        >
+          Older items score lower.
         </p>
       </div>
 
-      <fieldset className="flex flex-col gap-2">
+      {archetypeConfig && (
+      <fieldset className="wbr-fade flex flex-col gap-2">
         <legend className="mb-2 text-xs text-zinc-300">Damage focus</legend>
         <div className="flex flex-wrap gap-2">
           {DAMAGE_FOCUS_OPTIONS.map((element) => (
@@ -4843,14 +5563,14 @@ function CustomStats({ options, onChange, archetype, weaponType, weaponCounts, l
             </ToggleChip>
           ))}
         </div>
-        <p className="text-xs text-zinc-500">
-          {options.elements.length > 0
-            ? "A weapon of any damage type can still be picked, but ones dealing the checked damage get priority. Items boosting it do too, and skill points follow it."
-            : archetypeConfig
-              ? `Following ${archetype}: ${archetypeElements}. Pick elements to override.`
-              : "Nothing picked: the archetype's usual elements will be used."}
+        <p
+          className="text-xs text-zinc-500"
+          title="A weapon of any damage type can still be picked, but ones dealing the checked damage get priority. Items boosting it do too, and skill points follow it. Nothing picked = the archetype's usual elements."
+        >
+          {options.elements.length > 0 ? "Checked damage gets priority." : archetypeConfig ? `Default: ${archetypeElements}.` : "Default: archetype's elements."}
         </p>
       </fieldset>
+      )}
 
       <fieldset className="flex flex-col gap-2">
         <legend className="mb-2 text-xs text-zinc-300">Weapon attack speed</legend>
@@ -4878,12 +5598,29 @@ function CustomStats({ options, onChange, archetype, weaponType, weaponCounts, l
             );
           })}
         </div>
-        <p className="text-xs text-zinc-500">
-          {options.attackSpeeds.length > 0
-            ? `The best ${weaponType} among the checked speeds is picked.`
-            : `Nothing checked: any speed (${totalWeapons} ${weaponType}s up to your level).`}
+        <p className="text-xs text-zinc-500" title={`The best ${weaponType || "weapon"} among the checked speeds is picked; nothing checked = any speed (${totalWeapons} ${weaponType || "weapon"}s up to your level).`}>
+          {options.attackSpeeds.length > 0 ? "Only checked speeds." : `Any speed (${totalWeapons}).`}
         </p>
       </fieldset>
+
+      <div className="flex flex-col gap-2">
+        <label htmlFor="weapon-powders" className="text-xs text-zinc-300">
+          Weapon powders
+        </label>
+        <select id="weapon-powders" value={normalizeOptions(options).powders} onChange={(event) => onChange({ ...options, powders: event.target.value })} className="mc-input w-full">
+          {POWDER_CHOICES.map((choice) => (
+            <option key={choice.id} value={choice.id}>
+              {choice.label}
+            </option>
+          ))}
+        </select>
+        <p
+          className="text-xs text-zinc-500"
+          title={`Every weapon is compared with powders in all its slots (the highest tier for its level: VII from item level 70, VI from 55), like in game and in Wynnbuilder, so a 5-slot weapon beats a 2-slot one with the same base damage. "Auto" uses the element of your damage focus.`}
+        >
+          Highest tier, every slot.
+        </p>
+      </div>
 
       {(Object.keys(normalizeOptions(options).locked).length > 0 || options.excluded.length > 0) && (
         <div className="flex flex-col gap-2">
@@ -4929,10 +5666,12 @@ function CustomStats({ options, onChange, archetype, weaponType, weaponCounts, l
               </li>
             ))}
           </ul>
-          <p className="text-xs text-zinc-500">Changes here apply when you press Generate Build.</p>
+          <p className="text-xs text-zinc-500">Applies on Generate Build.</p>
         </div>
       )}
 
+      {archetypeConfig && (
+      <div className="wbr-fade flex flex-col gap-4">
       <fieldset className="flex flex-col gap-2">
         <legend className="mb-2 text-xs text-zinc-300">Defence focus</legend>
         <div className="flex flex-wrap gap-2">
@@ -4957,10 +5696,8 @@ function CustomStats({ options, onChange, archetype, weaponType, weaponCounts, l
           />
           Avoid negative defences
         </label>
-        <p className="text-xs text-zinc-500">
-          {options.defences.length > 0 || options.avoidNegativeDefences
-            ? "Picked defences count toward each item's score; totals are under Build totals."
-            : "Nothing picked: defences don't affect the score."}
+        <p className="text-xs text-zinc-500" title="Picked defences count toward each item's score; totals are under Build totals. Nothing picked: defences don't affect the score.">
+          {options.defences.length > 0 || options.avoidNegativeDefences ? "Picked defences add score." : "Ignored by the score."}
         </p>
       </fieldset>
 
@@ -4974,8 +5711,8 @@ function CustomStats({ options, onChange, archetype, weaponType, weaponCounts, l
         />
         <span>
           Prefer items from guide builds
-          <span className="block text-zinc-500">
-            {archetypeConfig ? `${archetypeConfig.guideBuilds} ${archetype} build${archetypeConfig.guideBuilds === 1 ? "" : "s"} in The Ultimate Build Guide.` : "126 builds from The Ultimate Build Guide, per archetype."}
+          <span className="block text-zinc-500" title="Builds from The Ultimate Build Guide (Wynncraft forums), per archetype.">
+            {archetypeConfig ? `${archetypeConfig.guideBuilds} guide build${archetypeConfig.guideBuilds === 1 ? "" : "s"}.` : "126 guide builds."}
           </span>
         </span>
       </label>
@@ -4993,8 +5730,12 @@ function CustomStats({ options, onChange, archetype, weaponType, weaponCounts, l
             </ToggleChip>
           ))}
         </div>
-        <p className="text-xs text-zinc-500">A picked stat outranks everything else the archetype values.</p>
+        <p className="text-xs text-zinc-500" title="A picked stat outranks everything else the archetype values.">
+          Outranks archetype stats.
+        </p>
       </fieldset>
+      </div>
+      )}
     </div>
   );
 }
@@ -5018,6 +5759,24 @@ const TREE_NODE_TYPES = {
   node_4: "Archetype core",
 };
 const SPELL_NODE_COLOR = "#55FF55";
+// Krótkie opisy archetypów pod wyborem archetypu (pełny opis w podpowiedzi).
+const ARCHETYPE_TAGLINES = {
+  Fallen: "Combos or heavy melee.",
+  "Battle Monk": "Harmony stack combos.",
+  Paladin: "Tank or support.",
+  Riftwalker: "Rift spell cycles.",
+  "Light Bender": "Healing and spell damage.",
+  Arcanist: "Big raw spell bursts.",
+  Boltslinger: "Arrow Storm spam.",
+  Sharpshooter: "Focus-stacked big hits.",
+  Trapper: "Traps and pets.",
+  Shadestepper: "Backstab cycles, heavy melee.",
+  Trickster: "Clone combos.",
+  Acrobat: "Mobility spell cycles.",
+  Summoner: "Puppets, attack speed.",
+  Ritualist: "Mask tierstacking.",
+  Acolyte: "Health-cost Blood Pool spells.",
+};
 const ARCHETYPE_COLORS = ["#FF8C1A", "#55B7FF", "#C77DFF"];
 const DESC_COLORS = { "mc-white": "#FFFFFF", nDam: "#FFAA00", eDam: "#2DBE2D", tDam: "#FFFF55", wDam: "#55FFFF", fDam: "#FF5555", aDam: "#E8E8E8" };
 
@@ -5652,15 +6411,98 @@ function BuildInfoPanel({ playerClass, archetype, build, stats, treeSettings, on
 // samego żywiołu odblokowują special broni. Pancerz: żywioł najsłabszej obrony buildu (powder dodaje obronę tego
 // żywiołu i HP, a odejmuje obronę żywiołu przeciwnego) albo żywioł obrażeń buildu dla specialu pancerza.
 const POWDERS = {
-  earth: { weapon: [[4, 5, 17], [6, 7, 21], [7, 9, 25], [8, 9, 31], [9, 11, 38], [11, 13, 46]], defence: [2, 4, 9, 14, 22, 29], counter: "air", counterDefence: [1, 2, 3, 4, 7, 7], weaponSpecial: ["Quake", "240–480% damage and a stun around you"], armourSpecial: ["Rage", "+0.4–1% Earth damage per % of missing health below 75%"] },
-  thunder: { weapon: [[1, 8, 9], [1, 12, 11], [2, 14, 13], [2, 15, 17], [3, 17, 22], [4, 19, 28]], defence: [2, 4, 8, 13, 20, 28], counter: "earth", counterDefence: [1, 1, 2, 3, 5, 6], weaponSpecial: ["Chain Lightning", "200–350% damage chaining up to 5–11 times"], armourSpecial: ["Kill Streak", "+6–15% Thunder damage per kill for 10 s"] },
-  water: { weapon: [[3, 4, 13], [5, 6, 15], [6, 8, 17], [7, 8, 21], [8, 10, 26], [10, 13, 32]], defence: [3, 6, 11, 16, 23, 32], counter: "thunder", counterDefence: [1, 1, 3, 4, 6, 10], weaponSpecial: ["Curse", "enemies within 8 blocks take 10–25% more damage for 4 s"], armourSpecial: ["Concentration", "+0.05–0.2% Water damage per mana spent"] },
-  fire: { weapon: [[2, 5, 14], [4, 7, 16], [5, 9, 19], [6, 9, 24], [7, 11, 30], [9, 14, 37]], defence: [3, 6, 10, 15, 22, 31], counter: "water", counterDefence: [1, 1, 2, 3, 5, 9], weaponSpecial: ["Courage", "110–200% damage and +10–25% damage for allies for 4 s"], armourSpecial: ["Endurance", "+2–8% Fire damage for 8 s when you take damage"] },
-  air: { weapon: [[2, 6, 11], [3, 9, 14], [4, 11, 17], [5, 11, 22], [7, 12, 28], [8, 15, 35]], defence: [3, 6, 10, 16, 23, 30], counter: "fire", counterDefence: [1, 2, 3, 5, 7, 8], weaponSpecial: ["Wind Prison", "holds enemies for 5 s, next hit deals 100–250% more"], armourSpecial: ["Dodge", "+2–8% Air damage per second near enemies"] },
+  earth: { weapon: [[4, 5, 17], [6, 7, 21], [7, 9, 25], [8, 9, 31], [9, 11, 38], [11, 12, 46], [12, 14, 52]], defence: [2, 5, 9, 14, 22, 29, 37], counter: "air", counterDefence: [1, 2, 3, 4, 7, 7, 12], weaponSpecial: ["Quake", "240–480% damage and a stun around you"], armourSpecial: ["Rage", "+0.4–1% Earth damage per % of missing health below 75%"] },
+  thunder: { weapon: [[1, 8, 9], [1, 12, 11], [2, 14, 13], [2, 15, 17], [3, 17, 22], [4, 19, 28], [5, 21, 32]], defence: [2, 4, 8, 13, 20, 28, 36], counter: "earth", counterDefence: [1, 1, 2, 3, 5, 6, 11], weaponSpecial: ["Chain Lightning", "200–350% damage chaining up to 5–11 times"], armourSpecial: ["Kill Streak", "+6–15% Thunder damage per kill for 5 s"] },
+  water: { weapon: [[3, 4, 13], [5, 6, 15], [6, 8, 17], [7, 8, 21], [8, 10, 26], [10, 13, 32], [11, 15, 38]], defence: [3, 6, 11, 16, 23, 32, 40], counter: "thunder", counterDefence: [1, 1, 3, 4, 6, 10, 15], weaponSpecial: ["Curse", "enemies take 10–25% more damage for 4 s"], armourSpecial: ["Concentration", "+0.05–0.2% Water damage per mana spent"] },
+  fire: { weapon: [[2, 5, 14], [4, 7, 16], [5, 9, 19], [6, 9, 24], [7, 11, 30], [9, 14, 37], [10, 16, 44]], defence: [3, 6, 10, 15, 22, 31, 39], counter: "water", counterDefence: [1, 1, 2, 3, 5, 9, 14], weaponSpecial: ["Courage", "110–200% damage and +10–25% damage for allies for 4 s"], armourSpecial: ["Endurance", "+2–8% Fire damage for 8 s when you take damage"] },
+  air: { weapon: [[2, 6, 11], [3, 9, 14], [4, 11, 17], [5, 11, 22], [7, 12, 28], [8, 15, 35], [9, 17, 42]], defence: [3, 6, 10, 16, 23, 30, 38], counter: "fire", counterDefence: [1, 2, 3, 5, 7, 8, 13], weaponSpecial: ["Wind Prison", "holds enemies for 5 s, next hit deals 100–250% more"], armourSpecial: ["Dodge", "+2–8% Air damage per second near enemies"] },
 };
-const POWDER_HEALTH = [5, 10, 20, 30, 45, 60];
-const POWDER_TIER = 6; // rekomendacje dla tier VI (najwyższy zwykły powder)
-const ROMAN = ["I", "II", "III", "IV", "V", "VI"];
+const POWDER_HEALTH = [5, 10, 20, 30, 45, 60, 75];
+const POWDER_LEVELS = [1, 5, 15, 25, 40, 55, 70]; // najniższy poziom przedmiotu dla tieru I..VII
+const ROMAN = ["I", "II", "III", "IV", "V", "VI", "VII"];
+const POWDER_CHOICES = [
+  { id: "auto", label: "Auto element (your damage focus)" },
+  ...ELEMENTS.map((element) => ({ id: element, label: `${element.charAt(0).toUpperCase()}${element.slice(1)} powders` })),
+  { id: "none", label: "No powders (base weapon)" },
+];
+
+// Najwyższy tier powderu, który wchodzi na przedmiot tego poziomu (tier VII od poziomu 70, VI od 55...).
+function powderTierFor(itemLevel) {
+  let tier = 1;
+  POWDER_LEVELS.forEach((min, index) => {
+    if (itemLevel >= min) tier = index + 1;
+  });
+  return tier;
+}
+
+// Żywioł powderów broni dla profilu: wybór gracza albo żywioł z najwyższą wagą obrażeń spośród focusu (własnego
+// albo archetypu; neutral nie ma powderu). null = bez powderów.
+function powderElementFor(profile) {
+  const choice = profile.options.powders || "auto";
+  if (choice === "none") return null;
+  if (ELEMENTS.includes(choice)) return choice;
+  const focus = (profile.elements || []).filter((element) => ELEMENTS.includes(element));
+  const candidates = focus.length > 0 ? focus : ELEMENTS;
+  return candidates.reduce((best, element) => ((profile.weights[ELEMENT_DAMAGE_KEY[element]] || 0) > (profile.weights[ELEMENT_DAMAGE_KEY[best]] || 0) ? element : best), candidates[0]);
+}
+
+// Port calc_weapon_powder z Wynnbuildera (js/powders.js) dla powderów jednego żywiołu: konwersja zabiera procent
+// obrażeń neutralnych (suma konwersji wszystkich powderów, najwyżej całość) i dodaje je do żywiołu powderu razem
+// z płaskimi obrażeniami każdego powderu. Zakresy: [neutral, earth, thunder, water, fire, air] × [min, max].
+function powderWeaponRanges(ranges, element, tier, count) {
+  const [min, max, conversion] = POWDERS[element].weapon[tier - 1];
+  const damages = ranges.map((range) => range.slice());
+  const neutral = damages[0].slice();
+  const ratio = (conversion / 100) * count;
+  const minDiff = Math.min(neutral[0], ratio * neutral[0]);
+  const maxDiff = Math.min(neutral[1], ratio * neutral[1]);
+  neutral[0] -= minDiff;
+  neutral[1] -= maxDiff;
+  const index = 1 + ELEMENTS.indexOf(element);
+  damages[index][0] += minDiff + min * count;
+  damages[index][1] += maxDiff + max * count;
+  damages[0] = neutral;
+  return damages;
+}
+
+// Broń z powderami w każdym slocie (najwyższy tier dla jej poziomu): nowe zakresy, średnie i DPS (jak tooltip
+// spowderowanej broni w grze), bazowe wartości w baseWeapon. Broń bez slotów albo element null - bez zmian.
+const POWDERED_CACHE = new Map();
+const DAMAGE_ELEMENTS = ["neutral", ...ELEMENTS];
+function powderedWeapon(item, element) {
+  if (!element || !item || item.category !== "weapon" || !(item.slots > 0) || item.powders) return item;
+  const tier = powderTierFor(item.level);
+  const key = `${item.name}|${element}|${tier}`;
+  if (!item.rolls && POWDERED_CACHE.has(key)) return POWDERED_CACHE.get(key);
+  const ranges = powderWeaponRanges(weaponDamageRanges(item), element, tier, item.slots);
+  const round = (value) => Math.round(value * 10000) / 10000;
+  const damageRanges = {};
+  const damage = {};
+  ranges.forEach(([min, max], index) => {
+    if (max > 0) {
+      damageRanges[DAMAGE_ELEMENTS[index]] = `${Math.round(min)}-${Math.round(max)}`;
+      damage[DAMAGE_ELEMENTS[index]] = (min + max) / 2;
+    }
+  });
+  const dps = Math.round(Object.values(damage).reduce((sum, value) => sum + value, 0) * (HITS_PER_SECOND[item.atkSpd] || 0));
+  const powdered = {
+    ...item,
+    damageRanges,
+    damage,
+    dps,
+    powderedRanges: ranges.map(([min, max]) => [round(min), round(max)]),
+    powders: { element, tier, count: item.slots },
+    baseWeapon: { damageRanges: item.damageRanges, damage: item.damage, dps: item.dps },
+  };
+  if (!item.rolls) POWDERED_CACHE.set(key, powdered);
+  return powdered;
+}
+function powderForProfile(item, profile) {
+  return profile && profile.powderElement ? powderedWeapon(item, profile.powderElement) : item;
+}
+function powderLabel(powders) {
+  return `${powders.count}× ${ELEMENT_STYLE[powders.element].label} ${ROMAN[powders.tier - 1]}`;
+}
 
 function recommendPowders(build, stats) {
   const items = build.slots.filter((slot) => slot.item && slot.item.slots > 0);
@@ -5680,22 +6522,26 @@ function recommendPowders(build, stats) {
   const weaponSlot = items.find((slot) => slot.item.category === "weapon");
   let weapon = null;
   if (weaponSlot) {
-    const best = ranked[0].element;
-    const neutral = (weaponSlot.item.damage || {}).neutral || 0;
+    // Broń z powderami w wyniku i obrażeniach: ten sam żywioł i tier, który policzył generator.
+    const applied = weaponSlot.item.powders || null;
+    const best = applied ? applied.element : ranked[0].element;
+    const tier = applied ? applied.tier : powderTierFor(weaponSlot.item.level);
+    const neutral = ((weaponSlot.item.baseWeapon || weaponSlot.item).damage || {}).neutral || 0;
     const spec = POWDERS[best];
-    const [min, max, conversion] = spec.weapon[POWDER_TIER - 1];
+    const [min, max, conversion] = spec.weapon[tier - 1];
     const prefix = best.charAt(0);
     weapon = {
       slot: weaponSlot,
       element: best,
+      applied: Boolean(applied),
       count: weaponSlot.item.slots,
-      tier: POWDER_TIER,
+      tier,
       perPowder: { min, max, conversion },
       neutralShare: neutral > 0 ? Math.min(100, conversion * weaponSlot.item.slots) : 0,
       bonusPct: (totals[`${prefix}DamPct`] || 0) + (totals.rDamPct || 0),
       skillPct: Math.round(skillPercent(skills[ELEMENT_SKILL[best]] || 0) * (SKILL_DAMAGE_MULT[ELEMENT_SKILL[best]] || 1) * 100),
       special: weaponSlot.item.slots >= 2 ? spec.weaponSpecial : null,
-      alternative: ranked[1] && ranked[1].benefit > ranked[0].benefit * 0.85 ? ranked[1].element : null,
+      alternative: applied ? null : ranked[1] && ranked[1].benefit > ranked[0].benefit * 0.85 ? ranked[1].element : null,
     };
   }
   // Pancerz: najsłabsza obrona żywiołu (z drzewka i przedmiotów) - powder tego żywiołu ją podnosi.
@@ -5708,15 +6554,16 @@ function recommendPowders(build, stats) {
       // Nie wybieraj żywiołu, którego powder osłabia obronę, która i tak jest najsłabsza.
       const pick = weakest.find((element) => POWDERS[element].counter !== weakest[0]) || weakest[0];
       const spec = POWDERS[pick];
+      const tier = powderTierFor(slot.item.level);
       return {
         slot,
         element: pick,
         count: slot.item.slots,
-        tier: POWDER_TIER,
-        defence: spec.defence[POWDER_TIER - 1],
+        tier,
+        defence: spec.defence[tier - 1],
         counter: spec.counter,
-        counterDefence: spec.counterDefence[POWDER_TIER - 1],
-        health: POWDER_HEALTH[POWDER_TIER - 1],
+        counterDefence: spec.counterDefence[tier - 1],
+        health: POWDER_HEALTH[tier - 1],
         current: defences[pick],
         special: slot.item.slots >= 2 ? spec.armourSpecial : null,
         offence: offence !== pick ? { element: offence, special: POWDERS[offence].armourSpecial, count: slot.item.slots } : null,
@@ -5745,7 +6592,7 @@ function PowderPanel({ build, stats, standalone = false }) {
     <section className={`${standalone ? "mc-slot" : "mc-panel"} flex flex-col gap-3 p-4`}>
       <div className="flex items-center justify-between gap-2">
         <h3 className="mc-title text-sm uppercase">Recommended powders</h3>
-        <span className="text-xs text-zinc-500">{totalSlots} slots · tier {ROMAN[POWDER_TIER - 1]}</span>
+        <span className="text-xs text-zinc-500">{totalSlots} slots · highest tier for each item's level</span>
       </div>
       {plan.weapon && (
         <div className="flex flex-col gap-1 text-sm">
@@ -5757,13 +6604,12 @@ function PowderPanel({ build, stats, standalone = false }) {
               {plan.weapon.count} × {elementName(plan.weapon.element)} {ROMAN[plan.weapon.tier - 1]}
             </span>
           </div>
-          <p className="text-xs text-zinc-400">
-            Each powder: +{plan.weapon.perPowder.min}–{plan.weapon.perPowder.max} {ELEMENT_STYLE[plan.weapon.element].label} damage and {plan.weapon.perPowder.conversion}% of neutral damage converted
-            {plan.weapon.neutralShare > 0 ? ` (${plan.weapon.neutralShare}% with all ${plan.weapon.count})` : " (this weapon has no neutral damage, so only the flat damage applies)"}
-            . Converted damage gets your {plan.weapon.bonusPct >= 0 ? "+" : ""}
-            {plan.weapon.bonusPct}% {ELEMENT_STYLE[plan.weapon.element].label} damage and +{plan.weapon.skillPct}% from {SKILL_LABELS[ELEMENT_SKILL[plan.weapon.element]]}.
-            {plan.weapon.special ? ` Two tier IV+ ${ELEMENT_STYLE[plan.weapon.element].label} powders unlock ${plan.weapon.special[0]} (${plan.weapon.special[1]}); the first powder you apply decides the special.` : ""}
-            {plan.weapon.alternative ? ` Close second: ${ELEMENT_STYLE[plan.weapon.alternative].label}.` : ""}
+          <p
+            className="text-xs text-zinc-400"
+            title={`Each powder: +${plan.weapon.perPowder.min}–${plan.weapon.perPowder.max} ${ELEMENT_STYLE[plan.weapon.element].label} damage and ${plan.weapon.perPowder.conversion}% of neutral damage converted${plan.weapon.neutralShare > 0 ? ` (${plan.weapon.neutralShare}% with all ${plan.weapon.count})` : " (this weapon has no neutral damage, so only the flat damage applies)"}. Converted damage gets your ${plan.weapon.bonusPct >= 0 ? "+" : ""}${plan.weapon.bonusPct}% ${ELEMENT_STYLE[plan.weapon.element].label} damage and +${plan.weapon.skillPct}% from ${SKILL_LABELS[ELEMENT_SKILL[plan.weapon.element]]}.${plan.weapon.special ? ` Two tier IV+ ${ELEMENT_STYLE[plan.weapon.element].label} powders unlock ${plan.weapon.special[0]} (${plan.weapon.special[1]}); the first powder you apply decides the special.` : ""}${plan.weapon.alternative ? ` Close second: ${ELEMENT_STYLE[plan.weapon.alternative].label}.` : ""}${plan.weapon.applied ? " Already counted in the weapon's damage, the score and every DPS number (Custom stats › Weapon powders)." : ""}`}
+          >
+            {plan.weapon.special ? `Unlocks ${plan.weapon.special[0]}` : "Converts neutral damage"}
+            {plan.weapon.applied ? ", counted." : "."}
           </p>
         </div>
       )}
@@ -5777,16 +6623,19 @@ function PowderPanel({ build, stats, standalone = false }) {
               {entry.count} × {elementName(entry.element)} {ROMAN[entry.tier - 1]}
             </span>
           </div>
-          <p className="text-xs text-zinc-400">
-            Your {ELEMENT_STYLE[entry.element].label} defence is {entry.current >= 0 ? "+" : ""}
-            {formatNumber(entry.current)}, the lowest{entry.current === plan.defences[entry.element] && entry.element !== ELEMENTS.slice().sort((a, b) => plan.defences[a] - plan.defences[b])[0] ? " you can raise without hurting a weaker one" : ""}. Each powder: +{entry.defence} {ELEMENT_STYLE[entry.element].label} defence, +{entry.health} health, −{entry.counterDefence} {ELEMENT_STYLE[entry.counter].label} defence.
-            {entry.special ? ` Two tier IV+ powders unlock ${entry.special[0]} (${entry.special[1]}).` : ""}
-            {entry.offence ? ` For damage instead: ${entry.count} × ${ELEMENT_STYLE[entry.offence.element].label} for ${entry.offence.special[0]} (${entry.offence.special[1]}).` : ""}
+          <p
+            className="text-xs text-zinc-400"
+            title={`Your ${ELEMENT_STYLE[entry.element].label} defence is ${entry.current >= 0 ? "+" : ""}${formatNumber(entry.current)}, the lowest${entry.current === plan.defences[entry.element] && entry.element !== ELEMENTS.slice().sort((a, b) => plan.defences[a] - plan.defences[b])[0] ? " you can raise without hurting a weaker one" : ""}. Each powder: +${entry.defence} ${ELEMENT_STYLE[entry.element].label} defence, +${entry.health} health, −${entry.counterDefence} ${ELEMENT_STYLE[entry.counter].label} defence.${entry.special ? ` Two tier IV+ powders unlock ${entry.special[0]} (${entry.special[1]}).` : ""}${entry.offence ? ` For damage instead: ${entry.count} × ${ELEMENT_STYLE[entry.offence.element].label} for ${entry.offence.special[0]} (${entry.offence.special[1]}).` : ""}`}
+          >
+            Raises your weakest defence.
           </p>
         </div>
       ))}
-      <p className="text-xs text-zinc-500">
-        Powders aren't part of the score or the DPS/EHP numbers. Data: wynncraft.wiki.gg/wiki/Powders.
+      <p
+        className="text-xs text-zinc-500"
+        title="Weapon powders are part of the score and the damage numbers (Custom stats › Weapon powders); armour powders aren't counted in EHP. Tier VII needs item level 70, VI 55, V 40. Numbers: Wynnbuilder's powder table (wynncraft.wiki.gg/wiki/Powders)."
+      >
+        Armour powders not counted.
       </p>
     </section>
   );
@@ -6284,11 +7133,12 @@ function AbilityTree({ playerClass, level, rank, selected, onChange, buildArchet
 const ITEM_BY_NAME = new Map(ITEM_DB.map((item) => [item.name, item]));
 
 // Buduje obiekt w tym samym kształcie co generateOptimizedBuild() z buildu z poradnika (poziom 120, domyślne opcje).
-function guideBuildResult(guide) {
-  const profile = getArchetypeProfile(guide.archetype, DEFAULT_OPTIONS);
+function guideBuildResult(guide, powders = "auto") {
+  const profile = getArchetypeProfile(guide.archetype, { ...DEFAULT_OPTIONS, powders });
   const slots = SLOTS.map((slot) => {
     const name = guide.items[slot.id];
-    const item = name ? ITEM_BY_NAME.get(name) : null;
+    const found = name ? ITEM_BY_NAME.get(name) : null;
+    const item = found && slot.id === "weapon" ? powderForProfile(found, profile) : found;
     if (!item) {
       const crafted = name && name.startsWith("Crafted") ? name.replace(/^Crafted /, "") : null;
       return { ...slot, item: null, crafted, missing: name && !crafted ? name : null, score: 0, contributions: [] };
@@ -6296,10 +7146,9 @@ function guideBuildResult(guide) {
     return { ...slot, item, ...scoreItem(item, profile) };
   });
   const items = slots.filter((slot) => slot.item).map((slot) => slot.item);
-  const sp = computeSkillPoints(items);
+  const sp = computeSkillPoints(items, true);
   const available = availableSkillPoints(120);
-  const totals = {};
-  items.forEach((item) => Object.entries(item.stats).forEach(([key, value]) => (totals[key] = (totals[key] || 0) + value)));
+  const totals = itemStatTotals(items);
   return {
     level: 120,
     playerClass: guide.class,
@@ -6544,13 +7393,14 @@ function solveBuilds(level, solver, rawOptions = DEFAULT_OPTIONS) {
   const minLevel = Math.max(1, Math.min(playerLevel, solverNumber(solver.minLevel) === null ? playerLevel - 10 : Number(solver.minLevel)));
   const excludedNames = new Set(options.excluded);
   const lockedNames = new Set(Object.values(options.locked));
+  const powderElement = powderElementFor(getArchetypeProfile(archetype, options));
   const eligible = ITEM_DB.filter((item) => {
     if (item.level > playerLevel || (item.level < minLevel && !lockedNames.has(item.name))) return false;
     if (excludedNames.has(item.name) && !lockedNames.has(item.name)) return false;
     if (solver.tiers.length > 0 && !solver.tiers.includes(item.tier) && !lockedNames.has(item.name)) return false;
     if (item.category !== "weapon") return true;
-    return item.type === classConfig.weapon && item.dps > 0 && (options.attackSpeeds.length === 0 || options.attackSpeeds.includes(item.atkSpd));
-  });
+    return item.type === classConfig.weapon && (item.dps > 0 || (powderElement && item.slots > 0)) && (options.attackSpeeds.length === 0 || options.attackSpeeds.includes(item.atkSpd));
+  }).map((item) => (item.category === "weapon" ? powderedWeapon(item, powderElement) : item));
   const profile = solverProfile(solver, playerClass, options);
   const scored = eligible
     .map((item) => {
@@ -6650,6 +7500,7 @@ function solveBuilds(level, solver, rawOptions = DEFAULT_OPTIONS) {
     level: playerLevel,
     playerClass,
     archetype,
+    powderElement,
     candidates: passing.slice(0, count).map((state, index) => toCandidate(state, index + 1)),
     nearMisses: passing.length >= count ? [] : nearMisses.slice(0, count - passing.length).map((state, index) => toCandidate(state, Math.min(passing.length, count) + index + 1)),
     stats: { eligible: eligible.length, evaluated, feasible: unique.length, passing: passing.length },
@@ -6661,14 +7512,14 @@ function solverBuildResult(candidate, solved, archetype) {
   const profile = getArchetypeProfile(archetype, DEFAULT_OPTIONS);
   const slots = SLOTS.map((slot) => {
     const name = candidate.items[slot.id];
-    const item = name ? ITEM_BY_NAME.get(name) : null;
+    const found = name ? ITEM_BY_NAME.get(name) : null;
+    const item = found && slot.id === "weapon" ? powderedWeapon(found, solved.powderElement || null) : found;
     return item ? { ...slot, item, ...scoreItem(item, profile) } : { ...slot, item: null, score: 0, contributions: [] };
   });
   const items = slots.filter((slot) => slot.item).map((slot) => slot.item);
-  const sp = computeSkillPoints(items);
+  const sp = computeSkillPoints(items, true);
   const available = availableSkillPoints(solved.level);
-  const totals = {};
-  items.forEach((item) => Object.entries(item.stats).forEach(([key, value]) => (totals[key] = (totals[key] || 0) + value)));
+  const totals = itemStatTotals(items);
   return {
     level: solved.level,
     playerClass: solved.playerClass,
@@ -7024,7 +7875,7 @@ export default function BuildRecommender() {
   const [solverView, setSolverView] = useState(null); // kandydat solvera pokazany w siatce
 
   const generated = result ? result.build : null;
-  const guideResult = useMemo(() => (guideView ? guideBuildResult(guideView) : null), [guideView]);
+  const guideResult = useMemo(() => (guideView ? guideBuildResult(guideView, options.powders) : null), [guideView, options.powders]);
   const solverBuild = useMemo(() => (solverView ? solverBuildResult(solverView.candidate, solverView.solved, solverView.archetype) : null), [solverView]);
   const viewed = guideResult || solverBuild;
   const build = useMemo(() => (viewed || generated ? applyBuildRolls(viewed || generated, rolls) : null), [viewed, generated, rolls]);
@@ -7053,6 +7904,11 @@ export default function BuildRecommender() {
   const profile = archetypeValid ? getArchetypeProfile(archetype, options) : null;
   const weaponType = playerClass ? CLASSES[playerClass].weapon : null;
   const ready = Boolean(level && archetypeValid);
+  // Formularz odsłania się krok po kroku: ranga → poziom → klasa → archetyp (+ opcje zależne od klasy) → opcje
+  // archetypu i Generate. Raz pokazany krok zostaje (np. przy kasowaniu poziomu, żeby wpisać nowy).
+  const showLevel = rankConfirmed || levelInput !== "";
+  const showClass = showLevel && Boolean(level || playerClass);
+  const showArchetype = showClass && Boolean(playerClass);
   const outdated = Boolean(
     generated &&
       (generated.level !== level || generated.playerClass !== playerClass || generated.archetype !== archetype || !sameOptions(generated.options, options))
@@ -7204,7 +8060,7 @@ export default function BuildRecommender() {
                 </label>
                 <select
                   id="rank"
-                  value={rank}
+                  value={rankConfirmed ? rank : ""}
                   onChange={(event) => {
                     setRank(event.target.value);
                     setRankConfirmed(true);
@@ -7212,6 +8068,11 @@ export default function BuildRecommender() {
                   }}
                   className={fieldClass}
                 >
+                  {!rankConfirmed && (
+                    <option value="" disabled>
+                      Choose your rank
+                    </option>
+                  )}
                   {RANKS.map((entry) => (
                     <option key={entry.id} value={entry.id}>
                       {entry.label}
@@ -7222,13 +8083,14 @@ export default function BuildRecommender() {
                 <p className={`text-xs ${rankConfirmed ? "text-zinc-500" : "text-amber-300"}`}>
                   {rankConfirmed
                     ? level
-                      ? `${abilityPointCap(level, (RANKS.find((entry) => entry.id === rank) || RANKS[0]).loan)} ability points at this level.`
-                      : "Ability points depend on your level."
-                    : "Pick your rank first: VIP+ and higher get ability points early. Your choice is remembered on this device."}
+                      ? `${abilityPointCap(level, (RANKS.find((entry) => entry.id === rank) || RANKS[0]).loan)} ability points.`
+                      : "Depends on your level."
+                    : "Pick your rank first."}
                 </p>
               </div>
 
-              <div className="flex flex-col gap-2">
+              {showLevel && (
+              <div className="wbr-fade flex flex-col gap-2">
                 <label htmlFor="level" className="mc-title text-xs uppercase">
                   Level
                 </label>
@@ -7254,10 +8116,12 @@ export default function BuildRecommender() {
                   accent="#7FE828"
                   aria-label="Level slider"
                 />
-                <p className="text-xs text-zinc-500">{level ? `${availableSkillPoints(level)} skill points available at this level.` : "Type your combat level or drag the slider."}</p>
+                <p className="text-xs text-zinc-500">{level ? `${availableSkillPoints(level)} skill points.` : "Type your combat level."}</p>
               </div>
+              )}
 
-              <div className="flex flex-col gap-2">
+              {showClass && (
+              <div className="wbr-fade flex flex-col gap-2">
                 <label htmlFor="class" className="mc-title text-xs uppercase">
                   Class
                 </label>
@@ -7270,8 +8134,10 @@ export default function BuildRecommender() {
                   ))}
                 </select>
               </div>
+              )}
 
-              <div className="flex flex-col gap-2">
+              {showArchetype && (
+              <div className="wbr-fade flex flex-col gap-2">
                 <label htmlFor="archetype" className="mc-title text-xs uppercase">
                   Archetype
                 </label>
@@ -7283,9 +8149,13 @@ export default function BuildRecommender() {
                     </option>
                   ))}
                 </select>
-                <p className="text-xs text-zinc-400">{profile ? profile.focus : "The archetype is the branch of the ability tree you play (e.g. Mage → Riftwalker)."}</p>
+                <p className="text-xs text-zinc-400" title={profile ? profile.focus : "The archetype is the branch of the ability tree you play (e.g. Mage → Riftwalker)."}>
+                  {archetypeValid ? ARCHETYPE_TAGLINES[archetype] || profile.focus : "Your ability tree branch."}
+                </p>
               </div>
+              )}
 
+              {showArchetype && (
               <CustomStats
                 options={options}
                 onChange={setOptions}
@@ -7295,7 +8165,10 @@ export default function BuildRecommender() {
                 level={effectiveLevel}
                 onBrowse={() => setBrowseOpen(true)}
               />
+              )}
 
+              {ready && (
+              <div className="wbr-fade flex flex-col gap-2">
               <button
                 type="button"
                 onClick={handleGenerate}
@@ -7306,14 +8179,15 @@ export default function BuildRecommender() {
                 Generate Build
               </button>
               {outdated ? (
-                <p className="text-xs text-amber-400">Settings changed. Press Generate Build to update.</p>
+                <p className="text-xs text-amber-400">Settings changed: regenerate.</p>
               ) : result ? (
-                <p className="text-xs text-zinc-500">
-                  Build #{result.run} generated in <span className="tabular-nums">{result.ms}</span> ms at{" "}
-                  <span className="tabular-nums">{result.at.toLocaleTimeString("en-GB")}</span>
+                <p className="text-xs text-zinc-500" title={`Generated at ${result.at.toLocaleTimeString("en-GB")}`}>
+                  Build #{result.run} · <span className="tabular-nums">{result.ms}</span> ms
                 </p>
               ) : (
-                <p className="text-xs text-zinc-500">{ready ? "Ready - press Generate Build." : "Level, class and archetype are needed for a build."}</p>
+                <p className="text-xs text-zinc-500">Ready to generate.</p>
+              )}
+              </div>
               )}
               {buildError && <p className="text-xs text-red-400">{buildError}</p>}
             </section>
@@ -7336,7 +8210,7 @@ export default function BuildRecommender() {
                 ))}
               </dl>
               <p className="text-xs text-zinc-500">
-                Every armor piece, accessory and weapon in Wynnbuilder's item data, version {WYNNBUILDER_DATA.version}. Crafted items are not included.
+                Data {WYNNBUILDER_DATA.version}, no crafted items.
               </p>
             </section>
           </aside>
@@ -7508,10 +8382,23 @@ export default function BuildRecommender() {
                   <p className="text-sm text-zinc-400">
                     Build score <span className="tabular-nums font-bold text-amber-400">{formatScore(build.score)}</span> · from{" "}
                     <span className="tabular-nums">{build.stats.eligible.toLocaleString("en-US")}</span> eligible items
+                    {build.cost && (
+                      <span
+                        title={`Trade Market prices (WynnVentory). Pinned items aren't counted.${build.cost.unknown.length > 0 ? ` No market price: ${build.cost.unknown.join(", ")}.` : ""}`}
+                        style={{ color: build.cost.budget && build.cost.total > build.cost.budget ? "#FF5555" : undefined }}
+                      >
+                        {" "}
+                        · cost <span className="tabular-nums text-zinc-200">≈ {formatEmeralds(build.cost.total)}</span>
+                        {build.cost.budget ? ` of ${formatEmeralds(build.cost.budget)}` : ""}
+                        {build.cost.unknown.length > 0 ? ` + ${build.cost.unknown.length} unpriced` : ""}
+                      </span>
+                    )}
                   </p>
-                  <p className="w-full text-xs text-zinc-500">
-                    {build.profile.focus}. Weights tuned on {ARCHETYPES[build.archetype].guideBuilds} guide build
-                    {ARCHETYPES[build.archetype].guideBuilds === 1 ? "" : "s"}.
+                  <p
+                    className="w-full text-xs text-zinc-500"
+                    title={`${build.profile.focus}. Weights tuned on ${ARCHETYPES[build.archetype].guideBuilds} guide build${ARCHETYPES[build.archetype].guideBuilds === 1 ? "" : "s"}.`}
+                  >
+                    {ARCHETYPE_TAGLINES[build.archetype] || build.profile.focus}
                   </p>
                 </div>
               )}
@@ -7527,15 +8414,17 @@ export default function BuildRecommender() {
               ))}
               <WeightChips profile={build.profile} />
               <ScoreGuide build={build} />
-              <p className="text-xs text-zinc-500">
-                Identifications are shown and scored at a <span className="mc-gold">50% roll</span> (positive IDs = 80% of base, negative = base);
-                in game they roll 30–130%. The [xx%] tag after each value is the roll; press Rolls on a card to set your own item's rolls
+              <p
+                className="text-xs text-zinc-500"
+                title="Identifications are shown and scored at a 50% roll (positive IDs = 80% of base, negative = base); in game they roll 30–130%. The [xx%] tag after each value is the roll; press Rolls on a card to set your own item's rolls."
+              >
+                Average rolls <span className="mc-gold">(50%)</span>
                 {Object.keys(rolls).length > 0 ? (
                   <>
                     {" "}
-                    ({Object.keys(rolls).length} item{Object.keys(rolls).length === 1 ? "" : "s"} customised,{" "}
+                    · {Object.keys(rolls).length} custom (
                     <button type="button" onClick={() => setRolls({})} className="mc-link">
-                      reset all
+                      reset
                     </button>
                     )
                   </>

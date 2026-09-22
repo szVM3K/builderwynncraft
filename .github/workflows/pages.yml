@@ -7,6 +7,8 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  schedule:
+    - cron: "23 5 * * *" # codziennie: świeże ceny z Trade Marketu (jeśli jest sekret WYNNVENTORY_KEY)
 
 permissions:
   contents: read
@@ -20,6 +22,9 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # Klucz WynnVentory (Settings › Secrets and variables › Actions › WYNNVENTORY_KEY); bez niego strona działa bez cen.
+      WYNNVENTORY_KEY: ${{ secrets.WYNNVENTORY_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -27,6 +32,10 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+      - name: Trade Market prices (WynnVentory)
+        if: ${{ env.WYNNVENTORY_KEY != '' }}
+        run: npm run update-prices
+        continue-on-error: true
       - run: npm run build
       - uses: actions/configure-pages@v5
         with:

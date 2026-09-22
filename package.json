@@ -1,14 +1,15 @@
 {
   "name": "wynncraft-build-recommender",
   "private": true,
-  "version": "0.22.0",
+  "version": "0.24.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
     "update-items": "node scripts/update-items.mjs",
-    "update-tree-effects": "node scripts/update-tree-effects.mjs"
+    "update-tree-effects": "node scripts/update-tree-effects.mjs",
+    "update-prices": "node scripts/update-prices.mjs"
   },
   "dependencies": {
     "@fontsource/pixelify-sans": "^5.3.0",

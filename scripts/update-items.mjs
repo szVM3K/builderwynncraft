@@ -103,5 +103,17 @@ if (argument && fs.existsSync(argument)) {
 }
 
 const items = (Array.isArray(raw) ? raw : raw.items).map(compactItem).filter(Boolean);
-fs.writeFileSync(OUTPUT, JSON.stringify({ version, source, items }));
-console.log(`Saved ${items.length} items (Wynnbuilder data ${version}) to ${OUTPUT.pathname}`);
+// Zestawy (sety): Wynnbuilder trzyma je osobno ({ nazwa: { items, bonuses } }, bonuses[n-1] = bonus za n przedmiotów)
+// i dopisuje przedmiotom pole "set" przy wczytywaniu - tu robimy to samo, żeby aplikacja liczyła bonusy setów.
+const sets = {};
+const byName = new Map(items.map((item) => [item.displayName || item.name, item]));
+Object.entries((!Array.isArray(raw) && raw.sets) || {}).forEach(([name, data]) => {
+  const members = (data.items || []).filter((itemName) => byName.has(itemName));
+  if (members.length === 0) return;
+  members.forEach((itemName) => {
+    byName.get(itemName).set = name;
+  });
+  sets[name] = { items: members, bonuses: data.bonuses || [] };
+});
+fs.writeFileSync(OUTPUT, JSON.stringify({ version, source, items, sets }));
+console.log(`Saved ${items.length} items and ${Object.keys(sets).length} sets (Wynnbuilder data ${version}) to ${OUTPUT.pathname}`);
