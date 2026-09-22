@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import WYNNBUILDER_DATA from "./wynncraft-items.json";
 import GUIDE_DATA from "./guide-builds.json";
 import PRICE_DATA from "./item-prices.json";
@@ -6,6 +6,8 @@ import TREE_DATA from "./ability-trees.json";
 import EHP_RANGE from "./ehp-range.json";
 import GUIDE_TREES from "./guide-trees.json";
 import WYNNPOOL_DATA from "./item-weights.json";
+import { CLASS_PORTRAITS, ITEM_SHEET, ITEM_SHEET_ORDER } from "./game-icons.js";
+import EVENT_ITEMS from "./event-items.json";
 
 /*
  * Wynncraft Build Recommender (MVP)
@@ -1072,6 +1074,13 @@ const PRICE_ITEMS = (PRICE_DATA && PRICE_DATA.items) || {};
 function hasPriceData() {
   return Object.keys(PRICE_ITEMS).length > 0;
 }
+// Przedmioty z festiwali (Blizzard, Bonfire, Heroes, Spirits, Wynnterfest) - do zdobycia tylko w czasie wydarzenia.
+// Lista z wiki (kategorie "Festival of the … Items") i z dropMeta API Wynncrafta; skrypt scripts/update-event-items.mjs.
+const EVENT_ITEM_NAMES = new Map(Object.entries((EVENT_ITEMS && EVENT_ITEMS.items) || {}));
+function eventOf(item) {
+  return (item && EVENT_ITEM_NAMES.get(item.name)) || null;
+}
+
 function isUntradable(item) {
   const restrict = item.source && item.source.restrict;
   return restrict === "untradable" || restrict === "quest_item";
@@ -1841,7 +1850,25 @@ const SKILL_PROBES = new Set(SKILLS);
 
 function damageGoalContext(playerClass, level, treeSettings) {
   const settings = { selected: (treeSettings && treeSettings.selected) || [], toggles: (treeSettings && treeSettings.toggles) || {}, sliders: (treeSettings && treeSettings.sliders) || {} };
-  return { playerClass, level, tree: treeStateFor(playerClass, settings.selected), treeSettings: settings, available: availableSkillPoints(level) };
+  const tree = treeStateFor(playerClass, settings.selected);
+  return { playerClass, level, tree, treeSettings: settings, available: availableSkillPoints(level), propKeys: propStatInputs(tree.merged), spellCache: new Map() };
+}
+
+// Statystyki, od których zależą same czary (skalowania drzewka z wyjściem typu "prop", np. obrażenia czaru od
+// Many). Czary liczymy raz na każdą kombinację tych wartości zamiast przy każdej ocenie zestawu - wynik ten sam.
+function propStatInputs(merged) {
+  const keys = new Set();
+  merged.forEach((ability) => {
+    (ability.effects || []).forEach((effect) => {
+      if (effect.type !== "stat_scaling" || !effect.output || effect.slider) return;
+      const outputs = Array.isArray(effect.output) ? effect.output : [effect.output];
+      if (!outputs.some((output) => output && output.type === "prop")) return;
+      (effect.inputs || []).forEach((input) => {
+        if (input.type === "stat") keys.add(input.name);
+      });
+    });
+  });
+  return [...keys];
 }
 
 // Statystyki zestawu jak w computeBuildStats, ale bez liczenia wszystkich czarów.
@@ -1849,26 +1876,36 @@ function goalStats(ctx, items, weapon, skillTotals) {
   const fake = { level: ctx.level, playerClass: ctx.playerClass, skillPoints: { totals: skillTotals } };
   const stats = buildStatMap(fake, items, weapon);
   treeRawStats(ctx.tree.merged, stats);
+  const spellKey = (ctx.propKeys || []).map((key) => statValue(stats, key)).join(",");
   const scaled = applyTreeScaling(ctx.tree.merged, copyStats(stats), ctx.tree.interactives, ctx.treeSettings);
   Object.entries(scaled.added).forEach(([key, value]) => {
     if (MULTIPLIER_MAPS.includes(key)) Object.entries(value).forEach(([inner, amount]) => mergeStat(stats, `${key}.${inner}`, amount));
     else mergeStat(stats, key, value);
   });
-  return { stats, scaled };
+  return { stats, scaled, spellKey };
 }
 
 // Obrażenia celu, EHP i bilans many dla jednego zestawu przedmiotów.
 function evaluateGoal(ctx, items, weapon, skillTotals, goal, cycle) {
-  const { stats, scaled } = goalStats(ctx, items, weapon, skillTotals);
+  const { stats, scaled, spellKey } = goalStats(ctx, items, weapon, skillTotals);
   const hp = Math.max(5, statValue(stats, "hp") + statValue(stats, "hpBonus"));
   const defPct = skillPercent(statValue(stats, "def")) * SKILL_DAMAGE_MULT.def;
   const agiPct = skillPercent(statValue(stats, "agi")) * SKILL_DAMAGE_MULT.agi;
   const treeDefence = Object.values(stats.defMult || {}).reduce((product, value) => product * (1 - value / 100), 1);
   const classMultiplier = 2 - (weapon ? CLASS_DEFENSE[weapon.type] ?? 1 : 1);
   const ehp = hp / (AGILITY_DAMAGE_TAKEN * agiPct + (1 - agiPct) * (1 - defPct)) / (classMultiplier * treeDefence);
-  const result = { damage: 0, ehp, hp, manaIncome: 0, manaUsed: 0, manaGain: 0, manaNet: 0, cycleOk: true, goalName: "", stats };
+  // Życie: Health Regen (raw × (1 + %), jak w Build info) co 4 s plus Life Steal co 3 s, na sekundę.
+  const hprRaw = statValue(stats, "hprRaw");
+  const hprPct = statValue(stats, "hprPct") / 100;
+  const hpr = hprRaw < 0 ? Math.min(0, hprRaw - hprRaw * hprPct) : hprRaw + hprRaw * hprPct;
+  const lifeSteal = statValue(stats, "ls");
+  const result = { damage: 0, ehp, hp, hpr, lifeSteal, sustain: hpr / 4 + lifeSteal / 3, manaIncome: 0, manaUsed: 0, manaGain: 0, manaNet: 0, cycleOk: true, goalName: "", stats };
   if (!weapon) return result;
-  const spells = collectTreeSpells(scaled.edited, scaled.translate);
+  let spells = ctx.spellCache ? ctx.spellCache.get(spellKey) : null;
+  if (!spells) {
+    spells = collectTreeSpells(scaled.edited, scaled.translate);
+    if (ctx.spellCache && ctx.spellCache.size < 4096) ctx.spellCache.set(spellKey, spells);
+  }
   if (goal === DAMAGE_GOAL_MAIN) {
     const melee = spells.has(0) ? evaluateSpell(spells.get(0), stats, weapon, hp) : null;
     const hit = melee && melee.main && melee.main.type === "damage" ? melee.main.amount : 0;
@@ -1948,10 +1985,47 @@ function proxyScore(item, weights) {
   return value;
 }
 
-const DAMAGE_BEAM = { weaponsTried: 14, weapons: 5, perSlot: 18, cheapPerSlot: 10, extraPerSlot: 6, beam: 22, exactPerState: 6, polishPool: 24 };
+const DAMAGE_BEAM = { weaponsTried: 14, weapons: 5, perSlot: 18, cheapPerSlot: 10, extraPerSlot: 6, beam: 22, exactPerState: 6, polishPool: 24, pureDamage: 6, pureEhp: 5, pureMana: 3, finalists: 6, ladder: [1.2], pairPool: 8, weaponSwap: 16, quick: 40 };
+
+// Najlepsze `count` elementów według `score` (każdy element oceniany raz, nie przy każdym porównaniu sortowania).
+function topBy(list, score, count) {
+  return list
+    .map((item) => [score(item), item])
+    .sort((a, b) => b[0] - a[0])
+    .slice(0, count)
+    .map((entry) => entry[1]);
+}
+
+// Przybliżone życie z przedmiotu (Health Regen co 4 s + Life Steal co 3 s) - tylko do wyboru kandydatów.
+function sustainProxy(item) {
+  return (item.ids.hprRaw || 0) / 4 + (item.ids.ls || 0) / 3;
+}
 
 // Główna funkcja: build o największych obrażeniach celu, który przechodzi twarde filtry EHP i many.
-function generateDamageBuild({ playerClass, level, archetype = null, treeSettings, goal, cycle, minEhp = 0, options = DEFAULT_OPTIONS, items = ITEM_DB, powders = "auto", objective = "damage" }) {
+// Oddaje wątek przeglądarce (odświeżenie paska postępu). MessageChannel zamiast setTimeout: timery w kartach w tle
+// są dławione do 1/s, co przy kilkudziesięciu przerwach wydłużałoby szukanie o dziesiątki sekund.
+function yieldToBrowser() {
+  return new Promise((resolve) => {
+    if (typeof MessageChannel === "undefined") {
+      setTimeout(resolve, 0);
+      return;
+    }
+    const channel = new MessageChannel();
+    channel.port1.onmessage = () => {
+      channel.port1.close();
+      resolve();
+    };
+    channel.port2.postMessage(0);
+  });
+}
+
+async function generateDamageBuild({ playerClass, level, archetype = null, treeSettings, goal, cycle, minEhp = 0, requireSustain = false, options = DEFAULT_OPTIONS, items = ITEM_DB, powders = "auto", objective = "damage", onProgress = null, seeds = [], excludeEvents = true, tradeableOnly = false }) {
+  // Postęp dla interfejsu: bez onProgress (testy, skrypty) nie ma żadnych przerw.
+  const pause = async (label, fraction) => {
+    if (!onProgress) return;
+    onProgress({ label, fraction: Math.max(0, Math.min(1, fraction)) });
+    await yieldToBrowser();
+  };
   const started = typeof performance !== "undefined" ? performance.now() : 0;
   const classConfig = CLASSES[playerClass];
   if (!classConfig) throw new Error(`Unknown class: ${playerClass}`);
@@ -1966,6 +2040,8 @@ function generateDamageBuild({ playerClass, level, archetype = null, treeSetting
     if (item.level > level) return false;
     if (lockedNames.has(item.name)) return true;
     if (excluded.has(item.name) || excludedTiers.has(item.tier)) return false;
+    if (excludeEvents && eventOf(item)) return false;
+    if (tradeableOnly && isUntradable(item)) return false;
     if (budget && !withinBudget(item, budget)) return false;
     if (onlyListed && marketStatus(item).state !== "listed") return false;
     if (item.category !== "weapon") return true;
@@ -1990,6 +2066,8 @@ function generateDamageBuild({ playerClass, level, archetype = null, treeSetting
       !(normalized.locked && normalized.locked[slotId] && normalized.locked[slotId] !== item.name) &&
       !excluded.has(item.name) &&
       !excludedTiers.has(item.tier) &&
+      !(excludeEvents && eventOf(item) && !(normalized.locked && normalized.locked[slotId] === item.name)) &&
+      !(tradeableOnly && isUntradable(item) && !(normalized.locked && normalized.locked[slotId] === item.name)) &&
       (!budget || withinBudget(item, budget)) &&
       (!onlyListed || marketStatus(item).state === "listed");
     (GUIDE_DATA.builds || [])
@@ -2022,22 +2100,51 @@ function generateDamageBuild({ playerClass, level, archetype = null, treeSetting
   let phase = objective;
   const objectiveOf = (metrics) => (phase === "ehp" ? metrics.ehp : metrics.damage);
 
+  // Ten sam zestaw (ta sama broń z tymi samymi powderami + te same przedmioty w dowolnej kolejności) ocenia się
+  // w wiązce, dopieszczaniu i podmianach wiele razy - wynik trzymamy w pamięci podręcznej na czas jednego szukania.
+  const evalCache = new Map();
+  let evalCached = 0;
   const evaluate = (items2, weapon) => {
+    let byWeapon = null;
+    let key = null;
+    if (weapon) {
+      byWeapon = evalCache.get(weapon);
+      if (!byWeapon) {
+        byWeapon = new Map();
+        evalCache.set(weapon, byWeapon);
+      }
+      key = items2.map((item) => item.name).sort().join("|");
+      const hit = byWeapon.get(key);
+      if (hit) return hit;
+    }
     const all = weapon ? [...items2, weapon] : items2;
     const sp = computeSkillPoints(all);
     const sets = activeSets(all);
     const illegal = sets.some((entry) => entry.illegal);
     const metrics = evaluateGoal(ctx, all, weapon, sp.totals, goal, cycleCfg);
+    delete metrics.stats;
     metrics.sp = sp;
     metrics.spOver = Math.max(0, sp.total - ctx.available) + sp.capOverflow + (illegal ? ILLEGAL_SET_OVERFLOW : 0);
     metrics.cost = budget ? buildCost(all, lockedNames).total : 0;
+    if (byWeapon) {
+      if (evalCached > 250000) {
+        evalCache.forEach((map) => map.clear());
+        evalCached = 0;
+      }
+      byWeapon.set(key, metrics);
+      evalCached += 1;
+    }
     return metrics;
   };
   // Twarde filtry: Skill Pointy, EHP i mana. Build, który ich nie spełnia, nie jest wynikiem.
   // Jak daleko zestawowi do progów (0 = przechodzi): używane przy naprawie, gdy nic nie przechodzi od razu.
+  // Próg EHP, na który aktualnie szukamy: zwykle minEhp, na czas przebiegu "z zapasem" wyższy (krok 2b).
+  let ehpTarget = minEhp;
+  const sustainOk = (metrics) => !requireSustain || metrics.sustain > 0;
   const shortfall = (metrics) => {
     let miss = metrics.spOver / 10;
-    if (minEhp > 0 && metrics.ehp < minEhp) miss += 1 - metrics.ehp / minEhp;
+    if (ehpTarget > 0 && metrics.ehp < ehpTarget) miss += 1 - metrics.ehp / ehpTarget;
+    if (!sustainOk(metrics)) miss += 0.5 + Math.min(1, -metrics.sustain / 100);
     if (cycleCfg.ids.length > 0 && metrics.manaUsed > 0) {
       const share = (metrics.manaIncome + metrics.manaGain) / metrics.manaUsed;
       if (share < 1) miss += 1 - share;
@@ -2048,24 +2155,36 @@ function generateDamageBuild({ playerClass, level, archetype = null, treeSetting
   };
   const feasible = (metrics) =>
     metrics.spOver === 0 &&
-    (minEhp <= 0 || metrics.ehp >= minEhp) &&
+    (ehpTarget <= 0 || metrics.ehp >= ehpTarget) &&
+    sustainOk(metrics) &&
     (cycleCfg.ids.length === 0 || (metrics.cycleOk && metrics.manaNet >= 0)) &&
     (!budget || metrics.cost <= budget);
   // Wartość w wiązce: obrażenia × kary za niespełnione progi (twarde odcięcie dopiero na końcu, żeby wiązka
   // nie zgubiła zestawów, które dopiero z kolejnym slotem wchodzą w próg).
+  // Jak daleko zaszła wiązka (1 = zestaw kompletny). Zestaw z dwoma założonymi slotami nie ma jeszcze prawa mieć
+  // pełnego EHP ani many, więc porównujemy go z proporcjonalną częścią progu i karzemy łagodniej. Bez tego wiązka
+  // po pierwszym slocie zapełnia się samymi przedmiotami obronnymi i gubi linie na obrażenia, które dobrałyby
+  // obronę w kolejnych slotach - stąd brały się skoki w rodzaju "wyższy próg EHP = wyższe obrażenia".
+  let progress = 1;
   const value = (metrics) => {
     let factor = Math.exp(-metrics.spOver / 6);
-    if (phase !== "ehp" && minEhp > 0 && metrics.ehp < minEhp) factor *= Math.pow(Math.max(0.02, metrics.ehp / minEhp), 3);
+    const power = 1 + 2 * progress;
+    if (phase !== "ehp" && ehpTarget > 0) {
+      const target = ehpTarget * progress;
+      if (metrics.ehp < target) factor *= Math.pow(Math.max(0.02, metrics.ehp / target), power);
+    }
+    // ujemne życie da się naprawić jednym przedmiotem pod koniec, więc na początku wiązki kara jest łagodna
+    if (!sustainOk(metrics)) factor *= 1 - 0.7 * progress;
     if (cycleCfg.ids.length > 0 && metrics.manaUsed > 0) {
       const share = (metrics.manaIncome + metrics.manaGain) / metrics.manaUsed;
-      if (share < 1) factor *= Math.pow(Math.max(0.02, share), 3);
+      if (share < progress) factor *= Math.pow(Math.max(0.02, share / progress), power);
     }
     if (budget && metrics.cost > budget) factor *= Math.pow(budget / metrics.cost, 2);
     return objectiveOf(metrics) * factor;
   };
 
   // Krok 1: broń. Dokładne obrażenia celu z pustym zestawem; najlepsze dostają jeszcze próbę powderów.
-  const runPhase = () => {
+  const runPhase = async (label = "Searching", from = 0, to = 1) => {
   const weaponScores = bySlot.weapon.map((item) => ({ item, metrics: evaluate([], item) }));
   weaponScores.sort((a, b) => objectiveOf(b.metrics) - objectiveOf(a.metrics));
   const weapons = [];
@@ -2092,12 +2211,25 @@ function generateDamageBuild({ playerClass, level, archetype = null, treeSetting
   });
   if (weaponList.length === 0) throw new Error(`No ${classConfig.weapon} up to level ${level}`);
 
-  let phaseBest = null;
+  // Z wiązki wychodzą trzy kandydatury, nie jedna: najlepsza "z karami", najmocniejsza w obrażeniach (choćby nie
+  // przechodziła progów) i najlepsza spośród tych, które progi przechodzą. Każda dostaje własne dopieszczanie
+  // w kroku 3, bo zestaw na obrażenia z dobraną potem obroną zwykle bije zestaw obronny od pierwszego slotu.
+  let byValue = null;
+  let byDamage = null;
+  let byFeasible = null;
+  // najlepszy zestaw każdej broni (przechodzący progi, a jak takiego nie ma - z karami): linia z bronią, która
+  // wypadła z trójki globalnie, po dopieszczeniu często okazuje się najmocniejsza
+  const perWeapon = new Map();
   const consider = (candidate) => {
-    if (!phaseBest || (candidate.ok && !phaseBest.ok) || (candidate.ok === phaseBest.ok && objectiveOf(candidate.metrics) > objectiveOf(phaseBest.metrics))) phaseBest = candidate;
+    const own = perWeapon.get(candidate.weapon);
+    if (!own || (candidate.ok && !own.ok) || (candidate.ok === own.ok && (candidate.ok ? objectiveOf(candidate.metrics) > objectiveOf(own.metrics) : value(candidate.metrics) > value(own.metrics)))) perWeapon.set(candidate.weapon, candidate);
+    if (!byValue || value(candidate.metrics) > value(byValue.metrics)) byValue = candidate;
+    if (!byDamage || objectiveOf(candidate.metrics) * Math.exp(-candidate.metrics.spOver / 6) > objectiveOf(byDamage.metrics) * Math.exp(-byDamage.metrics.spOver / 6)) byDamage = candidate;
+    if (candidate.ok && (!byFeasible || objectiveOf(candidate.metrics) > objectiveOf(byFeasible.metrics))) byFeasible = candidate;
   };
 
-  weaponList.forEach((weapon) => {
+  for (const [weaponIndex, weapon] of weaponList.entries()) {
+    await pause(`${label}: ${weapon.name}`, from + ((to - from) * weaponIndex) / weaponList.length);
     const weaponSp = computeSkillPoints([weapon]);
     const weights = goalStatWeights(ctx, [], weapon, weaponSp.totals, goal, cycleCfg);
     // Kandydaci na slot: najlepsi liniowo, najlepsi "obrażenia na punkt umiejętności" oraz - gdy są progi -
@@ -2107,7 +2239,7 @@ function generateDamageBuild({ playerClass, level, archetype = null, treeSetting
       const scored = bySlot[slotId].map((item) => {
         const reqs = SKILLS.reduce((sum, skill) => sum + (item.reqs[skill] || 0), 0);
         const damage = phase === "ehp" ? proxyScore(item, weights.ehp) : proxyScore(item, weights.damage);
-        return { item, damage, perSp: damage / (1 + reqs / 20), ehp: proxyScore(item, weights.ehp), mana: proxyScore(item, weights.mana) };
+        return { item, damage, perSp: damage / (1 + reqs / 20), ehp: proxyScore(item, weights.ehp), mana: proxyScore(item, weights.mana), sustain: sustainProxy(item) };
       });
       const pool = new Set();
       const take = (key, count) => [...scored].sort((a, b) => b[key] - a[key]).slice(0, count).forEach((entry) => pool.add(entry.item));
@@ -2115,10 +2247,12 @@ function generateDamageBuild({ playerClass, level, archetype = null, treeSetting
       take("perSp", DAMAGE_BEAM.cheapPerSlot);
       if (minEhp > 0) take("ehp", DAMAGE_BEAM.extraPerSlot);
       if (cycleCfg.ids.length > 0) take("mana", DAMAGE_BEAM.extraPerSlot);
+      if (requireSustain) take("sustain", DAMAGE_BEAM.extraPerSlot);
       candidates[slotId] = [...pool].map((item) => ({ item, damage: phase === "ehp" ? proxyScore(item, weights.ehp) : proxyScore(item, weights.damage), ehp: proxyScore(item, weights.ehp), mana: proxyScore(item, weights.mana) }));
     });
     let beam = [{ items: [], picks: {}, metrics: evaluate([], weapon) }];
-    gearSlots.forEach((slotId) => {
+    gearSlots.forEach((slotId, slotIndex) => {
+      progress = (slotIndex + 1) / gearSlots.length;
       const next = [];
       beam.forEach((state) => {
         // najpierw szybka ocena (liniowe obrażenia + dokładne Skill Pointy), potem dokładnie tylko najlepsi
@@ -2151,16 +2285,49 @@ function generateDamageBuild({ playerClass, level, archetype = null, treeSetting
         });
       });
       next.sort((a, b) => value(b.metrics) - value(a.metrics));
-      const top = next.slice(0, DAMAGE_BEAM.beam);
-      const passing = next.filter((state) => feasible(state.metrics) && !top.includes(state)).slice(0, Math.ceil(DAMAGE_BEAM.beam / 2));
-      beam = [...top, ...passing];
+      const chosen = new Set(next.slice(0, DAMAGE_BEAM.beam));
+      // Osobne miejsca dla skrajności: najmocniejszych obrażeń (bez kary za progi) i najwyższego EHP. Dzięki temu
+      // w wiązce zawsze zostaje i linia "szkło", i linia "czołg", a o wyniku decyduje dopiero krok 3.
+      const reserve = (key, count) => {
+        if (count <= 0) return;
+        [...next]
+          .sort((a, b) => key(b.metrics) - key(a.metrics))
+          .filter((state) => !chosen.has(state))
+          .slice(0, count)
+          .forEach((state) => chosen.add(state));
+      };
+      const spFactor = (metrics) => Math.exp(-metrics.spOver / 6);
+      reserve((metrics) => metrics.damage * spFactor(metrics), DAMAGE_BEAM.pureDamage);
+      if (minEhp > 0) reserve((metrics) => metrics.ehp * spFactor(metrics), DAMAGE_BEAM.pureEhp);
+      if (cycleCfg.ids.length > 0) reserve((metrics) => metrics.manaNet, DAMAGE_BEAM.pureMana);
+      next
+        .filter((state) => feasible(state.metrics) && !chosen.has(state))
+        .slice(0, Math.ceil(DAMAGE_BEAM.beam / 2))
+        .forEach((state) => chosen.add(state));
+      beam = [...chosen];
     });
     beam.forEach((state) => consider({ picks: state.picks, items: state.items, weapon, metrics: state.metrics, ok: feasible(state.metrics) }));
-  });
-  return phaseBest;
+  }
+  progress = 1;
+  return [byFeasible, byValue, byDamage, ...perWeapon.values()].filter(Boolean);
   };
 
-  let best = runPhase();
+  let finalists = await runPhase("Searching", 0, minEhp > 0 && objective === "damage" ? 0.33 : 0.6);
+  // Krok 2b: druga wiązka z zapasem EHP (+20%). Zestaw, który przechodzi wyższy próg, przechodzi też niższy, a wiązka
+  // prowadzona od początku "bardziej obronnie" trafia w inne kombinacje - bez tego zdarzało się, że wyższy próg dawał
+  // większe obrażenia niż niższy (np. 35% EHP > 30%), czyli przy niższym progu gubiliśmy lepszy zestaw.
+  if (objective === "damage" && minEhp > 0) {
+    for (const [index, margin] of DAMAGE_BEAM.ladder.entries()) {
+      ehpTarget = minEhp * margin;
+      const span = 0.29 / DAMAGE_BEAM.ladder.length;
+      const stricter = await runPhase(`Searching with +${Math.round((margin - 1) * 100)}% EHP`, 0.33 + span * index, 0.33 + span * (index + 1));
+      finalists = [...finalists, ...stricter];
+    }
+    ehpTarget = minEhp;
+  }
+  finalists.forEach((candidate) => {
+    candidate.ok = feasible(candidate.metrics);
+  });
   // gotowe zestawy z poradnika jako punkt odniesienia (i punkt startu dla kroku 3)
   guideSets.forEach((set) => {
     let seedWeapon = set.weapon;
@@ -2173,30 +2340,83 @@ function generateDamageBuild({ playerClass, level, archetype = null, treeSetting
         seedWeapon = powdered;
       }
     });
-    const candidate = { picks: { ...set.picks }, items: Object.values(set.picks), weapon: seedWeapon, metrics: seedMetrics, ok: feasible(seedMetrics), guide: set.name };
-    if (!best || (candidate.ok && !best.ok) || (candidate.ok === best.ok && objectiveOf(candidate.metrics) > objectiveOf(best.metrics))) best = candidate;
+    finalists.push({ picks: { ...set.picks }, items: Object.values(set.picks), weapon: seedWeapon, metrics: seedMetrics, ok: feasible(seedMetrics), guide: set.name });
   });
-  if (objective === "damage" && best && !best.ok) {
+  // Zestawy z poprzednich wyników w tej sesji (te same ustawienia, inny próg EHP): zestaw, który przeszedł wyższy
+  // próg, przechodzi i niższy - dzięki temu przesuwanie suwaka EHP nie "gubi" lepszych buildów znalezionych wcześniej.
+  (seeds || []).forEach((seed) => {
+    if (!seed || !seed.weapon) return;
+    const base = bySlot.weapon.find((item) => item.name === seed.weapon.name);
+    if (!base) return;
+    const picks = {};
+    gearSlots.forEach((slotId) => {
+      const wanted = seed.picks && seed.picks[slotId];
+      const item = wanted ? bySlot[slotId].find((entry) => entry.name === wanted.name) : null;
+      if (item) picks[slotId] = item;
+    });
+    let seedWeapon = base;
+    let seedMetrics = null;
+    powderElements.forEach((element) => {
+      const powdered = element ? powderedWeapon(base, element) : base;
+      const metrics = evaluate(Object.values(picks), powdered);
+      if (!seedMetrics || objectiveOf(metrics) > objectiveOf(seedMetrics)) {
+        seedMetrics = metrics;
+        seedWeapon = powdered;
+      }
+    });
+    finalists.push({ picks, items: Object.values(picks), weapon: seedWeapon, metrics: seedMetrics, ok: feasible(seedMetrics) });
+  });
+  if (objective === "damage" && !finalists.some((candidate) => candidate.ok)) {
     // nic nie przeszło progów: drugi przebieg maksymalizuje EHP (z tym samym filtrem many), żeby mieć z czego
     // podnosić obrażenia w kroku 3
     phase = "ehp";
-    const repaired = runPhase();
+    const repaired = await runPhase("Looking for sets that pass", 0.62, 0.7);
     phase = "damage";
-    if (repaired && (repaired.ok || shortfall(repaired.metrics) < shortfall(best.metrics))) best = repaired;
+    finalists = [...repaired, ...finalists];
   }
-
-  // Krok 3: dopieszczanie - podmiany pojedynczych slotów, dopóki rosną obrażenia i filtry są spełnione.
-  if (best) {
-    const weapon = best.weapon;
-    const weights = goalStatWeights(ctx, best.items, weapon, computeSkillPoints([...best.items, weapon]).totals, goal, cycleCfg);
-    // Ostatni przebieg idzie po CAŁEJ bazie dla każdego slotu (nie po skrócie z wag), więc wynik jest najlepszym
-    // zestawem, jakiego nie da się poprawić podmianą jednego przedmiotu.
+  // Lepszy kandydat: zestaw przechodzący progi zawsze bije nieprzechodzący, a dwa przechodzące porównujemy
+  // obrażeniami. Dwa nieprzechodzące porównujemy zależnie od trybu:
+  //   "value"  - obrażenia × kara za brakujące EHP/manę, czyli najlepszy kompromis (tak szukamy domyślnie);
+  //   "repair" - same braki, czyli byle dopchnąć zestaw do progu (dopiero gdy "value" nie dowiozło).
+  // Sam "repair" psuł wyniki przy wysokich progach EHP: prowadził prosto do najbardziej obronnego zestawu,
+  // kasując obrażenia (stąd urwiska w rodzaju "40% EHP = połowa DPS-u z 39%").
+  const better = (candidate, current, mode = "value") => {
+    if (!current) return true;
+    if (candidate.ok !== current.ok) return candidate.ok;
+    if (!candidate.ok) {
+      if (mode === "repair") return shortfall(candidate.metrics) < shortfall(current.metrics) - 1e-9;
+      return value(candidate.metrics) > value(current.metrics) * (1 + 1e-9);
+    }
+    return objectiveOf(candidate.metrics) > objectiveOf(current.metrics) + 1e-6;
+  };
+  // Skrócona pula do dopieszczania: najlepsi kandydaci na slot według wag tego zestawu (plus jego obecne wybory).
+  // Wersja tania - używana, gdy szlifujemy kilka kandydatur naraz; zwycięzca dostaje potem przebieg po całej bazie.
+  const shortPools = (candidate) => {
+    // Wagi zależą od tego, co zestaw już ma na sobie, więc liczymy je osobno dla każdej kandydatury.
+    const weights = goalStatWeights(ctx, candidate.items, candidate.weapon, computeSkillPoints([...candidate.items, candidate.weapon]).totals, goal, cycleCfg);
     const pools = {};
     gearSlots.forEach((slotId) => {
-      pools[slotId] = bySlot[slotId];
+      const pool = new Set();
+      const take = (kind, vector, count) => topBy(bySlot[slotId], (item) => proxyScore(item, vector), count).forEach((item) => pool.add(item));
+      // zestaw, który nie mieści się w progach, potrzebuje szerszego wyboru przedmiotów obronnych i na manę
+      const repairing = candidate.ok ? 1 : 2;
+      take("damage", weights.damage, DAMAGE_BEAM.polishPool);
+      if (minEhp > 0) take("ehp", weights.ehp, Math.ceil((DAMAGE_BEAM.polishPool * repairing) / 2));
+      if (cycleCfg.ids.length > 0) take("mana", weights.mana, Math.ceil((DAMAGE_BEAM.polishPool * repairing) / 2));
+      if (requireSustain) topBy(bySlot[slotId], sustainProxy, Math.ceil(DAMAGE_BEAM.polishPool / 2)).forEach((item) => pool.add(item));
+      if (candidate.picks[slotId]) pool.add(candidate.picks[slotId]);
+      pools[slotId] = [...pool];
     });
-    void weights;
-    for (let round = 0; round < 6; round += 1) {
+    return pools;
+  };
+  // Krok 3: dopieszczanie - podmiany pojedynczych slotów, dopóki rosną obrażenia i filtry są spełnione.
+  const climb = (start, slotPools, rounds, mode) => {
+    let best = start;
+    const weapon = best.weapon;
+    // Ostatni przebieg idzie po CAŁEJ bazie dla każdego slotu (nie po skrócie z wag), więc wynik jest najlepszym
+    // zestawem, jakiego nie da się poprawić podmianą jednego przedmiotu.
+    const pools = slotPools;
+    for (let round = 0; round < rounds; round += 1) {
       let improved = false;
       gearSlots.forEach((slotId) => {
         [null, ...pools[slotId]].forEach((item) => {
@@ -2207,30 +2427,173 @@ function generateDamageBuild({ playerClass, level, archetype = null, treeSetting
           const items2 = Object.values(picks);
           const metrics = evaluate(items2, weapon);
           const ok = feasible(metrics);
-          // dopóki build nie przechodzi progów, liczy się zmniejszanie braków; potem - same obrażenia
-          const better = ok !== best.ok ? ok : best.ok ? objectiveOf(metrics) > objectiveOf(best.metrics) + 1e-6 : shortfall(metrics) < shortfall(best.metrics) - 1e-9;
-          if (better) {
-            best = { picks, items: items2, weapon, metrics, ok };
+          if (better({ metrics, ok }, best, mode)) {
+            best = { picks, items: items2, weapon, metrics, ok, guide: start.guide };
             improved = true;
           }
         });
       });
       if (!improved) break;
     }
+    return best;
+  };
+
+  // Najpierw kompromis (obrażenia z karą za braki). Jeśli to nie dowiozło zestawu do progów, dopychamy go
+  // "repair", a gdy już przejdzie - wracamy do podnoszenia obrażeń.
+  const polish = (start, slotPools, rounds) => {
+    const best = climb(start, slotPools, rounds, "value");
+    if (best.ok) return best;
+    const repaired = climb(best, slotPools, rounds, "repair");
+    return repaired.ok ? climb(repaired, slotPools, rounds, "value") : repaired;
+  };
+
+  // Podmiana broni pod gotową zbroję: broń wybieraliśmy na pustym zestawie, a np. przy wyższym progu EHP ta sama
+  // zbroja z inną bronią bywa i mocniejsza, i wciąż w progach. Każda broń z czołówki z najlepszym dla niej żywiołem.
+  const weaponPool = [...bySlot.weapon]
+    .map((item) => ({ item, damage: evaluate([], item).damage }))
+    .sort((a, b) => b.damage - a.damage)
+    .slice(0, DAMAGE_BEAM.weaponSwap)
+    .map((entry) => entry.item);
+  [...(guideItemsBySlot.weapon || [])].forEach((item) => {
+    if (!weaponPool.includes(item)) weaponPool.push(item);
+  });
+  const weaponClimb = (start) => {
+    let best = start;
+    weaponPool.forEach((base) => {
+      powderElements.forEach((element) => {
+        const weapon = element ? powderedWeapon(base, element) : base;
+        if (weapon === best.weapon) return;
+        const metrics = evaluate(best.items, weapon);
+        const ok = feasible(metrics);
+        if (better({ metrics, ok }, best)) best = { ...best, weapon, metrics, ok };
+      });
+    });
+    return best;
+  };
+
+  const pairClimb = (start) => {
+    const weights = goalStatWeights(ctx, start.items, start.weapon, computeSkillPoints([...start.items, start.weapon]).totals, goal, cycleCfg);
+    const pools = {};
+    gearSlots.forEach((slotId) => {
+      const pool = new Set();
+      const take = (score, count) => topBy(bySlot[slotId], score, count).forEach((item) => pool.add(item));
+      take((item) => proxyScore(item, weights.damage), DAMAGE_BEAM.pairPool);
+      if (minEhp > 0) take((item) => proxyScore(item, weights.ehp), Math.ceil(DAMAGE_BEAM.pairPool / 2));
+      if (cycleCfg.ids.length > 0) take((item) => proxyScore(item, weights.mana), Math.ceil(DAMAGE_BEAM.pairPool / 2));
+      if (requireSustain) take(sustainProxy, Math.ceil(DAMAGE_BEAM.pairPool / 2));
+      pools[slotId] = [...pool];
+    });
+    let best = start;
+    for (let i = 0; i < gearSlots.length; i += 1) {
+      for (let j = i + 1; j < gearSlots.length; j += 1) {
+        const a = gearSlots[i];
+        const b = gearSlots[j];
+        [null, ...pools[a]].forEach((itemA) => {
+          if (itemA === best.picks[a]) return;
+          [null, ...pools[b]].forEach((itemB) => {
+            if (itemB === best.picks[b]) return;
+            const picks = { ...best.picks };
+            if (itemA) picks[a] = itemA;
+            else delete picks[a];
+            if (itemB) picks[b] = itemB;
+            else delete picks[b];
+            const wrapped = Object.fromEntries(Object.entries(picks).map(([id, pick]) => [id, { item: pick }]));
+            if ((itemA && ringsClash(wrapped, a, itemA)) || (itemB && ringsClash(wrapped, b, itemB))) return;
+            const items2 = Object.values(picks);
+            const metrics = evaluate(items2, best.weapon);
+            const ok = feasible(metrics);
+            if (better({ metrics, ok }, best)) best = { picks, items: items2, weapon: best.weapon, metrics, ok, guide: start.guide };
+          });
+        });
+      }
+    }
+    return best;
+  };
+
+  let best = null;
+  // Dopieszczamy każdą z kandydatur (najwyżej tyle, ile mówi DAMAGE_BEAM.finalists plus zestawy z poradnika)
+  // i dopiero z nich wybieramy wynik.
+  // Dwa etapy: każda kandydatura dostaje krótkie dopieszczanie (2 rundy), a trzy najlepsze po nim - pełne.
+  const seen = new Set();
+  const unique = finalists.filter((candidate) => {
+    const key = [candidate.weapon.name, ...SEARCH_ORDER.map((id) => (candidate.picks[id] ? candidate.picks[id].name : ""))].join("|");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  // na krótkie dopieszczanie idzie najwyżej DAMAGE_BEAM.quick kandydatur (przechodzące progi pierwsze, potem wartość)
+  const shortlist = [...unique].sort((a, b) => (a.ok !== b.ok ? (a.ok ? -1 : 1) : value(b.metrics) - value(a.metrics))).slice(0, DAMAGE_BEAM.quick);
+  const quick = [];
+  for (const [index, candidate] of shortlist.entries()) {
+    await pause("Polishing candidates", 0.7 + (0.15 * index) / shortlist.length);
+    quick.push(polish(candidate, shortPools(candidate), 2));
+  }
+  const ranked = [...quick].sort((a, b) => (better(a, b) ? -1 : better(b, a) ? 1 : 0));
+  const runnersUp = [...quick];
+  for (const candidate of ranked.slice(0, DAMAGE_BEAM.finalists)) {
+    await pause("Polishing the best candidates", 0.86);
+    const polished = polish(candidate, shortPools(candidate), 4);
+    runnersUp.push(polished);
+    if (better(polished, best)) best = polished;
+  }
+  // Zwycięzca dostaje jeszcze przebieg po CAŁEJ bazie dla każdego slotu, więc wynik jest zestawem, którego nie da
+  // się poprawić podmianą jednego przedmiotu.
+  if (best) {
+    const fullPools = {};
+    gearSlots.forEach((slotId) => {
+      fullPools[slotId] = bySlot[slotId];
+    });
+    await pause("Checking every item for each slot", 0.9);
+    best = polish(best, fullPools, 6);
+    // Krok 4: podmiany PAR slotów. Pojedyncza podmiana nie znajdzie ruchów w rodzaju "mocniejszy hełm, ale wtedy
+    // trzeba oddać Skill Pointy / EHP innym przedmiotem" - para robi obie rzeczy naraz. Pula na slot: najlepsi pod
+    // obrażenia, EHP, manę i życie według wag tego zestawu.
+    for (let round = 0; round < 2; round += 1) {
+      await pause("Trying weapon and pair swaps", 0.94 + round * 0.03);
+      const swapped = weaponClimb(best);
+      const paired = pairClimb(swapped);
+      if (paired === best) break;
+      best = polish(paired, fullPools, 3);
+    }
   }
 
+  // Szukanie liczy Skill Pointy w wersji przybliżonej; wynik sprawdzamy dokładnie. Gdy dokładne rozłożenie
+  // punktów zepchnie zestaw tuż pod próg (np. EHP 1,069 przy progu 1,071), bierzemy najlepszego z pozostałych
+  // dopieszczonych kandydatów, który przechodzi dokładnie.
+  const exactPass = (candidate) => {
+    const all = [...Object.values(candidate.picks), candidate.weapon].filter(Boolean);
+    const sp = computeSkillPoints(all, true);
+    const metrics = evaluateGoal(ctx, all, candidate.weapon, sp.totals, goal, cycleCfg);
+    return (
+      sp.total <= ctx.available &&
+      sp.capOverflow === 0 &&
+      (minEhp <= 0 || metrics.ehp >= minEhp) &&
+      (cycleCfg.ids.length === 0 || (metrics.cycleOk && metrics.manaNet >= 0)) &&
+      (!requireSustain || metrics.sustain > 0)
+    );
+  };
+  if (best && best.ok && !exactPass(best)) {
+    const fallback = runnersUp.filter((candidate) => candidate.ok && candidate !== best).sort((a, b) => objectiveOf(b.metrics) - objectiveOf(a.metrics)).find(exactPass);
+    if (fallback) best = fallback;
+  }
   const picks = { ...best.picks, weapon: best.weapon };
   const allItems = Object.values(picks).filter(Boolean);
   const exactSp = computeSkillPoints(allItems, true);
   const finalMetrics = evaluateGoal(ctx, allItems, best.weapon, exactSp.totals, goal, cycleCfg);
   const spValid = exactSp.total <= ctx.available && exactSp.capOverflow === 0;
-  const passed = spValid && (minEhp <= 0 || finalMetrics.ehp >= minEhp) && (cycleCfg.ids.length === 0 || (finalMetrics.cycleOk && finalMetrics.manaNet >= 0));
+  const passed =
+    spValid &&
+    (minEhp <= 0 || finalMetrics.ehp >= minEhp) &&
+    (cycleCfg.ids.length === 0 || (finalMetrics.cycleOk && finalMetrics.manaNet >= 0)) &&
+    (!requireSustain || finalMetrics.sustain > 0);
   const warnings = [];
   if (!spValid) warnings.push(`This set needs ${exactSp.total} skill points, but level ${level} gives ${ctx.available}.`);
   if (minEhp > 0 && finalMetrics.ehp < minEhp)
     warnings.push(
       `Nothing with these settings reaches ${formatNumber(Math.round(minEhp))} effective HP; the closest build (${formatNumber(Math.round(finalMetrics.ehp))}) is shown. Lower the effective HP slider or relax the mana cycle.`
     );
+  if (requireSustain && finalMetrics.sustain <= 0)
+    warnings.push(`Nothing with these settings keeps life sustain above zero; the closest build loses ${Math.abs(finalMetrics.sustain).toFixed(1)} health per second. Turn off the life sustain filter or lower the other thresholds.`);
   if (cycleCfg.ids.length > 0 && !finalMetrics.cycleOk) warnings.push("Some spells in the cycle aren't unlocked in your ability tree, so their mana cost is unknown.");
   else if (cycleCfg.ids.length > 0 && finalMetrics.manaNet < 0)
     warnings.push(
@@ -2262,6 +2625,12 @@ function generateDamageBuild({ playerClass, level, archetype = null, treeSetting
       manaUsed: finalMetrics.manaUsed,
       manaGain: finalMetrics.manaGain,
       cycleOk: finalMetrics.cycleOk,
+      hpr: finalMetrics.hpr,
+      lifeSteal: finalMetrics.lifeSteal,
+      sustain: finalMetrics.sustain,
+      requireSustain,
+      excludeEvents,
+      tradeableOnly,
       minEhp,
       cycle: cycleCfg,
     },
@@ -2929,7 +3298,29 @@ function iconBaseColor(item) {
   return element ? ELEMENT_STYLE[element].color : "#C8C8C8";
 }
 
+// Ikonka przedmiotu: sprite 16×16 z arkusza Wynnbuildera; zbroja i biżuteria (szare w arkuszu) dostają kolor
+// materiału/żywiołu przez filtr mnożący, broń zostaje w oryginalnych kolorach. Typy spoza arkusza - stare ikonki.
 function PixelIcon({ item, size = 48 }) {
+  const index = ITEM_SHEET_ORDER.indexOf(item.type);
+  if (index < 0) return <GridPixelIcon item={item} size={size} />;
+  const tint = item.category === "weapon" ? null : iconBaseColor(item);
+  const id = tint ? `wbr-tint-${tint.slice(1)}` : null;
+  const channel = (offset) => (parseInt(tint.slice(offset, offset + 2), 16) / 255).toFixed(3);
+  return (
+    <svg viewBox="0 0 16 16" width={size} height={size} aria-hidden="true" style={{ imageRendering: "pixelated" }}>
+      {tint && (
+        <defs>
+          <filter id={id} colorInterpolationFilters="sRGB">
+            <feColorMatrix type="matrix" values={`${channel(1)} 0 0 0 0 0 ${channel(3)} 0 0 0 0 0 ${channel(5)} 0 0 0 0 0 1 0`} />
+          </filter>
+        </defs>
+      )}
+      <image href={ITEM_SHEET} x={-16 * index} y={0} width={192} height={16} preserveAspectRatio="none" filter={id ? `url(#${id})` : undefined} style={{ imageRendering: "pixelated" }} />
+    </svg>
+  );
+}
+
+function GridPixelIcon({ item, size = 48 }) {
   const grid = PIXEL_ICONS[item.type] || PIXEL_ICONS.ring;
   const base = iconBaseColor(item);
   const palette = {
@@ -3585,11 +3976,11 @@ function ItemCard({ slot, build, actions, powder = null, open = true, onToggle =
           {build && build.mode === "damage" ? "dmg" : "score"} {buildScoreText(build, slot.score)}
         </button>
       </div>
-      <div className="flex flex-1 flex-col gap-3 p-4">
+      <div className="flex flex-1 flex-col gap-2.5 p-3">
         <div className="flex items-start gap-3">
-          <IconBox item={item} />
-          <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-            <h3 className="text-xl leading-tight" style={ts({ color })}>
+          <IconBox item={item} size={40} />
+          <div className="flex min-w-0 flex-1 flex-col gap-1">
+            <h3 className="text-lg leading-tight" style={ts({ color })}>
               <span style={ts({ overflowWrap: "anywhere" })}>{item.name}</span>
               {overall !== null && (
                 <span className="ml-1 whitespace-nowrap text-base" style={ts({ color: rollColor(overall) })} title={item.rolls ? "Average of your identification rolls" : "All identifications at their 50% roll"}>
@@ -3614,6 +4005,11 @@ function ItemCard({ slot, build, actions, powder = null, open = true, onToggle =
                   {guideCount ? (
                     <span title="Used in guide builds for this archetype">
                       <TooltipBadge color="#FFAA00">Guide ×{guideCount}</TooltipBadge>
+                    </span>
+                  ) : null}
+                  {eventOf(item) ? (
+                    <span title={`Limited-time: only from the ${eventOf(item)}`}>
+                      <TooltipBadge color="#FF55FF">Event</TooltipBadge>
                     </span>
                   ) : null}
                 </div>
@@ -4421,6 +4817,7 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
                         : ""}
                       {item.elements && item.elements.length > 0 ? ` · ${item.elements.map((element) => ELEMENT_STYLE[element].symbol).join(" ")}` : ""}
                       {entry.slotId && !slot ? ` · → ${SLOTS.find((s) => s.id === entry.slotId).label}` : ""}
+                      {eventOf(item) ? <span style={ts({ color: "#FF55FF" })} title={`Only from the ${eventOf(item)}`}> · event</span> : null}
                       {hasPriceData() ? ` · ${priceLabel(item)}` : ""}
                       {hasLiveData() && !isUntradable(item) ? (
                         <span style={ts({ color: marketStatus(item).state === "listed" ? "#55FF55" : undefined })} title={marketTitle()}>
@@ -6494,12 +6891,38 @@ function OnlyListedCheckbox({ options, onChange }) {
 
 // Lista celów optymalizacji z drzewka: main attack (DPS) i każdy czar zadający obrażenia (trafienie).
 // Liczona na najmocniejszej broni klasy bez ekwipunku - służy tylko do nazw, kosztów many i domyślnego wyboru.
+// Broń "reprezentatywna" dla podglądu czarów i kolejności celów: spośród najmocniejszych (DPS) ta, która daje
+// największy pojedynczy czar. Sam najwyższy DPS bywał mylący - np. Gert Relik ma -300% Spell Damage i wszystkie
+// czary liczyły się na 0.
+function representativeWeapon(playerClass, level, treeSettings, items = ITEM_DB) {
+  const classConfig = CLASSES[playerClass];
+  if (!classConfig) return null;
+  const top = items
+    .filter((item) => item.category === "weapon" && item.type === classConfig.weapon && item.level <= level)
+    .sort((a, b) => (b.dps || 0) - (a.dps || 0))
+    .slice(0, 12);
+  if (top.length === 0) return null;
+  const ctx = damageGoalContext(playerClass, level, treeSettings);
+  let best = null;
+  top.forEach((weapon) => {
+    const sp = computeSkillPoints([weapon]);
+    const { stats, scaled } = goalStats(ctx, [weapon], weapon, sp.totals);
+    const hp = Math.max(5, statValue(stats, "hp") + statValue(stats, "hpBonus"));
+    let score = 0;
+    collectTreeSpells(scaled.edited, scaled.translate).forEach((spell, id) => {
+      if (id === 0) return;
+      const evaluated = evaluateSpell(spell, stats, weapon, hp);
+      if (evaluated.main && evaluated.main.type === "damage") score = Math.max(score, evaluated.main.amount);
+    });
+    if (!best || score > best.score) best = { weapon, score };
+  });
+  return best.score > 0 ? best.weapon : top[0];
+}
+
 function damageGoalOptions(playerClass, level, treeSettings, items = ITEM_DB) {
   const classConfig = CLASSES[playerClass];
   if (!classConfig) return [];
-  const weapon = items
-    .filter((item) => item.category === "weapon" && item.type === classConfig.weapon && item.level <= level)
-    .sort((a, b) => (b.dps || 0) - (a.dps || 0))[0];
+  const weapon = representativeWeapon(playerClass, level, treeSettings, items);
   if (!weapon) return [];
   const ctx = damageGoalContext(playerClass, level, treeSettings);
   const sp = computeSkillPoints([weapon]);
@@ -6532,7 +6955,15 @@ function reachableEhp(playerClass, level) {
   return table[Math.min(table.length - 1, Math.max(0, Math.round(level) - 1))] || 1000;
 }
 
-const DEFAULT_DAMAGE_FORM = { preset: "", goal: null, minEhp: null, cycle: "", cps: 3, steal: true, gain: true };
+const DEFAULT_DAMAGE_FORM = { preset: "", goal: null, minEhp: null, cycle: "", cps: 3, steal: true, gain: true, sustain: false, noEvents: true, tradeable: false };
+
+// Suwak EHP chodzi co 5% tego, co da się osiągnąć na danym poziomie; domyślnie 25%.
+function ehpStep(ehpMax) {
+  return Math.max(1, Math.round(ehpMax / 20));
+}
+function defaultMinEhp(ehpMax) {
+  return ehpStep(ehpMax) * 5;
+}
 
 // Formularz zakładki "New": klasa → ranga → poziom → drzewko → cel → próg EHP → cykl czarów (twardy filtr many).
 function DamageForm({
@@ -6556,6 +6987,7 @@ function DamageForm({
   ehpMax,
   onGenerate,
   running,
+  progress,
   result,
   outdated,
 }) {
@@ -6563,114 +6995,133 @@ function DamageForm({
   const set = (patch) => onForm({ ...form, ...patch });
   const goal = goals.find((entry) => String(entry.id) === String(form.goal)) || goals[0] || null;
   const cycleIds = [...String(form.cycle || "")].filter((digit) => "1234".includes(digit)).map(Number);
-  const minEhp = form.minEhp === null || form.minEhp === undefined ? Math.round(ehpMax * 0.25) : form.minEhp;
+  const minEhp = form.minEhp === null || form.minEhp === undefined ? defaultMinEhp(ehpMax) : Math.min(form.minEhp, ehpMax);
   const ready = Boolean(playerClass && level && treeIds.length > 0 && goal);
-  const step = Math.max(50, Math.round(ehpMax / 200 / 50) * 50);
+  // Suwak chodzi co 5% tego, co da się osiągnąć na tym poziomie. Drobniejsze kroki tylko udawały precyzję:
+  // różnica między 15% a 16% progu to inny zestaw, a nie "o włos mocniejszy" ten sam.
+  const step = ehpStep(ehpMax);
+  const label = "mc-title text-xs uppercase";
+  const hint = "text-xs text-zinc-500";
+  const pct = Math.round((minEhp / Math.max(1, ehpMax)) * 100);
   return (
-    <>
-      <div className="flex flex-col gap-2">
-        <label htmlFor="new-class" className="mc-title text-xs uppercase">
-          Class
-        </label>
-        <select id="new-class" value={playerClass} onChange={onClassChange} className="mc-input w-full">
-          <option value="">Choose a class</option>
-          {Object.entries(CLASSES).map(([name, config]) => (
-            <option key={name} value={name}>
-              {name} ({capitalize(config.weapon)})
-            </option>
-          ))}
-        </select>
-      </div>
-
-      {playerClass && (
-        <div className="wbr-fade flex flex-col gap-2">
-          <label htmlFor="new-rank" className="mc-title text-xs uppercase">
-            Rank
+    <div className="flex flex-col gap-3.5">
+      <div className="flex items-end gap-2.5">
+        {playerClass && CLASS_PORTRAITS[playerClass] && <img src={CLASS_PORTRAITS[playerClass]} alt="" width={30} height={42} className="wbr-fade flex-shrink-0" />}
+        <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+          <label htmlFor="new-class" className={label}>
+            Class
           </label>
-          <select id="new-rank" value={rankConfirmed ? rank : ""} onChange={onRank} className="mc-input w-full">
-            <option value="">Choose your rank</option>
-            {RANKS.map((entry) => (
-              <option key={entry.id} value={entry.id}>
-                {entry.label}
-                {entry.loan > 0 ? ` (+${entry.loan} AP early)` : ""}
+          <select id="new-class" value={playerClass} onChange={onClassChange} className="mc-input w-full">
+            <option value="">Choose a class</option>
+            {Object.entries(CLASSES).map(([name, config]) => (
+              <option key={name} value={name}>
+                {name} ({capitalize(config.weapon)})
               </option>
             ))}
           </select>
         </div>
-      )}
+      </div>
 
-      {playerClass && rankConfirmed && (
-        <div className="wbr-fade flex flex-col gap-2">
-          <label htmlFor="new-level" className="mc-title text-xs uppercase">
-            Level
-          </label>
-          <input id="new-level" value={levelInput} onChange={onLevelInput} type="number" min={1} max={120} placeholder="1-120" className="mc-input w-full tabular-nums" />
-          <p className="text-xs text-zinc-500">
-            {level ? `${availableSkillPoints(level)} skill points · ${apCap} ability points` : "Type your combat level."}
-          </p>
+      {playerClass && (
+        <div className="wbr-fade grid grid-cols-[minmax(0,1fr)_5.5rem] gap-2">
+          <div className="flex min-w-0 flex-col gap-1.5">
+            <label htmlFor="new-rank" className={label}>
+              Rank
+            </label>
+            <select id="new-rank" value={rankConfirmed ? rank : ""} onChange={onRank} className="mc-input w-full" title="Higher ranks unlock ability points earlier">
+              <option value="">Choose</option>
+              {RANKS.map((entry) => (
+                <option key={entry.id} value={entry.id}>
+                  {entry.label}
+                  {entry.loan > 0 ? ` (+${entry.loan} AP)` : ""}
+                </option>
+              ))}
+            </select>
+          </div>
+          {rankConfirmed && (
+            <div className="wbr-fade flex min-w-0 flex-col gap-1.5">
+              <label htmlFor="new-level" className={label}>
+                Level
+              </label>
+              <input id="new-level" value={levelInput} onChange={onLevelInput} type="number" min={1} max={120} placeholder="1-120" className="mc-input w-full tabular-nums" />
+            </div>
+          )}
         </div>
+      )}
+      {playerClass && rankConfirmed && level && (
+        <p className={`${hint} -mt-2`}>
+          {availableSkillPoints(level)} skill points · {apCap} ability points
+        </p>
       )}
 
       {playerClass && level && (
-        <fieldset className="wbr-fade flex flex-col gap-2">
-          <legend className="mb-2 mc-title text-xs uppercase">Ability tree</legend>
-          <div className="flex flex-wrap gap-2">
+        <fieldset className="wbr-fade flex flex-col gap-1.5">
+          <legend className={`${label} mb-1.5`}>Ability tree</legend>
+          <div className="flex flex-wrap gap-1.5">
             {classConfig.archetypes.map((arch) => (
               <button key={arch} type="button" onClick={() => onPreset(arch)} className={`mc-btn mc-btn-sm ${form.preset === arch ? "mc-btn-on" : ""}`} title={`Load the suggested ${arch} tree for level ${level}`}>
                 {arch}
               </button>
             ))}
           </div>
-          <p className="text-xs text-zinc-500">
+          <p className={hint}>
             {treeIds.length > 0 ? (
               <>
-                {treeIds.length} abilities · {treePoints} / {apCap} AP{form.preset ? ` · ${form.preset} preset` : " · your own tree"}{" "}
+                {treeIds.length} abilities · {treePoints}/{apCap} AP{form.preset ? "" : " · your own tree"}{" "}
                 <button type="button" className="mc-link" onClick={onEditTree}>
                   Edit
                 </button>
               </>
             ) : (
-              "Pick a preset (or build your own tree in the Ability tree tab). Spells and their costs come from it."
+              "Pick a preset; spells and their costs come from the tree."
             )}
           </p>
         </fieldset>
       )}
 
       {treeIds.length > 0 && goals.length > 0 && (
-        <div className="wbr-fade flex flex-col gap-2">
-          <label htmlFor="new-goal" className="mc-title text-xs uppercase">
+        <div className="wbr-fade flex flex-col gap-1.5">
+          <label htmlFor="new-goal" className={label}>
             Maximise
           </label>
           <select id="new-goal" value={goal ? String(goal.id) : ""} onChange={(event) => set({ goal: event.target.value === DAMAGE_GOAL_MAIN ? DAMAGE_GOAL_MAIN : Number(event.target.value) })} className="mc-input w-full">
             {goals.map((entry) => (
               <option key={entry.id} value={String(entry.id)}>
                 {entry.name}
-                {entry.kind === "melee" ? " (main attack DPS)" : ""}
+                {entry.kind === "melee" ? " (main attack DPS)" : entry.cost !== null && entry.cost !== undefined ? ` · ${entry.cost.toFixed(0)} mana` : ""}
               </option>
             ))}
           </select>
-          <p className="text-xs text-zinc-500" title="Every build is compared by this number, computed with your tree, powders and skill points.">
-            {goal ? (goal.kind === "melee" ? "Damage per second of the main attack." : `One hit of ${goal.name}${goal.cost !== null ? ` (${goal.cost.toFixed(1)} mana)` : ""}.`) : ""}
-          </p>
-        </div>
-      )}
-
-      {treeIds.length > 0 && (
-        <div className="wbr-fade flex flex-col gap-2">
-          <label htmlFor="new-ehp" className="mc-title text-xs uppercase">
-            Minimum effective HP
-          </label>
-          <McRange id="new-ehp" min={0} max={ehpMax} step={step} value={minEhp} accent="#55FF55" onChange={(event) => set({ minEhp: Number(event.target.value) })} className="w-full" />
-          <p className="text-xs text-zinc-500" title={`At level ${level} the most effective HP you can reach with items alone is about ${formatNumber(ehpMax)} (ability tree adds more). Builds below your value are thrown away, not just ranked lower.`}>
-            <span className="tabular-nums text-zinc-200">{formatNumber(minEhp)}</span> EHP · {Math.round((minEhp / Math.max(1, ehpMax)) * 100)}% of what level {level || "?"} can reach
+          <p className={hint} title="Every build is compared by this number, computed with your tree, powders and skill points.">
+            {goal ? (goal.kind === "melee" ? "Main attack damage per second." : `One hit of ${goal.name}.`) : ""}
           </p>
         </div>
       )}
 
       {treeIds.length > 0 && (
         <fieldset className="wbr-fade flex flex-col gap-2">
-          <legend className="mb-2 mc-title text-xs uppercase">Mana: spell cycle</legend>
-          <div className="flex gap-2">
+          <legend className={`${label} mb-1`}>Must have</legend>
+          <div className="flex flex-col gap-1">
+            <div className="flex items-baseline justify-between gap-2 text-xs">
+              <label htmlFor="new-ehp" className="text-zinc-300">
+                Effective HP
+              </label>
+              <span className="tabular-nums" title={`Level ${level || "?"} can reach about ${formatNumber(ehpMax)} with items alone; the slider moves in 5% steps of that.`}>
+                <span className="text-zinc-100">{formatNumber(minEhp)}</span> <span className="text-zinc-500">· {pct}%</span>
+              </span>
+            </div>
+            <McRange id="new-ehp" min={0} max={ehpMax} step={step} value={minEhp} accent="#55FF55" onChange={(event) => set({ minEhp: Number(event.target.value) })} className="w-full" />
+          </div>
+          <label className="flex items-center gap-2 text-xs text-zinc-200" title="Health Regen (per 4 s) plus Life Steal (per 3 s) must add up to more than zero per second. Builds that drain your health are thrown away.">
+            <input id="new-sustain" type="checkbox" className="mc-check" checked={Boolean(form.sustain)} onChange={() => set({ sustain: !form.sustain })} /> Life sustain &gt; 0 <span className="text-zinc-500">· regen + steal</span>
+          </label>
+        </fieldset>
+      )}
+
+      {treeIds.length > 0 && (
+        <fieldset className="wbr-fade flex flex-col gap-1.5">
+          <legend className={`${label} mb-1`}>Mana: spell cycle</legend>
+          <div className="flex items-center gap-1.5">
             <input
               id="new-cycle"
               value={form.cycle}
@@ -6678,56 +7129,251 @@ function DamageForm({
               placeholder="e.g. 2343"
               inputMode="numeric"
               aria-label="Spell cycle"
-              className="mc-input min-w-0 flex-1 tabular-nums"
+              className="mc-input w-0 min-w-0 flex-1 tabular-nums"
             />
-            <button type="button" className="mc-btn mc-btn-sm" onClick={() => set({ cycle: "" })} title="No mana filter">
-              Clear
-            </button>
+            <label htmlFor="new-cps" className="flex items-center gap-1 text-xs text-zinc-400" title="Clicks per second. A spell is 3 clicks, so the cycle takes 3 × spells ÷ clicks per second.">
+              <input id="new-cps" type="number" min={0.5} max={12} step={0.5} value={form.cps} onChange={(event) => set({ cps: Math.min(12, Math.max(0.5, Number(event.target.value) || 3)) })} className="mc-input w-12 px-1 text-center tabular-nums" />
+              cps
+            </label>
+            {form.cycle && (
+              <button type="button" className="mc-btn mc-btn-sm" onClick={() => set({ cycle: "" })} title="No mana filter" aria-label="Clear the spell cycle">
+                ×
+              </button>
+            )}
           </div>
-          <label htmlFor="new-cps" className="text-xs text-zinc-300">
-            Clicks per second: <span className="tabular-nums text-zinc-200">{form.cps}</span>
-          </label>
-          <McRange id="new-cps" min={0.5} max={9} step={0.5} value={form.cps} accent="#55FFFF" onChange={(event) => set({ cps: Number(event.target.value) })} className="w-full" />
-          <label className="flex items-center gap-2 text-xs text-zinc-200">
-            <input type="checkbox" className="mc-check" checked={form.steal} onChange={() => set({ steal: !form.steal })} /> Count Mana Steal
-          </label>
-          <label className="flex items-center gap-2 text-xs text-zinc-200">
-            <input type="checkbox" className="mc-check" checked={form.gain} onChange={() => set({ gain: !form.gain })} /> Count mana from abilities
-          </label>
-          <p className="text-xs text-zinc-500" title="Spell numbers like in game: 1 Heal/first spell, 2 second, 3 third, 4 fourth. A spell is 3 clicks, so the cycle takes 3 × spells ÷ clicks per second. Builds that can't pay for it are thrown away.">
-            {cycleIds.length > 0 ? `${cycleIds.length} spells over ${((3 * cycleIds.length) / Math.max(0.5, form.cps)).toFixed(1)} s - only builds that sustain it pass.` : "Empty = no mana filter."}
+          <div className="flex flex-wrap gap-x-4 gap-y-1">
+            <label className="flex items-center gap-1.5 text-xs text-zinc-200">
+              <input type="checkbox" className="mc-check" checked={form.steal} onChange={() => set({ steal: !form.steal })} /> Mana Steal
+            </label>
+            <label className="flex items-center gap-1.5 text-xs text-zinc-200">
+              <input type="checkbox" className="mc-check" checked={form.gain} onChange={() => set({ gain: !form.gain })} /> Mana from abilities
+            </label>
+          </div>
+          <p className={hint}>
+            {cycleIds.length > 0 ? `${cycleIds.length} spells every ${((3 * cycleIds.length) / Math.max(0.5, form.cps)).toFixed(1)} s must pay for themselves.` : "Empty = no mana filter. Suggested cycles are in the class panel."}
           </p>
         </fieldset>
       )}
 
+      {treeIds.length > 0 && (
+        <fieldset className="wbr-fade flex flex-col gap-1">
+          <legend className={`${label} mb-1`}>Items</legend>
+          <label className="flex items-center gap-2 text-xs text-zinc-200" title={`Skips the ${EVENT_ITEM_NAMES.size} items you can only get during a festival (Blizzard, Bonfire, Heroes, Spirits). Pinned items stay.`}>
+            <input id="new-no-events" type="checkbox" className="mc-check" checked={form.noEvents !== false} onChange={() => set({ noEvents: form.noEvents === false })} /> No limited-time event items
+          </label>
+          <label className="flex items-center gap-2 text-xs text-zinc-200" title="Only items that can be bought and sold on the Trade Market: no untradable or quest items. Pinned items stay.">
+            <input id="new-tradeable" type="checkbox" className="mc-check" checked={Boolean(form.tradeable)} onChange={() => set({ tradeable: !form.tradeable })} /> Tradeable only <span className="text-zinc-500">· Trade Market</span>
+          </label>
+        </fieldset>
+      )}
+
       {restrictions && (
-        <p className="wbr-fade text-xs text-zinc-500" title="Set in the Old tab's Custom stats; they apply here too.">
+        <p className={`wbr-fade ${hint}`} title="Set in the Old tab's Custom stats; they apply here too.">
           From Custom stats: {restrictions}
         </p>
       )}
 
-      <div className="wbr-fade flex flex-col gap-2">
+      <div className="flex flex-col gap-1.5">
         <button
           type="button"
           onClick={onGenerate}
-          disabled={running}
-          className="mc-btn mc-btn-primary w-full py-3 text-lg"
+          disabled={running || !ready}
+          className="mc-btn mc-btn-primary w-full py-2.5 text-lg"
           style={ts(ready ? undefined : { opacity: 0.55 })}
-          title={ready ? undefined : "Choose a class, level and ability tree first"}
+          title={ready ? undefined : "Choose a class, rank, level and ability tree first"}
         >
           {running ? "Searching…" : "Generate Build"}
         </button>
-        {outdated ? (
+        {running ? (
+          <div className="flex flex-col gap-1" role="status" aria-live="polite">
+            <div className="h-1.5 w-full" style={ts({ background: "#2b2b2b" })}>
+              <div className="h-full transition-all" style={ts({ width: `${Math.round(((progress && progress.fraction) || 0) * 100)}%`, background: "#55FF55" })} />
+            </div>
+            <p className={`${hint} truncate`}>{progress ? progress.label : "Searching"}…</p>
+          </div>
+        ) : outdated ? (
           <p className="text-xs text-amber-400">Settings changed: regenerate.</p>
         ) : result ? (
-          <p className="text-xs text-zinc-500" title={`Generated at ${result.at.toLocaleTimeString("en-GB")}`}>
-            Build #{result.run} · <span className="tabular-nums">{result.ms}</span> ms
+          <p className={hint} title={`Generated at ${result.at.toLocaleTimeString("en-GB")}`}>
+            Build #{result.run} · <span className="tabular-nums">{(result.ms / 1000).toFixed(1)}</span> s
           </p>
         ) : (
-          <p className="text-xs text-zinc-500">Damage first: EHP and mana are filters, not weights.</p>
+          <p className={hint}>{ready ? "Damage first: the filters above are pass/fail." : !playerClass ? "Start with a class." : !rankConfirmed ? "Next: your rank." : !level ? "Next: your level." : "Next: an ability tree preset."}</p>
         )}
       </div>
-    </>
+    </div>
+  );
+}
+
+// Czary klasy na danym poziomie z danym drzewkiem: najlepsza broń klasy na ten poziom, bez zbroi i bez Skill Pointów
+// z przedmiotów. Koszty są więc "przed Intelligence i ID-kami kosztu" - górna granica tego, co zapłacisz.
+function classPreview(playerClass, level, treeSettings, items = ITEM_DB) {
+  if (!CLASSES[playerClass]) return null;
+  const weapon = representativeWeapon(playerClass, level, treeSettings, items);
+  if (!weapon) return null;
+  const sp = computeSkillPoints([weapon]);
+  const build = { playerClass, level, archetype: null, slots: SLOTS.map((slot) => ({ ...slot, item: slot.id === "weapon" ? weapon : null })), skillPoints: { totals: sp.totals } };
+  return { weapon, stats: computeBuildStats(build, treeSettings) };
+}
+
+// Mana w cyklu jak w filtrze zakładki New: liczą się tylko czary 1-4 (M/F z kombinacji nie kosztują many),
+// cykl trwa 3 kliknięcia na czar ÷ kliknięcia na sekundę.
+function cycleMana(spells, digits, cps, withGain) {
+  const casts = digits.map((id) => spells.find((spell) => spell.id === id)).filter(Boolean);
+  if (casts.length === 0 || casts.length !== digits.length) return null;
+  const seconds = (3 * casts.length) / Math.max(0.5, cps);
+  const used = casts.reduce((sum, spell) => sum + (spell.cost || 0), 0) / seconds;
+  const gained = withGain ? casts.reduce((sum, spell) => sum + (spell.manaGained || 0), 0) / seconds : 0;
+  const fromItems = Math.max(0, used - gained - BASE_MANA_REGEN / 5);
+  return { seconds, used, gained, fromItems, regen: fromItems * 5, steal: fromItems * 3 };
+}
+
+// Zakładka New bez wygenerowanego buildu: zaraz po wyborze klasy widać jej archetypy, czary z sugerowanego drzewka
+// (koszty, kombinacje, obrażenia z samą bronią) i cykle czarów z tym, ile many na sekundę trzeba z przedmiotów.
+function ClassOverview({ playerClass, level, levelKnown, apCap, preset, treeIds, treeSettings, form, onPreset, onUseCycle }) {
+  const classConfig = CLASSES[playerClass];
+  const [viewed, setViewed] = useState(preset || classConfig.archetypes[0]);
+  useEffect(() => {
+    if (preset) setViewed(preset);
+  }, [preset]);
+  const arch = classConfig.archetypes.includes(viewed) ? viewed : classConfig.archetypes[0];
+  const own = arch === preset && treeIds.length > 0;
+  const preview = useMemo(() => {
+    const ids = own ? treeIds : suggestAbilityTree(playerClass, arch, apCap).ids;
+    const settings = own ? treeSettings : { selected: ids, toggles: {}, sliders: {} };
+    const result = classPreview(playerClass, level, settings);
+    return result ? { ...result, ids } : null;
+  }, [playerClass, arch, level, apCap, own, treeIds, treeSettings]);
+  const combo = ARCHETYPE_COMBOS[arch];
+  const clicks = SPELL_CLICKS[playerClass] || SPELL_CLICKS.default;
+  const names = CLASS_SPELL_NAMES[playerClass];
+  const spells = preview ? preview.stats.spells : [];
+  const typed = [...String(form.cycle || "")].filter((digit) => "1234".includes(digit)).map(Number);
+  const typedMana = typed.length > 0 ? cycleMana(spells, typed, form.cps, form.gain) : null;
+  const need = (mana) =>
+    mana.fromItems <= 0 ? (
+      <span style={ts({ color: "#55FF55" })}>free: base regen covers it</span>
+    ) : (
+      <>
+        needs <span className="tabular-nums text-zinc-100">{mana.fromItems.toFixed(1)}</span> mana/s from items ≈{" "}
+        <span className="tabular-nums text-zinc-100">{Math.ceil(mana.regen)}</span> Mana Regen
+        {form.steal ? (
+          <>
+            {" "}
+            or <span className="tabular-nums text-zinc-100">{Math.ceil(mana.steal)}</span> Mana Steal
+          </>
+        ) : null}
+      </>
+    );
+  return (
+    <section className="mc-panel wbr-fade flex flex-col gap-3 p-4">
+      <div className="flex items-start gap-3">
+        {CLASS_PORTRAITS[playerClass] && <img src={CLASS_PORTRAITS[playerClass]} alt="" width={46} height={64} className="flex-shrink-0" style={{ imageRendering: "auto" }} />}
+        <div className="flex min-w-0 flex-1 flex-col gap-1">
+          <h2 className="mc-title text-lg leading-tight">
+            {playerClass} <span className="text-sm text-zinc-400">· {capitalize(classConfig.weapon)} · level {level}{levelKnown ? "" : " (type yours)"} · {apCap} AP</span>
+          </h2>
+          <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="Archetype">
+            {classConfig.archetypes.map((name) => (
+              <button key={name} type="button" role="tab" aria-selected={name === arch} onClick={() => setViewed(name)} className={`mc-btn mc-btn-sm ${name === arch ? "mc-btn-on" : ""}`}>
+                {name}
+                {name === preset ? " ✓" : ""}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+      {combo && <p className="text-sm text-zinc-300">{combo.summary}</p>}
+
+      <div className="grid gap-3 lg:grid-cols-2">
+        <div className="mc-slot flex flex-col gap-1.5 p-3">
+          <div className="flex items-baseline justify-between gap-2">
+            <h3 className="mc-title text-xs uppercase">Spells · {own ? "your tree" : `suggested ${arch} tree`}</h3>
+            {!own && (
+              <button type="button" className="mc-link text-xs" onClick={() => onPreset(arch)}>
+                Use this tree
+              </button>
+            )}
+          </div>
+          <ul className="flex flex-col gap-1 text-sm">
+            {names.map((name, index) => {
+              const spell = spells.find((entry) => entry.id === index + 1);
+              return (
+                <li key={name} className="flex flex-wrap items-baseline justify-between gap-x-3">
+                  <span className="flex items-center gap-2">
+                    <span className="mc-slot px-1.5 text-xs" style={ts({ color: "#FFAA00" })}>
+                      {index + 1}
+                    </span>
+                    <span className="text-zinc-100">{spell ? spell.name : name}</span>
+                    <span className="text-xs text-zinc-500">{clicks[index]}</span>
+                  </span>
+                  <span className="text-xs tabular-nums text-zinc-400">
+                    {spell && spell.cost !== null ? `${spell.cost.toFixed(1)} mana` : "not in tree"}
+                    {spell && spell.manaGained ? ` · +${formatNumber(spell.manaGained)} back` : ""}
+                    {spell && spell.main && spell.main.type === "damage" && spell.main.amount > 0 ? ` · ${formatNumber(Math.round(spell.main.amount))} dmg` : ""}
+                    {spell && spell.main && spell.main.type === "heal" ? ` · heals ${formatNumber(Math.round(spell.main.amount))}` : ""}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+          <p className="text-xs text-zinc-500">
+            {preview ? `Costs before Intelligence and item spell-cost IDs; damage with ${preview.weapon.name} alone, no armour.` : `No ${classConfig.weapon} up to level ${level}.`}
+          </p>
+        </div>
+
+        <div className="mc-slot flex flex-col gap-2 p-3">
+          <h3 className="mc-title text-xs uppercase">
+            Spell cycles · {form.cps} clicks/s{form.gain ? " · ability mana counted" : ""}
+          </h3>
+          <ul className="flex flex-col gap-2">
+            {(combo ? combo.combos : []).map((entry) => {
+              const digits = [...entry.cycle].filter((char) => "1234".includes(char)).map(Number);
+              const mana = digits.length > 0 ? cycleMana(spells, digits, form.cps, form.gain) : null;
+              const current = typed.join("") === digits.join("") && arch === preset;
+              return (
+                <li key={entry.name} className="flex flex-col gap-0.5">
+                  <div className="flex flex-wrap items-baseline justify-between gap-x-2">
+                    <span className="mc-gold text-sm">
+                      {entry.name} <span className="tabular-nums text-zinc-300">{entry.cycle}</span>
+                    </span>
+                    {digits.length > 0 && (
+                      <button type="button" className={`mc-btn mc-btn-sm ${current ? "mc-btn-on" : ""}`} onClick={() => onUseCycle(arch, digits.join(""))} title="Use as the mana filter (and this archetype's tree)">
+                        {current ? "In use" : "Use"}
+                      </button>
+                    )}
+                  </div>
+                  <span className="text-xs text-zinc-400">{entry.note}</span>
+                  <span className="text-xs text-zinc-500">
+                    {mana ? (
+                      <>
+                        {mana.used.toFixed(1)} mana/s{mana.gained > 0 ? ` − ${mana.gained.toFixed(1)} from abilities` : ""} → {need(mana)}
+                      </>
+                    ) : digits.length === 0 ? (
+                      "Main attacks only: no mana filter."
+                    ) : (
+                      "A spell of this cycle isn't in the tree yet."
+                    )}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+          {typedMana && (
+            <p className="mc-slot px-2 py-1 text-xs text-zinc-300">
+              Your cycle <span className="tabular-nums text-zinc-100">{typed.join("")}</span>: {typedMana.used.toFixed(1)} mana/s → {need(typedMana)}
+            </p>
+          )}
+        </div>
+      </div>
+      {combo && combo.tips && combo.tips.length > 0 && (
+        <ul className="flex flex-col gap-0.5 text-xs text-zinc-400">
+          {combo.tips.map((tip) => (
+            <li key={tip}>• {tip}</li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 
@@ -6755,6 +7401,13 @@ function DamageSummary({ build }) {
           `${metrics.manaNet >= 0 ? "+" : ""}${metrics.manaNet.toFixed(1)} mana/s`,
           metrics.cycleOk ? metrics.manaNet >= 0 : false,
           `${metrics.manaUsed.toFixed(1)} mana/s used, ${(metrics.manaIncome + metrics.manaGain).toFixed(1)} from regen${cycle.steal ? " + steal" : ""}${cycle.gain ? " + abilities" : ""}`
+        )}
+      {metrics.sustain !== undefined &&
+        chip(
+          "Life",
+          `${metrics.sustain >= 0 ? "+" : ""}${metrics.sustain.toFixed(1)} HP/s`,
+          metrics.requireSustain ? metrics.sustain > 0 : null,
+          `Health Regen ${formatNumber(Math.round(metrics.hpr))}/4s + Life Steal ${formatNumber(Math.round(metrics.lifeSteal))}/3s${metrics.requireSustain ? " - the filter asks for more than 0" : ""}`
         )}
       {chip("Skill points", `${build.skillPoints.required} / ${build.skillPoints.available}`, build.skillPoints.valid, "Skill points this set needs, checked in the game's equip order")}
     </div>
@@ -9406,6 +10059,9 @@ export default function BuildRecommender() {
   const [buildMode, setBuildMode] = useState("old"); // "old" = wagi archetypu, "new" = generator nastawiony na obrażenia
   const [damageForm, setDamageForm] = useState(DEFAULT_DAMAGE_FORM);
   const [damageRunning, setDamageRunning] = useState(false);
+  const [damageProgress, setDamageProgress] = useState(null);
+  // Wyniki zakładki New z tej sesji (te same ustawienia poza progiem EHP) - wracają do szukania jako punkty startu.
+  const damageHistory = useRef(new Map());
   const [buildError, setBuildError] = useState(null);
   const [guideView, setGuideView] = useState(null);
   const [tab, setTab] = useState("build");
@@ -9478,7 +10134,7 @@ export default function BuildRecommender() {
   );
   const ehpMax = playerClass && level ? reachableEhp(playerClass, level) : 100000;
   const damageGoal = damageGoals.find((entry) => String(entry.id) === String(damageForm.goal)) || damageGoals[0] || null;
-  const damageMinEhp = damageForm.minEhp === null || damageForm.minEhp === undefined ? Math.round(ehpMax * 0.25) : damageForm.minEhp;
+  const damageMinEhp = damageForm.minEhp === null || damageForm.minEhp === undefined ? defaultMinEhp(ehpMax) : Math.min(damageForm.minEhp, ehpMax);
   // ograniczenia ustawione w zakładce "Old" (rzadkości, budżet, przypięte, rynek) działają też tutaj
   const damageRestrictions = useMemo(() => {
     const parts = [];
@@ -9501,6 +10157,9 @@ export default function BuildRecommender() {
           Math.round(generated.metrics.minEhp) !== Math.round(damageMinEhp) ||
           generated.metrics.cycle.ids.join("") !== [...String(damageForm.cycle || "")].filter((digit) => "1234".includes(digit)).join("") ||
           generated.metrics.cycle.cps !== damageForm.cps ||
+          Boolean(generated.metrics.requireSustain) !== Boolean(damageForm.sustain) ||
+          Boolean(generated.metrics.excludeEvents) !== (damageForm.noEvents !== false) ||
+          Boolean(generated.metrics.tradeableOnly) !== Boolean(damageForm.tradeable) ||
           generated.treeSettings.selected.length !== treeIds.length
         : generated.level !== level || generated.playerClass !== playerClass || generated.archetype !== archetype || !sameOptions(generated.options, options))
   );
@@ -9522,17 +10181,27 @@ export default function BuildRecommender() {
     setArchetype(arch);
   }
 
+  function useCycle(arch, digits) {
+    if (arch !== damageForm.preset || treeIds.length === 0) applyTreePreset(arch);
+    setDamageForm((current) => ({ ...current, cycle: digits }));
+  }
+
   function handleGenerateDamage() {
     if (!playerClass || !level || treeIds.length === 0 || !damageGoal) {
       setBuildError(!playerClass ? "Choose a class first." : !level ? "Type your level (1-120) first." : treeIds.length === 0 ? "Pick an ability tree preset first." : "Pick what to maximise.");
       return;
     }
     setDamageRunning(true);
+    setDamageProgress({ label: "Starting", fraction: 0 });
     setBuildError(null);
-    setTimeout(() => {
+    const cycleDigits = [...String(damageForm.cycle || "")].filter((digit) => "1234".includes(digit)).join("");
+    const historyKey = JSON.stringify([playerClass, level, treeIds, damageGoal.id, cycleDigits, damageForm.cps, damageForm.steal, damageForm.gain, Boolean(damageForm.sustain), damageForm.noEvents !== false, Boolean(damageForm.tradeable), normalizeOptions(options)]);
+    const seeds = damageHistory.current.get(historyKey) || [];
+    setTimeout(async () => {
       try {
         const started = performance.now();
-        const build = generateDamageBuild({
+        const build = await generateDamageBuild({
+          seeds,
           playerClass,
           level,
           archetype: damageForm.preset || archetype || null,
@@ -9540,17 +10209,26 @@ export default function BuildRecommender() {
           goal: damageGoal.id,
           cycle: { ids: [...String(damageForm.cycle || "")].filter((digit) => "1234".includes(digit)).map(Number), cps: damageForm.cps, steal: damageForm.steal, gain: damageForm.gain },
           minEhp: damageMinEhp,
+          requireSustain: Boolean(damageForm.sustain),
+          excludeEvents: damageForm.noEvents !== false,
+          tradeableOnly: Boolean(damageForm.tradeable),
           options,
           powders: options.powders,
+          onProgress: setDamageProgress,
         });
         setResult({ build, run: (result ? result.run : 0) + 1, ms: Math.max(1, Math.round(performance.now() - started)), at: new Date() });
         setGuideView(null);
         setSolverView(null);
         setTab("build");
+        const seed = { picks: Object.fromEntries(build.slots.filter((slot) => slot.item && slot.id !== "weapon").map((slot) => [slot.id, slot.item])), weapon: build.slots.find((slot) => slot.id === "weapon").item };
+        const signature = (entry) => [entry.weapon && entry.weapon.name, ...Object.values(entry.picks).map((item) => item.name).sort()].join("|");
+        const kept = [seed, ...seeds.filter((entry) => signature(entry) !== signature(seed))].slice(0, 12);
+        damageHistory.current.set(historyKey, kept);
       } catch (error) {
         setBuildError(error.message);
       }
       setDamageRunning(false);
+      setDamageProgress(null);
     }, 30);
   }
 
@@ -9670,19 +10348,20 @@ export default function BuildRecommender() {
   return (
     <div className="wbr-mc min-h-screen px-4 py-6 sm:px-6" data-theme={theme}>
       <style>{MC_STYLES}</style>
-      <div className="mx-auto flex max-w-[1720px] flex-col gap-6">
-        <header className="mc-hr-bottom relative flex flex-wrap items-end justify-between gap-3 pb-4">
-          <div className="pt-10 sm:pt-0">
-            <p className="mc-gold text-sm uppercase">Wynncraft</p>
-            <h1 className="text-3xl text-white">Build Recommender</h1>
+      <div className="mx-auto flex max-w-[1720px] flex-col gap-4">
+        <header className="mc-hr-bottom flex flex-wrap items-center justify-between gap-x-6 gap-y-2 pb-3">
+          <div className="flex items-baseline gap-3">
+            <h1 className="text-2xl leading-none text-white">
+              <span className="mc-gold mr-2 text-sm uppercase">Wynncraft</span>Build Recommender
+            </h1>
           </div>
-          <ThemeToggle theme={theme} onChange={setTheme} className="absolute right-0 top-0" />
-          <p className="max-w-md text-sm text-zinc-400 sm:pt-12">
-            Picks the strongest 9-piece loadout for your level, class and ability-tree archetype, checked against your skill point budget.
+          <p className="hidden flex-1 text-xs text-zinc-500 md:block">
+            The strongest 9-piece loadout for your level, class and ability tree, checked against your skill points.
           </p>
+          <ThemeToggle theme={theme} onChange={setTheme} />
         </header>
 
-        <div className="flex flex-col gap-6 lg:grid lg:grid-cols-12 lg:items-start">
+        <div className="flex flex-col gap-4 lg:grid lg:grid-cols-12 lg:items-start">
           <aside className="flex flex-col gap-4 lg:col-span-4 xl:col-span-3">
             <section className="mc-panel flex flex-col gap-4 p-4">
               {/* Dwa generatory: "Old" (wagi archetypu) i "New" (maksimum obrażeń, EHP i mana jako twarde filtry). */}
@@ -9871,6 +10550,7 @@ export default function BuildRecommender() {
                   ehpMax={ehpMax}
                   onGenerate={handleGenerateDamage}
                   running={damageRunning}
+                  progress={damageProgress}
                   result={result && result.build.mode === "damage" ? result : null}
                   outdated={outdated && result && result.build.mode === "damage"}
                 />
@@ -9878,46 +10558,30 @@ export default function BuildRecommender() {
               {buildError && <p className="text-xs text-red-400">{buildError}</p>}
             </section>
 
-            <section className="mc-panel flex flex-col gap-2 p-4 text-sm">
-              <h2 className="mc-title text-xs uppercase">Item database</h2>
-              <p className="text-zinc-200">
-                Wynnbuilder · <span className="tabular-nums">{ITEM_DB.length.toLocaleString("en-US")}</span> items
-              </p>
-              <dl className="grid grid-cols-3 gap-2 text-xs">
-                {[
-                  ["Armor", DB_COUNTS.armor],
-                  ["Accessories", DB_COUNTS.accessory],
-                  ["Weapons", DB_COUNTS.weapon],
-                ].map(([label, count]) => (
-                  <div key={label} className="flex flex-col">
-                    <dt className="text-zinc-500">{label}</dt>
-                    <dd className="tabular-nums text-zinc-200">{count.toLocaleString("en-US")}</dd>
-                  </div>
-                ))}
-              </dl>
-              <p className="text-xs text-zinc-500">
-                Data {WYNNBUILDER_DATA.version}, no crafted items.
-              </p>
-            </section>
+            <p className="px-1 text-xs text-zinc-500" title={`${DB_COUNTS.armor.toLocaleString("en-US")} armour pieces, ${DB_COUNTS.accessory.toLocaleString("en-US")} accessories, ${DB_COUNTS.weapon.toLocaleString("en-US")} weapons; no crafted items`}>
+              <span className="mc-title uppercase">Item database</span> · Wynnbuilder {WYNNBUILDER_DATA.version} · <span className="tabular-nums text-zinc-300">{ITEM_DB.length.toLocaleString("en-US")}</span> items
+              {hasWynnpoolData() ? " · Wynnpool weights" : ""}
+            </p>
           </aside>
 
           <main className="flex flex-col gap-4 lg:col-span-8 xl:col-span-9" aria-live="polite">
-            <div className="mc-hr-bottom flex flex-wrap gap-2 pb-3" role="tablist">
+            <div className="mc-hr-bottom flex flex-wrap gap-1.5 pb-2.5" role="tablist">
               {[
-                ["build", guideView ? "Guide build" : solverView ? "Solver build" : "Build"],
-                ["tree", playerClass ? `Ability tree · ${playerClass}` : "Ability tree"],
-                ["guides", archetype ? `Guide builds · ${archetype}` : "Guide builds"],
-                ["solver", "Build Solver"],
-                ["info", build ? `Build info · ${build.archetype}` : archetype ? `Build info · ${archetype}` : "Build info"],
-                ["score", "Score calculation"],
-              ].map(([id, label]) => (
+                ["build", guideView ? "Guide build" : solverView ? "Solver build" : "Build", null],
+                ["tree", "Ability tree", playerClass],
+                ["guides", "Guide builds", archetype],
+                ["solver", "Build Solver", null],
+                ["info", "Build info", build ? build.archetype : archetype],
+                ["score", "Score calculation", null],
+              ].map(([id, label, context]) => (
                 <button
                   key={id}
                   type="button"
                   role="tab"
                   aria-selected={tab === id}
                   onClick={() => setTab(id)}
-                  className={`mc-btn ${tab === id ? "mc-btn-on" : ""}`}
+                  className={`mc-btn mc-btn-sm ${tab === id ? "mc-btn-on" : ""}`}
+                  title={context ? `${label} · ${context}` : label}
                 >
                   {label}
                 </button>
@@ -9977,7 +10641,22 @@ export default function BuildRecommender() {
               />
             )}
 
-            {tab === "build" && !build && (
+            {tab === "build" && !build && buildMode === "new" && playerClass && (
+              <ClassOverview
+                key={playerClass}
+                playerClass={playerClass}
+                level={effectiveLevel}
+                levelKnown={Boolean(level)}
+                apCap={apCap}
+                preset={damageForm.preset}
+                treeIds={treeIds}
+                treeSettings={damageTreeSettings}
+                form={damageForm}
+                onPreset={applyTreePreset}
+                onUseCycle={useCycle}
+              />
+            )}
+            {tab === "build" && !build && !(buildMode === "new" && playerClass) && (
               <section className="mc-panel flex flex-col gap-3 p-6">
                 <h2 className="mc-title text-xl">No build yet</h2>
                 <p className="max-w-2xl text-sm text-zinc-300">

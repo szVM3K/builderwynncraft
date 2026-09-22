@@ -36,6 +36,7 @@ npm run update-tree-effects             # atree.json for the version recorded in
 npm run update-tree-effects -- 2.2.4.0  # a specific version
 npm run update-guide-trees               # re-check the guide builds' trees against the new tree data
 npm run update-item-weights              # re-fetch the Wynnpool item weights
+npm run update-event-items               # re-fetch the list of limited-time event items (wiki + Wynncraft API)
 ```
 
 ## Trade Market prices (budget)
@@ -147,33 +148,50 @@ field is disabled and everything else works as before.
 
 ### Old and New generator
 
-The **Generator** switch at the top of the left panel picks how a build is put together.
+The **Generator** switch at the top of the left panel picks how a build is put together. Only the New one changed
+in 0.29.0; the Old generator gives exactly the same builds as before.
 
 - **Old** is the weight-based generator described above: every item gets a score from the archetype's stat
   weights and your own priorities, and the best-scoring set wins.
-- **New** turns the question around: *what is the strongest build that still survives and still sustains its
-  spells?* You pick the class, rank, level and ability tree (the tree presets come from `suggestAbilityTree`, the
-  same suggestions as the Ability tree tab), and the tree decides which spells exist. Then you set two hard
-  filters and one goal:
-  - **Goal** – the main attack or one spell from your tree. That single number is what the search maximises.
-  - **Effective HP** – a slider from the lowest to the highest EHP reachable on that class and level
-    (`src/ehp-range.json`, precomputed per class × level). Builds under the threshold are not results, they are
-    simply not shown.
-  - **Mana** – the spell cycle from the Mana calculator: the spells you cast, clicks per second, and whether mana
-    steal and ability mana gain count. Income is `(Mana Regen + 25) / 5 + Mana Steal / 3`, the cycle lasts
-    `3 × spells / clicks per second`, and a build that cannot pay for that cycle is rejected. No weights here —
-    EHP and mana are pass/fail, damage is the only thing being optimised.
+- **New** asks *what is the strongest build that still survives and still pays for its spells?*
 
-  The search runs a two-tier beam over the whole item database: candidates per slot are first scored with a fast
-  linear proxy plus exact skill points, only the best few get the exact damage/EHP/mana evaluation, and the
-  finished set is then polished with single swaps against the *full* pool until nothing improves. If nothing
-  passes the filters, a second pass maximises EHP instead and the message says how far off the closest build was.
+  1. **Class** → the main panel immediately shows the class overview: its archetypes (tabs), the spells of the
+     suggested tree for each archetype with their mana costs, click combos and damage, and the archetype's usual
+     spell cycles with how much mana per second they burn and how much Mana Regen *or* Mana Steal your items would
+     need to sustain them. **Use** on a cycle puts it into the mana filter (and loads that archetype's tree).
+  2. **Rank** and **level**, then an **ability tree** preset (or your own tree from the Ability tree tab).
+  3. **Maximise**: the main attack or one spell from the tree. That single number is what the search maximises.
+  4. **Must have** (pass/fail, never weights):
+     - **Effective HP** – a slider in 5% steps of the most EHP your level can reach (`src/ehp-range.json`).
+     - **Life sustain > 0** (optional) – Health Regen per second (raw × (1 + %), ÷ 4 s) plus Life Steal (÷ 3 s)
+       must stay above zero, so the build doesn't drain your health.
+     - **Mana: spell cycle** – spells you cast, clicks per second, Mana Steal and ability mana on/off. Income is
+       `(Mana Regen + 25) / 5 + Mana Steal / 3`, the cycle lasts `3 × spells / clicks per second`.
+  5. **Items**: *No limited-time event items* (on by default) skips the items you can only get during a festival
+     (74 in the current `src/event-items.json`); *Tradeable only* keeps only items that can be bought and sold on the Trade Market
+     (no untradable or quest items). Pinned items always stay.
+
+  **How the search works.** Everything is evaluated with the same damage and EHP formulas as the rest of the site
+  (checked against `computeBuildStats`). The search is a beam over the whole database, one weapon at a time
+  (candidates per slot are pre-scored with numeric stat weights derived from your goal, then the best few get the
+  exact evaluation with skill points), run twice: once at your EHP and once at +20% EHP, because a set that passes
+  a higher threshold also passes yours and the "tankier" beam finds other combinations. The best set of *every*
+  weapon (not just the top three overall) is kept, all of them get a short polish, the best six a full one, and
+  the winner then gets single swaps against every item of every slot, weapon swaps (every top weapon with its best
+  powder) and **pair swaps** (two slots at once — the move a single swap can't make: a stronger item plus the
+  item that pays for its skill points or EHP). Builds found earlier in the same session with the same settings
+  (only the EHP threshold differs) are fed back in as starting points, so dragging the EHP slider never loses a
+  better build you already found. A progress bar shows the stage; a search takes about 5-10 s at level 100+.
+
+  Measured on four archetypes at level 106/120 and seven EHP thresholds each (10-40% of the reachable maximum),
+  compared with 0.28.0: never worse in these runs, typically +5-20% damage at the same EHP (e.g. Fallen at 35% EHP 545k → 722k,
+  Acolyte lv 120 at 30% EHP 35.3k → 44.3k), and the "higher EHP gives more damage" jumps that made the slider feel
+  harsh are gone within a session.
 
 - **Guide builds at level 100+**: from level 100 the generator treats the Wynnbuilder guide builds as the
   reference for that class — at high level nothing in the database beats them. Their weapons join the weapon list
   (with the powder element that suits the goal), and every complete guide build is evaluated as a finished
-  candidate, so the result is never worse than the guide it starts from. Measured over all 15 archetypes at level
-  106: 7 builds got better (up to +172 % damage), 8 unchanged, none worse.
+  candidate, so the result is never worse than the guide it starts from.
 
 ### Wynnpool item weights
 
@@ -337,6 +355,10 @@ of the site):
   Wynnbuilder keys the app uses and checks that every weighted identification exists on the item.
 - `src/ehp-range.json`: the highest effective HP reachable per class and level, used for the New generator's EHP
   slider range.
+- `src/event-items.json`: items obtainable only during limited-time festivals (written by
+  `scripts/update-event-items.mjs` from the wiki's "Festival of the … Items" categories and the Wynncraft API).
+- `src/game-icons.js`: class portraits (Wynncraft wiki) and the 16×16 item-type sprites (Wynnbuilder), embedded as
+  data URIs.
 - `src/item-prices.json`: Trade Market prices (`items`) and today's listings (`live`, `liveAt`) written by
   `scripts/update-prices.mjs` (empty in the repository; filled by the Pages workflow when the `WYNNVENTORY_KEY`
   secret exists).
@@ -357,6 +379,9 @@ of the site):
   How Damage Is Calculated – Rekindled Edition (thread 320808)
 - Wynnguides (afeenah): https://afeenah.github.io/wynnguides/
 - WynnVentory – Trade Market prices for the budget and today's listings: https://wynnventory.com
+- Official Wynncraft Wiki (wynncraft.wiki.gg) – class portraits (Archer/Warrior/Mage/Assassin/Shaman.png) and the
+  festival item categories; © Wynncraft, used as in other fan-made tools
+- Wynnbuilder `media/items/old.png` – the 16×16 item-type sprites (GPL-3.0)
 - Wynnpool – community item weights (which identifications matter on an item): https://www.wynnpool.com
   (code and data MIT, https://github.com/AiverAiva/Wynnpool)
 - Fonts: VCR OSD Mono by Riciery Leal (freeware, `src/fonts/VCR_OSD_MONO.woff2`); Tiny5 and Pixelify Sans
