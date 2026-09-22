@@ -148,6 +148,10 @@ npm run update-tree-effects -- 2.2.4.0  # a specific version
 - **Ability tree** tab: the trees of all five classes (game data 2.2.4.0: node positions, costs, requirements,
   blockers, archetype thresholds, level-dependent AP cap), checked against the Wynncraft wiki. Clicking unlocks
   nodes as in game, and the tree's dominant archetype can be applied to the build with one click.
+- The tree is drawn like Wynnbuilder's: the game's node icons (upgrade, ability, major ability, archetype ability
+  and core, class spell) and pixel connectors on the 9-column grid, from Wynnbuilder's `media/atree` sprite
+  sheets. An unlocked node gets the blue frame and the connectors between two unlocked nodes light up; nodes you
+  can't reach yet are dimmed. A small coloured dot marks the archetype a node belongs to.
 - **Ability tree effects** (below the summary and in the tree tab): selected nodes enter the calculations.
   Flat bonuses (e.g. Earth Mastery), buff toggles (e.g. Mask of the Lunatic, Activate Backstab) and stack/hit
   sliders (e.g. Corrupted, Focus) change stats, damage multipliers, resistances and spells. Own implementation
@@ -204,3 +208,5 @@ npm run update-tree-effects -- 2.2.4.0  # a specific version
 - Wynnguides (afeenah): https://afeenah.github.io/wynnguides/
 - Fonts: VCR OSD Mono by Riciery Leal (freeware, `src/fonts/VCR_OSD_MONO.woff2`); Tiny5 and Pixelify Sans
   (@fontsource, OFL licence) as fallbacks.
+- Ability tree sprites (`icons.png`, `connectors.png`, embedded in `BuildRecommender.jsx`): Wynncraft's ability tree
+  textures as shipped in Wynnbuilder's `media/atree`; © Wynncraft, used here as in other fan-made tools.

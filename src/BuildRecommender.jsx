@@ -1552,6 +1552,29 @@ const MC_BG_PATTERN =
   "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32' shape-rendering='crispEdges'%3E%3Crect width='32' height='32' fill='%230c0a10'/%3E%3Crect width='8' height='8' fill='%230f0d14'/%3E%3Crect x='16' y='8' width='8' height='8' fill='%230f0d14'/%3E%3Crect x='8' y='20' width='8' height='8' fill='%230e0c13'/%3E%3Crect x='24' y='24' width='8' height='8' fill='%23100e15'/%3E%3Crect x='24' y='4' width='4' height='4' fill='%230a080e'/%3E%3C/svg%3E\")";
 const MC_SELECT_ARROW =
   "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' shape-rendering='crispEdges'%3E%3Cpath d='M0 0h10v2H8v2H6v2H4V4H2V2H0z' fill='%23e0e0e0'/%3E%3C/svg%3E\")";
+// SPRITE'Y DRZEWKA jak w Wynnbuilderze (media/atree/icons.png i connectors.png z wynnbuilder.github.io - grafiki
+// interfejsu Wynncrafta). icons.png: 10 kolumn × 32 px (node_0..node_4, klasy), wiersze: 0 = zablokowany (szary),
+// 1 = nieaktywny, 2 = aktywny (niebieska ramka). connectors.png: kafelki 18 px, klucz = "LPGD" (lewo, prawo, góra,
+// dół), drugi klucz = które ramiona podświetlone. Rysowane jako background-image skalowane do rozmiaru komórki.
+const ATREE_ICONS_PNG = "data:image/png;base64,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";
+const ATREE_CONNECTORS_PNG = "data:image/png;base64,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";
+const ATREE_ICON_COLUMN = { node_0: 0, node_1: 1, node_2: 2, node_3: 4, node_4: 3, node_archer: 5, node_warrior: 6, node_mage: 7, node_assassin: 8, node_shaman: 9 };
+const ATREE_ICON_ROW = { locked: 1, available: 1, on: 2 }; // wiersz 0 (szary) zostaje w atlasie; zablokowane węzły są przyciemnione
+const ATREE_CONNECTOR_POS = {
+  "1100": { "0000": [0, 0], "1100": [1, 0] },
+  "1010": { "0000": [2, 0], "1010": [3, 0] },
+  "0110": { "0000": [4, 0], "0110": [5, 0] },
+  "1001": { "0000": [6, 0], "1001": [7, 0] },
+  "0101": { "0000": [8, 0], "0101": [9, 0] },
+  "0011": { "0000": [10, 0], "0011": [11, 0] },
+  "1101": { "0000": [0, 1], "1101": [1, 1], "1100": [2, 1], "1001": [3, 1], "0101": [4, 1] },
+  "0111": { "0000": [5, 1], "0111": [6, 1], "0110": [7, 1], "0101": [8, 1], "0011": [9, 1] },
+  "1110": { "0000": [0, 2], "1110": [1, 2], "1100": [2, 2], "1010": [3, 2], "0110": [4, 2] },
+  "1011": { "0000": [5, 2], "1011": [6, 2], "1010": [7, 2], "1001": [8, 2], "0011": [9, 2] },
+  "1111": { "0000": [0, 3], "1111": [1, 3], "1110": [2, 3], "1101": [3, 3], "1100": [4, 3], "1011": [5, 3], "1010": [6, 3], "1001": [7, 3], "0111": [8, 3], "0110": [9, 3], "0101": [10, 3], "0011": [11, 3] },
+};
+const ATREE_DIRS = ["left", "right", "up", "down"];
+
 const MC_STYLES = `
 .wbr-mc{font-family:${PIXEL_FONT};color:#E8E8E8;background:#0c0a10 ${MC_BG_PATTERN};text-shadow:-2px -2px 0 #000,-2px -1px 0 #000,-2px 0px 0 #000,-2px 1px 0 #000,-2px 2px 0 #000,-1px -2px 0 #000,-1px -1px 0 #000,-1px 0px 0 #000,-1px 1px 0 #000,-1px 2px 0 #000,0px -2px 0 #000,0px -1px 0 #000,0px 1px 0 #000,0px 2px 0 #000,1px -2px 0 #000,1px -1px 0 #000,1px 0px 0 #000,1px 1px 0 #000,1px 2px 0 #000,2px -2px 0 #000,2px -1px 0 #000,2px 0px 0 #000,2px 1px 0 #000,2px 2px 0 #000}
 .wbr-mc article,.wbr-mc article *{text-shadow:none}
@@ -1621,6 +1644,15 @@ select.mc-input option{background:#000;color:#fff}
 @keyframes wbr-fade{from{opacity:.2;transform:translateY(6px)}to{opacity:1;transform:none}}
 .wbr-fade{animation:wbr-fade .35s ease-out}
 @media (prefers-reduced-motion:reduce){.wbr-fade{animation:none}}
+.wbr-mc .atree-wrap{container-type:inline-size}
+.wbr-mc .atree{--cell:min(40px,10cqw);display:grid;grid-template-columns:repeat(9,var(--cell));grid-auto-rows:var(--cell);width:max-content;margin:0 auto;padding:calc(var(--cell) * .5)}
+.wbr-mc .atree-cell{position:relative;width:var(--cell);height:var(--cell)}
+.wbr-mc .atree-connector{position:absolute;left:calc(var(--cell) * -.0625);top:calc(var(--cell) * -.0625);width:calc(var(--cell) * 1.125);height:calc(var(--cell) * 1.125);background-image:url("${ATREE_CONNECTORS_PNG}");background-size:calc(var(--cell) * 13.5) calc(var(--cell) * 4.5);background-repeat:no-repeat;image-rendering:pixelated;pointer-events:none}
+.wbr-mc .atree-node{position:absolute;left:calc(var(--cell) * -.5);top:calc(var(--cell) * -.5);width:calc(var(--cell) * 2);height:calc(var(--cell) * 2);background-image:url("${ATREE_ICONS_PNG}");background-size:calc(var(--cell) * 20) calc(var(--cell) * 6);background-repeat:no-repeat;image-rendering:pixelated;pointer-events:none;z-index:1}
+.wbr-mc .atree-arch{position:absolute;right:1px;top:1px;width:7px;height:7px;border:1px solid #000;z-index:3;pointer-events:none}
+.wbr-mc .atree-hit{position:absolute;inset:0;z-index:2;background:transparent;border:0;cursor:pointer;padding:0;margin:0}
+.wbr-mc .atree-hit:focus-visible{outline:2px solid #fff;outline-offset:-2px}
+.wbr-mc .atree-cell:hover .atree-node{filter:brightness(1.3)}
 `;
 const PIXEL_ICONS = {
   helmet: [
@@ -5884,49 +5916,44 @@ function nodeColor(node) {
   return TREE_NODE_COLORS[node.icon] || SPELL_NODE_COLOR;
 }
 
+// Łącznik w komórce bez węzła: typ z ramion, które przez nią przechodzą, podświetlenie z ramion aktywnych krawędzi
+// (krawędź jest aktywna, gdy oba jej końce są odblokowane - jak w Wynnbuilderze).
 function TreeCell({ cell, activeEdges }) {
-  const segment = (dir) => {
-    const list = cell[dir];
-    if (list.length === 0) return null;
-    const active = list.some((edgeIndex) => activeEdges.has(edgeIndex));
-    const style = { background: active ? "#FFAA00" : "#4A3F5C" };
-    const position = {
-      up: "left-1/2 top-0 h-1/2 w-1 -translate-x-1/2",
-      down: "left-1/2 bottom-0 h-1/2 w-1 -translate-x-1/2",
-      left: "left-0 top-1/2 h-1 w-1/2 -translate-y-1/2",
-      right: "right-0 top-1/2 h-1 w-1/2 -translate-y-1/2",
-    }[dir];
-    return <span key={dir} className={`absolute transform ${position}`} style={style} />;
-  };
-  return <>{["up", "down", "left", "right"].map(segment)}</>;
+  const type = ATREE_DIRS.map((dir) => (cell[dir].length > 0 ? "1" : "0")).join("");
+  const lit = ATREE_DIRS.map((dir) => (cell[dir].some((edgeIndex) => activeEdges.has(edgeIndex)) ? "1" : "0")).join("");
+  const variants = ATREE_CONNECTOR_POS[type];
+  if (!variants) return null;
+  const pos = variants[lit] || (lit !== "0000" ? variants[type] : variants["0000"]);
+  return (
+    <span
+      className="atree-connector"
+      style={{ backgroundPosition: `calc(var(--cell) * -1.125 * ${pos[0]}) calc(var(--cell) * -1.125 * ${pos[1]})` }}
+      aria-hidden="true"
+    />
+  );
 }
 
 function TreeNodeButton({ node, state, archetypeColor, onToggle, onFocus }) {
-  const color = nodeColor(node);
-  const spell = !TREE_NODE_COLORS[node.icon];
-  const size = spell ? "h-3/4 w-3/4" : node.cost > 1 ? "h-3/4 w-3/4" : "h-3/5 w-3/5";
-  const shape = spell ? "rounded-sm" : node.cost > 1 ? "rounded-md" : "rounded-full";
-  const style =
-    state === "on"
-      ? { background: color, borderColor: "#FFAA00", boxShadow: "0 0 0 2px #FFAA00" }
-      : state === "available"
-        ? { background: mixColor(color, "#1B1024", 0.55), borderColor: color }
-        : { background: "#1B1024", borderColor: mixColor(color, "#1B1024", 0.6), opacity: 0.55 };
+  const column = ATREE_ICON_COLUMN[node.icon] ?? 0;
+  const row = ATREE_ICON_ROW[state] ?? 1;
   return (
-    <button
-      type="button"
-      aria-pressed={state === "on"}
-      aria-label={`${node.name}, ${node.cost} AP${node.arch ? `, ${node.arch}` : ""}`}
-      onClick={() => onToggle(node)}
-      onMouseEnter={() => onFocus(node)}
-      onFocus={() => onFocus(node)}
-      className={`relative z-10 flex items-center justify-center border-2 ${size} ${shape} focus:outline-none focus:ring-2 focus:ring-white`}
-      style={style}
-    >
-      {node.arch && (
-        <span className="absolute -right-1 -top-1 h-2 w-2 rounded-full border border-black" style={{ background: archetypeColor }} />
-      )}
-    </button>
+    <>
+      <span
+        className="atree-node"
+        style={{ backgroundPosition: `calc(var(--cell) * -2 * ${column}) calc(var(--cell) * -2 * ${row})`, opacity: state === "locked" ? 0.7 : 1 }}
+        aria-hidden="true"
+      />
+      {node.arch && <span className="atree-arch" style={{ background: archetypeColor }} aria-hidden="true" />}
+      <button
+        type="button"
+        aria-pressed={state === "on"}
+        aria-label={`${node.name}, ${node.cost} AP${node.arch ? `, ${node.arch}` : ""}${state === "locked" ? ", locked" : ""}`}
+        onClick={() => onToggle(node)}
+        onMouseEnter={() => onFocus(node)}
+        onFocus={() => onFocus(node)}
+        className="atree-hit"
+      />
+    </>
   );
 }
 
@@ -6082,7 +6109,7 @@ function AbilityTree({ playerClass, level, rank, selected, onChange, buildArchet
         <div>
           <h2 className="mc-title text-xl">{playerClass} ability tree</h2>
           <p className="text-xs text-zinc-500">
-            Game data {TREE_DATA.version}, checked against the Wynncraft wiki. Click an ability to unlock or remove it.
+            Game data {TREE_DATA.version}, checked against the Wynncraft wiki. Click an ability to unlock or remove it; a blue frame = unlocked, dimmed = not reachable yet (or not enough AP).
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -6140,7 +6167,7 @@ function AbilityTree({ playerClass, level, rank, selected, onChange, buildArchet
         </div>
       )}
 
-      {dominant && dominant[0] !== buildArchetype && (
+      {dominant && buildArchetype && dominant[0] !== buildArchetype && (
         <div className="mc-slot flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-sm">
           <span className="text-zinc-200">
             Your tree leans {dominant[0]} ({dominant[1]} abilities), but the build uses {buildArchetype}.
@@ -6162,17 +6189,16 @@ function AbilityTree({ playerClass, level, rank, selected, onChange, buildArchet
       )}
 
       <div className="flex flex-col gap-4 md:flex-row md:items-start">
-        <div className="mc-well w-full flex-shrink-0 overflow-y-auto md:w-96" style={{ maxHeight: "75vh" }}>
-          <div className="grid grid-cols-9" role="group" aria-label={`${playerClass} ability tree`}>
+        <div className="mc-well atree-wrap w-full flex-shrink-0 overflow-y-auto" style={{ maxHeight: "75vh", maxWidth: "404px" }}>
+          <div className="atree" role="group" aria-label={`${playerClass} ability tree`}>
             {Array.from({ length: tree.rows * 9 }, (_, index) => {
               const row = Math.floor(index / 9);
               const col = index % 9;
               const node = tree.positions.get(`${row},${col}`);
               const cell = tree.cells.get(`${row},${col}`);
               return (
-                <div key={index} className="relative flex items-center justify-center" style={{ aspectRatio: "1 / 1" }}>
-                  {cell && <TreeCell cell={cell} activeEdges={activeEdges} />}
-                  {node && <TreeCell cell={tree.stubs.get(node.id)} activeEdges={activeEdges} />}
+                <div key={index} className="atree-cell">
+                  {!node && cell && <TreeCell cell={cell} activeEdges={activeEdges} />}
                   {node && (
                     <TreeNodeButton node={node} state={nodeState(node)} archetypeColor={archetypeColor(node.arch)} onToggle={toggle} onFocus={setFocused} />
                   )}
@@ -6243,7 +6269,10 @@ function AbilityTree({ playerClass, level, rank, selected, onChange, buildArchet
               </li>
             ))}
             <li className="flex items-center gap-1">
-              <span className="h-3 w-3 rounded-full border-2" style={{ borderColor: "#FFAA00" }} /> Unlocked
+              <span className="h-3 w-3 rounded-full border-2" style={{ borderColor: "#4FE3F0" }} /> Unlocked
+            </li>
+            <li className="flex items-center gap-1">
+              <span className="h-3 w-3 rounded-full" style={{ background: "#555", opacity: 0.7 }} /> Not reachable yet
             </li>
           </ul>
         </div>
