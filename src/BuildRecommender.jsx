@@ -11193,9 +11193,29 @@ function cheapestTreePath(tree, children, active, target) {
   return path;
 }
 
-function suggestAbilityTree(playerClass, archetype, cap) {
+// Drzewko, które gracz naprawdę zbuduje na swoim poziomie: gdy wybrane drzewko (z poradnika, ułożone na 120 albo
+// zapisane przy wyższym poziomie) kosztuje więcej AP, niż daje poziom z pożyczką rangi, zostaje najlepszy podzbiór
+// jego węzłów, który da się odblokować w limicie. Zapisane drzewko się nie zmienia - po podniesieniu poziomu wraca.
+function fitTreeToCap(playerClass, ids, cap) {
   const tree = TREE_INDEX[playerClass];
-  const { weights, references } = treeNodeWeights(playerClass, archetype);
+  if (!tree || !ids || ids.length === 0 || resolveTree(tree, ids).points <= cap) return ids || [];
+  const counts = {};
+  ids.forEach((id) => {
+    const node = tree.byId.get(id);
+    if (node && node.arch) counts[node.arch] = (counts[node.arch] || 0) + 1;
+  });
+  const arch = Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0] || null;
+  return suggestAbilityTree(playerClass, arch, cap, new Set(ids)).ids;
+}
+
+function suggestAbilityTree(playerClass, archetype, cap, only = null) {
+  const fullTree = TREE_INDEX[playerClass];
+  // only: przycinanie istniejącego drzewka - wybór tylko spośród jego węzłów (każdy z nich coś jest wart,
+  // archetyp decyduje o kolejności), więc wynik to podzbiór drzewka gracza mieszczący się w limicie AP.
+  const tree = only ? { ...fullTree, nodes: fullTree.nodes.filter((node) => only.has(node.id)) } : fullTree;
+  const scored = treeNodeWeights(playerClass, archetype);
+  const references = scored.references;
+  const weights = only ? new Map([...only].map((id) => [id, (scored.weights.get(id) || 0) + 1])) : scored.weights;
   const children = new Map(tree.nodes.map((node) => [node.id, []]));
   tree.nodes.forEach((node) => node.parents.forEach((parent) => children.get(parent) && children.get(parent).push(node.id)));
   const active = new Set();
@@ -11560,7 +11580,7 @@ function decodeTreeHash(playerClass, text) {
   return ids;
 }
 
-function AbilityTree({ playerClass, level, rank, selected, onChange, buildArchetype, onUseArchetype }) {
+function AbilityTree({ playerClass, level, rank, selected, fullPoints = 0, onChange, buildArchetype, onUseArchetype }) {
   const tree = TREE_INDEX[playerClass];
   const [focused, setFocused] = useState(null);
   const [message, setMessage] = useState("");
@@ -11765,6 +11785,11 @@ function AbilityTree({ playerClass, level, rank, selected, onChange, buildArchet
             Use {dominant[0]} for the build
           </button>
         </div>
+      )}
+      {pointsLeft >= 0 && fullPoints > cap && (
+        <p className="text-sm text-amber-400" title="Nothing is lost: the full tree is kept and comes back when you raise the level or pick a rank with an AP loan.">
+          Showing what level {level} can unlock ({resolved.points} / {cap} AP). Your full tree needs {fullPoints} AP.
+        </p>
       )}
       {pointsLeft < 0 && (
         <p className="text-sm text-red-400">
@@ -12955,8 +12980,11 @@ export default function BuildRecommender() {
   const build = useMemo(() => (viewed || generated ? applyBuildRolls(viewed || generated, rolls) : null), [viewed, generated, rolls]);
   const buildClass = build ? build.playerClass : "";
   const buildTreeSettings = useMemo(
-    () => ({ selected: treeSelections[buildClass] || [], ...(treeEffects[buildClass] || {}) }),
-    [buildClass, treeSelections, treeEffects]
+    () => ({
+      selected: buildClass ? fitTreeToCap(buildClass, treeSelections[buildClass] || [], abilityPointCap((build && build.level) || 120, (RANKS.find((entry) => entry.id === rank) || RANKS[0]).loan)) : [],
+      ...(treeEffects[buildClass] || {}),
+    }),
+    [buildClass, build, rank, treeSelections, treeEffects]
   );
   const buildStats = useMemo(() => (build ? computeBuildStats(build, buildTreeSettings) : null), [build, buildTreeSettings]);
   const powderBySlot = useMemo(() => {
@@ -12969,7 +12997,6 @@ export default function BuildRecommender() {
     });
     return map;
   }, [build, buildStats]);
-  const classTreeState = useMemo(() => (playerClass ? treeStateFor(playerClass, treeSelections[playerClass] || []) : null), [playerClass, treeSelections]);
   const setClassTreeEffects = (cls) => (next) =>
     setTreeEffects((current) => ({ ...current, [cls]: typeof next === "function" ? next(current[cls]) : next }));
   const level = levelInput === "" ? null : clampLevel(levelInput);
@@ -12984,9 +13011,13 @@ export default function BuildRecommender() {
   const showClass = showLevel && Boolean(level || playerClass);
   const showArchetype = showClass && Boolean(playerClass);
   // TRYB "NEW": drzewko (preset albo własne), cele z drzewka, zakres EHP dla poziomu i uruchomienie generatora.
-  const treeIds = playerClass ? treeSelections[playerClass] || [] : [];
   const rankLoan = (RANKS.find((entry) => entry.id === rank) || RANKS[0]).loan;
   const apCap = abilityPointCap(effectiveLevel, rankLoan);
+  // Drzewko przycięte do AP poziomu gracza (fitTreeToCap); zapisane drzewko zostaje pełne.
+  const storedTreeIds = playerClass ? treeSelections[playerClass] : null;
+  const treeIds = useMemo(() => (playerClass ? fitTreeToCap(playerClass, storedTreeIds || [], apCap) : []), [playerClass, storedTreeIds, apCap]);
+  const storedTreePoints = useMemo(() => (playerClass && storedTreeIds ? resolveTree(TREE_INDEX[playerClass], storedTreeIds).points : 0), [playerClass, storedTreeIds]);
+  const classTreeState = useMemo(() => (playerClass ? treeStateFor(playerClass, treeIds) : null), [playerClass, treeIds]);
   const treePoints = useMemo(() => (playerClass ? resolveTree(TREE_INDEX[playerClass], treeIds).points : 0), [playerClass, treeIds]);
   const damageTreeSettings = useMemo(
     () => ({ selected: treeIds, toggles: (treeEffects[playerClass] || {}).toggles || {}, sliders: (treeEffects[playerClass] || {}).sliders || {} }),
@@ -13478,7 +13509,8 @@ export default function BuildRecommender() {
                 playerClass={playerClass}
                 level={effectiveLevel}
                 rank={rank}
-                selected={treeSelections[playerClass] || []}
+                selected={treeIds}
+                fullPoints={storedTreePoints}
                 onChange={(ids) => {
                   setTreeSelections((current) => ({ ...current, [playerClass]: ids }));
                   // ręczna zmiana drzewka = "własne drzewko" (archetyp do przewodnika i Build info zostaje w `archetype`)
