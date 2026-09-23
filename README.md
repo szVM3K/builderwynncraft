@@ -30,6 +30,7 @@ the two numbers that disagree), written to `test-results/`.
 npm install          # once (installs vitest)
 npm test             # matrix (5 classes × 3 archetypes × levels 30/50/70/90/100) + skill point solver, ~15-40 min
 npm run test:sp      # skill point solver only: 20,000 random item sets, a few seconds
+npm run test:wynnbuilder  # "Open in Wynnbuilder" links: 10 builds encoded and decoded back, ~1 min
 npm run test:matrix  # the matrix only
 npm run test:soak    # endless random scenarios in parallel shards until Ctrl+C
 ```
@@ -74,7 +75,9 @@ npm run update-items             # latest Wynnbuilder data
 npm run update-items -- 2.2.4.0  # a specific version
 ```
 
-The script rewrites `src/wynncraft-items.json`, keeping Wynnbuilder's data layout.
+The script rewrites `src/wynncraft-items.json`, keeping Wynnbuilder's data layout, and
+`src/wynnbuilder-ids.json` (Wynnbuilder's item numbers, the data version number and the link encoding constants of
+that version, used by "Open in Wynnbuilder").
 
 Ability-tree node effects (bonuses, toggles, sliders, spells) for a new data version:
 
@@ -131,7 +134,8 @@ The generator asks *what is the strongest build that still survives and still pa
    it into the mana filter (and loads that archetype's tree). Before a class is chosen the page shows the five
    class portraits to pick from.
 2. **Rank** and **level**, then an **ability tree** preset (or your own tree from the Ability tree tab).
-3. **Maximise**: the main attack or one spell from the tree. That single number is what the search maximises.
+3. **Maximise**: the main attack or one spell from the tree - or several at once (click more tiles in the setup
+   guide, or tap the spell chips under the Maximise list in the left panel - each tap adds or removes one): then the search maximises their sum (one cast of each; the main attack counts its damage per second).
 4. **Must have** (pass/fail, never weights):
    - **Effective HP** – a slider in 5% steps of the most EHP your level can reach (`src/ehp-range.json`).
    - **Life sustain > 0** (optional) – Health Regen per second (raw × (1 + %), ÷ 4 s) plus Life Steal (÷ 3 s)
@@ -151,16 +155,64 @@ The generator asks *what is the strongest build that still survives and still pa
    - *Pin items · rarities · budget* (folded): pin an item to its slot (the rest is fitted around it), allowed
      rarities, and the emerald budget when prices are available.
 
+**Setup guide**: after picking a class the main panel walks through the rest the same way - big clickable tiles for
+the rank, the level, the ability tree (an archetype, or **Your own tree**: it opens the Ability tree tab, where a
+"Back to the setup guide" button returns with the tree you clicked together), what to maximise (one or several spells) (every spell of the tree and the main attack,
+with its damage using the best weapon for your level), how tanky (Glass cannon 0% … Wall 70% of the reachable EHP,
+with the numbers), the mana cycle (clicks per second 2-8 and Mana Steal / ability mana on or off; presets: no filter,
+the archetype's suggested cycles, a "spam" loop for every damage spell of the tree and - folded - the cycles of the
+class's other archetypes; or **Your own cycle**: type the spell numbers or click the spells to add them, with the
+steps and the Mana Regen / Mana Steal it needs shown live) and extras (life sustain, event items, tradeable only, negative defences, weapon attack speed), then a
+summary with Generate. A row of steps on top shows what is chosen and jumps back to any step; the left panel shows
+the same settings. On a phone the guide comes before the form.
+
+**List of builds** (under the Effective HP slider, after a build is generated): one build for every step of the
+slider, 0% to 100%, as `(25%)  9,540 / 9,380 EHP  33,205` - the build's EHP, the minimum of that step and the goal's
+damage, in columns so the numbers line up. The rows are computed in the background with a quick version of the
+search (no +20% EHP beam, no beams for other spells, fewer candidates polished; about 2-4 s per step at level
+100); a build that already passes the next step is also the answer for it and isn't searched twice, a build found for
+a higher step that deals more replaces the lower steps' builds (so the list only goes down), and once a step finds
+nothing that passes, the higher ones are marked as not reached. The step you generated shows the full
+search result. Clicking a row shows that build and moves the slider there.
+
+**Open in Wynnbuilder ↗** (under the item cards) opens the same build in wynnbuilder.github.io/builder in a new tab:
+the 9 items, the weapon powders, the skill points (including the free ones you get as (+X)), the level and your
+ability tree; tick "With the recommended tomes and aspects" to add what the Tomes and Aspects tabs pick (level 60+).
+**Copy link** copies the same link. The link uses Wynnbuilder's own binary format (`ENCODING.md` in their
+repository, V12): items by Wynnbuilder's item numbers, skill points as the totals in its Strength…Agility fields.
+Checked by opening generated links in Wynnbuilder's builder page: items, powders, skill points (all assigned, 0
+left), level, tomes, aspects and ability tree load as in the app.
+
+**Why this build?** (large button under the item cards) opens a window that explains the result with the numbers
+behind it: what was asked (goal and filters), the goal's value with its damage split by element and why that
+element (the weapon's base damage and powders decide it; masteries only multiply what is there), the skill point
+bonuses and item totals that multiply it, the Effective HP, mana and life sustain formulas with this build's
+values, and for every slot what the build loses without the item, the strongest item that would deal more and
+which filter it breaks, and the next best item that passes. It ends with how the search was done.
+
 **How the search works.** Everything is evaluated with the same damage and EHP formulas as the summary (checked
 against `computeBuildStats`). The search is a beam over the whole database, one weapon at a time (candidates per
 slot are pre-scored with numeric stat weights derived from your goal, then the best few get the exact evaluation
 with skill points), run twice: once at your EHP and once at +20% EHP, because a set that passes a higher threshold
-also passes yours and the "tankier" beam finds other combinations. The best set of *every* weapon is kept, all of
-them get a short polish, the best six a full one, and the winner then gets single swaps against every item of
-every slot, weapon swaps (every top weapon with its best powder) and **pair swaps** (two slots at once). Builds
-found earlier in the same session with the same settings (only the EHP threshold differs) are fed back in as
-starting points, so dragging the EHP slider never loses a better build you already found. A progress bar shows
-the stage; a search takes about 5-10 s at level 100+.
+also passes yours and the "tankier" beam finds other combinations. Short extra beams are then steered by the
+damage of the tree's **other** spells (two best weapons each), because a set built for Uproot is sometimes stronger
+in Blood Sorrow than the set built for Blood Sorrow itself - the linear weights of one goal on an empty set don't
+always predict what pays off. All candidates then compete on your goal: the best set of *every* weapon gets a
+short polish, the best six a full one, and the winner gets single swaps against every item of every slot, weapon
+swaps and **pair swaps** (two slots at once).
+
+The last step is an **exact check**: skill points in the game's equip order (the search uses a faster
+approximation), every item of every slot and every weapon of the class with every powder element, until no single
+swap improves the result. **Free skill points** are spent here too: when the set needs fewer points than your level
+gives, the rest go where they raise the goal most (first where they get the build over the EHP / mana / sustain
+filters). The Skill points panel and the summary show them in brackets: `Strength 46 (+12)`, `Skill points 146 (+12) / 158`.
+**Spend free skill points** (Items, on by default) turns this off - the rest then stays unspent, as in a fresh
+Wynnbuilder build.
+
+Every build of the class generated in the same session (any goal, EHP threshold, cycle, level or filters) is fed
+into the next search as a starting point and re-checked against the current filters, so switching spells or
+dragging the EHP slider never loses a better build you already found. A progress bar shows the stage; a search
+takes about 8-13 s at level 100+.
 
 - **Guide builds at level 100+**: from level 100 the generator treats the Wynnbuilder guide builds as the
   reference for that class — at high level nothing in the database beats them. Their weapons join the weapon list
@@ -391,7 +443,8 @@ tomes need level 60, so one threshold covers both tabs.
   secret exists).
 - `src/ability-trees.json`: the ability trees (from Wynnbuilder's atree.json for 2.2.4.0), the AP-per-level table
   and the node effects (`effects`, `props`, `base`) from the same file.
-- `scripts/update-items.mjs`: downloads and trims `items.json` from the Wynnbuilder repository.
+- `scripts/update-items.mjs`: downloads and trims `items.json` from the Wynnbuilder repository and writes
+  `src/wynnbuilder-ids.json` for the Wynnbuilder links.
 - `scripts/update-tree-effects.mjs`: adds node effects from `atree.json` to `src/ability-trees.json`.
 - `scripts/update-item-weights.mjs`: downloads the Wynnpool weights and translates them to the app's keys.
 - Item and tree data come from the Wynnbuilder project (github.com/wynnbuilder/wynnbuilder.github.io, GPL-3.0).

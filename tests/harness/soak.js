@@ -32,7 +32,7 @@ function randomScenario(seed) {
     archetype,
     level,
     apLoan: r.pick([0, 0, 2, 4]),
-    goal: r.chance(0.6) ? "first" : "random",
+    goal: r.chance(0.5) ? "first" : r.chance(0.6) ? "random" : "multi",
     ehpPct: r.pick([0, 5, 10, 15, 20, 25, 30, 35, 40]),
     cycle: r.pick(["none", "first", "random"]),
     cps: r.pick([1.5, 2, 2.5, 3, 4]),

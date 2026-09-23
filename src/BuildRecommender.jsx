@@ -9,6 +9,7 @@ import WYNNPOOL_DATA from "./item-weights.json";
 import { CLASS_PORTRAITS, ITEM_SHEET, ITEM_SHEET_ORDER } from "./game-icons.js";
 import EVENT_ITEMS from "./event-items.json";
 import TOMES_ASPECTS from "./tomes-aspects.json";
+import WB_IDS from "./wynnbuilder-ids.json";
 
 /*
  * Wynncraft Build Recommender (MVP)
@@ -1902,7 +1903,7 @@ function goalStats(ctx, items, weapon, skillTotals) {
 }
 
 // Obrażenia celu, EHP i bilans many dla jednego zestawu przedmiotów.
-function evaluateGoal(ctx, items, weapon, skillTotals, goal, cycle) {
+function evaluateGoal(ctx, items, weapon, skillTotals, goal, cycle, altGoals = null) {
   const { stats, scaled, spellKey } = goalStats(ctx, items, weapon, skillTotals);
   const hp = Math.max(5, statValue(stats, "hp") + statValue(stats, "hpBonus"));
   const defPct = skillPercent(statValue(stats, "def")) * SKILL_DAMAGE_MULT.def;
@@ -1925,25 +1926,30 @@ function evaluateGoal(ctx, items, weapon, skillTotals, goal, cycle) {
   // Poison dochodzi do celu obrażeń (nie leczenia): main attack to DPS, więc + poison na sekundę; czar to obrażenia
   // jednego rzutu, więc + poison na sekundę rozłożony na rzuty (kliknięcia/s ÷ 3, jak "spam" w Spell DPS).
   result.poisonDps = poisonDpsOf(statValue(stats, "poison"));
-  if (goal === DAMAGE_GOAL_MAIN) {
-    const melee = spells.has(0) ? evaluateSpell(spells.get(0), stats, weapon, hp) : null;
-    const hit = melee && melee.main && melee.main.type === "damage" ? melee.main.amount : 0;
-    result.damage = hit * HITS_PER_SECOND[attackSpeedAfterTier(weapon, statValue(stats, "atkTier"))];
-    result.goalName = melee ? melee.name : "Main attack";
-    result.hit = hit;
-    if (hit > 0) result.damage += result.poisonDps;
-  } else {
-    const spell = spells.get(goal);
-    if (spell) {
-      const evaluated = evaluateSpell(spell, stats, weapon, hp);
-      result.damage = evaluated.main && evaluated.main.type === "damage" ? evaluated.main.amount : evaluated.main && evaluated.main.type === "heal" ? evaluated.main.amount : 0;
-      result.goalName = evaluated.name;
-      result.hit = result.damage;
-      if (evaluated.main && evaluated.main.type === "damage" && result.damage > 0) {
-        result.damage += result.poisonDps / (Math.max(0.1, (cycle && cycle.cps) || SPELL_CLICKS_PER_SECOND) / 3);
-      }
+  const goalDamage = (goalId) => {
+    if (goalId === DAMAGE_GOAL_MAIN) {
+      const melee = spells.has(0) ? evaluateSpell(spells.get(0), stats, weapon, hp) : null;
+      const hit = melee && melee.main && melee.main.type === "damage" ? melee.main.amount : 0;
+      const damage = hit * HITS_PER_SECOND[attackSpeedAfterTier(weapon, statValue(stats, "atkTier"))];
+      return { damage: hit > 0 ? damage + result.poisonDps : damage, name: melee ? melee.name : "Main attack", hit };
     }
-  }
+    const spell = spells.get(goalId);
+    if (!spell) return { damage: 0, name: "", hit: 0 };
+    const evaluated = evaluateSpell(spell, stats, weapon, hp);
+    let damage = evaluated.main && evaluated.main.type === "damage" ? evaluated.main.amount : evaluated.main && evaluated.main.type === "heal" ? evaluated.main.amount : 0;
+    const hit = damage;
+    if (evaluated.main && evaluated.main.type === "damage" && damage > 0) damage += result.poisonDps / (Math.max(0.1, (cycle && cycle.cps) || SPELL_CLICKS_PER_SECOND) / 3);
+    return { damage, name: evaluated.name, hit };
+  };
+  // kilka celów naraz (np. Uproot + Blood Sorrow): suma obrażeń jednego rzutu każdego z nich
+  const own = Array.isArray(goal)
+    ? goal.map(goalDamage).reduce((sum, entry) => ({ damage: sum.damage + entry.damage, name: sum.name ? `${sum.name} + ${entry.name}` : entry.name, hit: sum.hit + entry.hit }), { damage: 0, name: "", hit: 0 })
+    : goalDamage(goal);
+  result.damage = own.damage;
+  result.goalName = own.name;
+  result.hit = own.hit;
+  // obrażenia pozostałych celów tego samego zestawu (generator trzyma w wiązce linie dobre pod inne czary)
+  if (altGoals && altGoals.length > 0) result.alt = altGoals.map((id) => goalDamage(id).damage);
   // Mana: ten sam rachunek co Spell cycle calculator (koszt cyklu na sekundę vs regen + steal + mana z umiejętności).
   const ids = cycle && cycle.ids && cycle.ids.length > 0 ? cycle.ids : [];
   result.manaIncome = (statValue(stats, "mr") + BASE_MANA_REGEN) / 5 + (cycle && cycle.steal ? statValue(stats, "ms") / 3 : 0);
@@ -2008,7 +2014,7 @@ function proxyScore(item, weights) {
   return value;
 }
 
-const DAMAGE_BEAM = { weaponsTried: 14, weapons: 5, perSlot: 18, cheapPerSlot: 10, extraPerSlot: 6, beam: 22, exactPerState: 6, polishPool: 24, pureDamage: 6, pureEhp: 5, pureMana: 3, finalists: 6, ladder: [1.2], pairPool: 8, weaponSwap: 16, quick: 40 };
+const DAMAGE_BEAM = { altGoals: 2, altWeapons: 2, weaponsTried: 14, weapons: 5, perSlot: 18, cheapPerSlot: 10, extraPerSlot: 6, beam: 22, exactPerState: 6, polishPool: 24, pureDamage: 6, pureEhp: 5, pureMana: 3, finalists: 6, ladder: [1.2], pairPool: 8, weaponSwap: 16, quick: 24 };
 
 // Najlepsze `count` elementów według `score` (każdy element oceniany raz, nie przy każdym porównaniu sortowania).
 function topBy(list, score, count) {
@@ -2022,6 +2028,39 @@ function topBy(list, score, count) {
 // Przybliżone życie z przedmiotu (Health Regen co 4 s + Life Steal co 3 s) - tylko do wyboru kandydatów.
 function sustainProxy(item) {
   return (item.ids.hprRaw || 0) / 4 + (item.ids.ls || 0) / 3;
+}
+
+// Wolne Skill Pointy: poziom daje więcej punktów, niż zestaw wymaga (np. 200 przy 186 potrzebnych). W grze gracz
+// i tak je gdzieś wyda, więc generator wydaje je tam, gdzie najbardziej podnoszą cel - zachłannie, kawałkami
+// (1/4 pozostałych naraz), najpierw tak, żeby zestaw przeszedł progi (DEF/AGI podnoszą EHP, INT obniża koszt
+// czarów), potem pod obrażenia. Punkty tylko dodają, więc przydział nigdy nie psuje wymagań przedmiotów.
+// rank(metrics) porównuje wyniki (większy = lepszy); zwraca dodatkowe punkty i metryki z nimi.
+function allocateFreeSkillPoints(ctx, items, weapon, sp, goal, cycle, rank, altGoals = null) {
+  const extra = { str: 0, dex: 0, int: 0, def: 0, agi: 0 };
+  const evalWith = (bonus) => evaluateGoal(ctx, items, weapon, Object.fromEntries(SKILLS.map((skill) => [skill, (sp.totals[skill] || 0) + bonus[skill]])), goal, cycle, altGoals);
+  let current = evalWith(extra);
+  let left = ctx.available - sp.total;
+  if (left <= 0 || sp.capOverflow > 0) return { extra, metrics: current, spent: 0 };
+  let currentRank = rank(current);
+  while (left > 0) {
+    const chunk = Math.max(1, Math.ceil(left / 4));
+    let step = null;
+    SKILLS.forEach((skill) => {
+      const room = MAX_ASSIGNED_PER_SKILL - (sp.assigned[skill] || 0) - extra[skill];
+      const amount = Math.min(chunk, room, left);
+      if (amount <= 0) return;
+      const trial = { ...extra, [skill]: extra[skill] + amount };
+      const metrics = evalWith(trial);
+      const value = rank(metrics);
+      if (!step || value > step.value) step = { skill, amount, metrics, value };
+    });
+    if (!step || step.value <= currentRank + 1e-9) break;
+    extra[step.skill] += step.amount;
+    left -= step.amount;
+    current = step.metrics;
+    currentRank = step.value;
+  }
+  return { extra, metrics: current, spent: SKILLS.reduce((sum, skill) => sum + extra[skill], 0) };
 }
 
 // Główna funkcja: build o największych obrażeniach celu, który przechodzi twarde filtry EHP i many.
@@ -2042,7 +2081,10 @@ function yieldToBrowser() {
   });
 }
 
-async function generateDamageBuild({ playerClass, level, archetype = null, treeSettings, goal, cycle, minEhp = 0, requireSustain = false, options = DEFAULT_OPTIONS, items = ITEM_DB, powders = "auto", objective = "damage", onProgress = null, seeds = [], excludeEvents = true, tradeableOnly = false }) {
+async function generateDamageBuild({ playerClass, level, archetype = null, treeSettings, goal, cycle, minEhp = 0, requireSustain = false, options = DEFAULT_OPTIONS, items = ITEM_DB, powders = "auto", objective = "damage", onProgress = null, seeds = [], excludeEvents = true, tradeableOnly = false, effort = "full", spendFreeSkillPoints = true }) {
+  // effort "quick" (lista buildów dla każdego progu EHP): bez wiązki z zapasem EHP i wiązek pod inne czary,
+  // mniej kandydatów do dopieszczania - ok. 2-3 razy szybciej, wynik zwykle o kilka procent słabszy.
+  const quickEffort = effort === "quick";
   // Postęp dla interfejsu: bez onProgress (testy, skrypty) nie ma żadnych przerw.
   const pause = async (label, fraction) => {
     if (!onProgress) return;
@@ -2126,10 +2168,17 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
   const powderElements = powders === "none" ? [null] : ELEMENTS.includes(powders) || isPowderMix(powders) ? [powders] : [null, ...ELEMENTS];
   const cycleCfg = { ids: (cycle && cycle.ids) || [], cps: (cycle && cycle.cps) || SPELL_CLICKS_PER_SECOND, steal: cycle ? cycle.steal !== false : true, gain: cycle ? cycle.gain !== false : true };
   const gearSlots = SEARCH_ORDER.filter((id) => id !== "weapon");
+  // Pozostałe cele drzewka (inne czary, main attack). Ich liniowe wagi dokładają kandydatów do wiązki i do
+  // dopieszczania: zestaw zbudowany "pod Uproot" bywał mocniejszy w Blood Sorrow niż zestaw zbudowany pod sam
+  // Blood Sorrow (testy: do +15-29%), bo liniowe wagi celu przy pustym zestawie źle przewidują, co się opłaci.
+  const altGoals = objective === "damage" ? damageGoalOptions(playerClass, level, treeSettings, items).map((entry) => entry.id).filter((id) => (Array.isArray(goal) ? !goal.includes(id) : id !== goal)).slice(0, DAMAGE_BEAM.altGoals) : [];
+
   // objective "ehp" służy do policzenia, ile EHP da się osiągnąć (zakres suwaka) i jako drugi przebieg, gdy
   // pierwszy (obrażenia) nie trafi w progi: wtedy najpierw szukamy czegokolwiek, co je spełnia.
   let phase = objective;
-  const objectiveOf = (metrics) => (phase === "ehp" ? metrics.ehp : metrics.damage);
+  // phase: "damage" (cel), "ehp" (sam EHP) albo numer w altGoals - przebieg wiązki prowadzony obrażeniami innego celu
+  const objectiveOf = (metrics) => (phase === "ehp" ? metrics.ehp : typeof phase === "number" ? (metrics.alt ? metrics.alt[phase] : 0) : metrics.damage);
+  const phaseGoal = () => (typeof phase === "number" ? altGoals[phase] : goal);
 
   // Ten sam zestaw (ta sama broń z tymi samymi powderami + te same przedmioty w dowolnej kolejności) ocenia się
   // w wiązce, dopieszczaniu i podmianach wiele razy - wynik trzymamy w pamięci podręcznej na czas jednego szukania.
@@ -2144,7 +2193,8 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
         byWeapon = new Map();
         evalCache.set(weapon, byWeapon);
       }
-      key = items2.map((item) => item.name).sort().join("|");
+      // obrażenia innych celów liczymy tylko w wiązkach "pod inny czar" (osobny wpis w pamięci podręcznej)
+      key = (typeof phase === "number" ? "alt|" : "") + items2.map((item) => item.name).sort().join("|");
       const hit = byWeapon.get(key);
       if (hit) return hit;
     }
@@ -2152,7 +2202,7 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
     const sp = computeSkillPoints(all);
     const sets = activeSets(all);
     const illegal = sets.some((entry) => entry.illegal);
-    const metrics = evaluateGoal(ctx, all, weapon, sp.totals, goal, cycleCfg);
+    const metrics = evaluateGoal(ctx, all, weapon, sp.totals, goal, cycleCfg, typeof phase === "number" ? altGoals : null);
     delete metrics.stats;
     metrics.sp = sp;
     metrics.spOver = Math.max(0, sp.total - ctx.available) + sp.capOverflow + (illegal ? ILLEGAL_SET_OVERFLOW : 0);
@@ -2197,7 +2247,8 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
   // po pierwszym slocie zapełnia się samymi przedmiotami obronnymi i gubi linie na obrażenia, które dobrałyby
   // obronę w kolejnych slotach - stąd brały się skoki w rodzaju "wyższy próg EHP = wyższe obrażenia".
   let progress = 1;
-  const value = (metrics) => {
+  const value = (metrics) => objectiveOf(metrics) * penaltyOf(metrics);
+  function penaltyOf(metrics) {
     let factor = Math.exp(-metrics.spOver / 6);
     const power = 1 + 2 * progress;
     if (phase !== "ehp" && ehpTarget > 0) {
@@ -2211,8 +2262,8 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
       if (share < progress) factor *= Math.pow(Math.max(0.02, share / progress), power);
     }
     if (budget && metrics.cost > budget) factor *= Math.pow(budget / metrics.cost, 2);
-    return objectiveOf(metrics) * factor;
-  };
+    return factor;
+  }
 
   // Krok 1: broń. Dokładne obrażenia celu z pustym zestawem; najlepsze dostają jeszcze próbę powderów.
   const runPhase = async (label = "Searching", from = 0, to = 1) => {
@@ -2229,9 +2280,10 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
     if (best) weapons.push(best);
   });
   weapons.sort((a, b) => objectiveOf(b.metrics) - objectiveOf(a.metrics));
-  const weaponList = weapons.slice(0, DAMAGE_BEAM.weapons).map((entry) => entry.item);
+  const altPhase = typeof phase === "number";
+  const weaponList = weapons.slice(0, altPhase ? DAMAGE_BEAM.altWeapons : DAMAGE_BEAM.weapons).map((entry) => entry.item);
   // bronie z poradnika dochodzą zawsze (z najlepszym dla celu żywiołem powderów)
-  [...(guideItemsBySlot.weapon || [])].forEach((item) => {
+  [...(altPhase ? [] : guideItemsBySlot.weapon || [])].forEach((item) => {
     let bestWeapon = null;
     powderElements.forEach((element) => {
       const powdered = element ? powderedWeapon(item, element) : item;
@@ -2262,7 +2314,7 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
   for (const [weaponIndex, weapon] of weaponList.entries()) {
     await pause(`${label}: ${weapon.name}`, from + ((to - from) * weaponIndex) / weaponList.length);
     const weaponSp = computeSkillPoints([weapon]);
-    const weights = goalStatWeights(ctx, [], weapon, weaponSp.totals, goal, cycleCfg);
+    const weights = goalStatWeights(ctx, [], weapon, weaponSp.totals, phaseGoal(), cycleCfg);
     // Kandydaci na slot: najlepsi liniowo, najlepsi "obrażenia na punkt umiejętności" oraz - gdy są progi -
     // najlepsi pod EHP i manę.
     const candidates = {};
@@ -2347,7 +2399,7 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
   // Krok 2b: druga wiązka z zapasem EHP (+20%). Zestaw, który przechodzi wyższy próg, przechodzi też niższy, a wiązka
   // prowadzona od początku "bardziej obronnie" trafia w inne kombinacje - bez tego zdarzało się, że wyższy próg dawał
   // większe obrażenia niż niższy (np. 35% EHP > 30%), czyli przy niższym progu gubiliśmy lepszy zestaw.
-  if (objective === "damage" && minEhp > 0) {
+  if (objective === "damage" && minEhp > 0 && !quickEffort) {
     for (const [index, margin] of DAMAGE_BEAM.ladder.entries()) {
       ehpTarget = minEhp * margin;
       const span = 0.29 / DAMAGE_BEAM.ladder.length;
@@ -2355,6 +2407,18 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
       finalists = [...finalists, ...stricter];
     }
     ehpTarget = minEhp;
+  }
+  // Krok 2c: krótkie wiązki prowadzone obrażeniami INNYCH celów drzewka (2 najlepsze bronie pod każdy z nich).
+  // Zestaw zbudowany "pod Uproot" bywał mocniejszy w Blood Sorrow niż zestaw zbudowany pod sam Blood Sorrow
+  // (testy portfelowe: +2-29%), bo liniowe wagi celu przy pustym zestawie źle przewidują, co się opłaci.
+  // Kandydaci z tych wiązek konkurują dalej obrażeniami właściwego celu.
+  if (objective === "damage" && !quickEffort) {
+    for (const [index] of altGoals.entries()) {
+      phase = index;
+      const around = await runPhase("Searching around other spells", 0.62, 0.66);
+      phase = "damage";
+      finalists = [...finalists, ...around];
+    }
   }
   finalists.forEach((candidate) => {
     candidate.ok = feasible(candidate.metrics);
@@ -2381,6 +2445,11 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
     if (!base) return;
     const picks = {};
     gearSlots.forEach((slotId) => {
+      // przypięty przedmiot zawsze na swoim miejscu, także w zestawach z historii
+      if (lockedSlot(slotId)) {
+        picks[slotId] = bySlot[slotId][0];
+        return;
+      }
       const wanted = seed.picks && seed.picks[slotId];
       const item = wanted ? bySlot[slotId].find((entry) => entry.name === wanted.name) : null;
       if (item) picks[slotId] = item;
@@ -2553,7 +2622,7 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
     return true;
   });
   // na krótkie dopieszczanie idzie najwyżej DAMAGE_BEAM.quick kandydatur (przechodzące progi pierwsze, potem wartość)
-  const shortlist = [...unique].sort((a, b) => (a.ok !== b.ok ? (a.ok ? -1 : 1) : value(b.metrics) - value(a.metrics))).slice(0, DAMAGE_BEAM.quick);
+  const shortlist = [...unique].sort((a, b) => (a.ok !== b.ok ? (a.ok ? -1 : 1) : value(b.metrics) - value(a.metrics))).slice(0, quickEffort ? 12 : DAMAGE_BEAM.quick);
   const quick = [];
   for (const [index, candidate] of shortlist.entries()) {
     await pause("Polishing candidates", 0.7 + (0.15 * index) / shortlist.length);
@@ -2561,7 +2630,7 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
   }
   const ranked = [...quick].sort((a, b) => (better(a, b) ? -1 : better(b, a) ? 1 : 0));
   const runnersUp = [...quick];
-  for (const candidate of ranked.slice(0, DAMAGE_BEAM.finalists)) {
+  for (const candidate of ranked.slice(0, quickEffort ? 2 : DAMAGE_BEAM.finalists)) {
     await pause("Polishing the best candidates", 0.86);
     const polished = polish(candidate, shortPools(candidate), 4);
     runnersUp.push(polished);
@@ -2579,7 +2648,7 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
     // Krok 4: podmiany PAR slotów. Pojedyncza podmiana nie znajdzie ruchów w rodzaju "mocniejszy hełm, ale wtedy
     // trzeba oddać Skill Pointy / EHP innym przedmiotem" - para robi obie rzeczy naraz. Pula na slot: najlepsi pod
     // obrażenia, EHP, manę i życie według wag tego zestawu.
-    for (let round = 0; round < 2; round += 1) {
+    for (let round = 0; round < (quickEffort ? 1 : 2); round += 1) {
       await pause("Trying weapon and pair swaps", 0.94 + round * 0.03);
       const swapped = weaponClimb(best);
       const paired = pairClimb(swapped);
@@ -2607,11 +2676,124 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
     const fallback = runnersUp.filter((candidate) => candidate.ok && candidate !== best).sort((a, b) => objectiveOf(b.metrics) - objectiveOf(a.metrics)).find(exactPass);
     if (fallback) best = fallback;
   }
+
+  // Krok 5: ostateczna kontrola DOKŁADNA - Skill Pointy w kolejności zakładania z gry (a nie przybliżone),
+  // wolne punkty wydane pod cel, każdy przedmiot z bazy w każdym slocie i każda broń klasy z każdym żywiołem
+  // powderów. Wynik to zestaw, którego nie poprawia żadna pojedyncza podmiana (to samo sprawdzają testy QA).
+  const exactCache = new Map();
+  const exactOk = (metrics) =>
+    metrics.spOver === 0 &&
+    (minEhp <= 0 || metrics.ehp >= minEhp) &&
+    sustainOk(metrics) &&
+    (cycleCfg.ids.length === 0 || (metrics.cycleOk && metrics.manaNet >= 0)) &&
+    (!budget || metrics.cost <= budget);
+  const exactRank = (metrics) => (exactOk(metrics) ? 1e15 + metrics.damage : -shortfall(metrics));
+  // bar: obecnie najlepszy wynik; wolne punkty rozdzielamy tylko kandydatom, którzy mają szansę go pobić
+  // (przydział to kilkadziesiąt ocen, a pełna kontrola ocenia tysiące kandydatów)
+  // perPoint: względny zysk celu z jednego wolnego punktu (górne oszacowanie z pierwszych 5 punktów najlepszej
+  // umiejętności obecnego zestawu). Kandydat z mniejszymi wymaganiami ma więcej wolnych punktów, więc jego szansę
+  // liczymy z liczby JEGO wolnych punktów, a nie z zysku obecnego zestawu.
+  let perPoint = 0;
+  const potential = (damage, spTotal) => damage * (1 + perPoint * Math.max(0, ctx.available - spTotal)) * 1.02;
+  const evaluateExact = (items2, weapon, bar = null) => {
+    const key = `${weapon.name}${weapon.powders ? `+${weapon.powders.element}` : ""}|${items2.map((item) => item.name).sort().join("|")}`;
+    const cached = exactCache.get(key);
+    if (cached && (cached.allocated || bar === null || !cached.canAllocate || potential(cached.damage, cached.sp.total) < bar)) return cached;
+    const all = [...items2, weapon];
+    const sp = computeSkillPoints(all, true);
+    const illegal = activeSets(all).some((entry) => entry.illegal);
+    const spOver = Math.max(0, sp.total - ctx.available) + sp.capOverflow + (illegal ? ILLEGAL_SET_OVERFLOW : 0);
+    const cost = budget ? buildCost(all, lockedNames).total : 0;
+    const wrap = (metrics, extra, allocated, canAllocate) => {
+      const out = { ...metrics, sp, spOver, cost, extra, allocated, canAllocate };
+      delete out.stats;
+      return out;
+    };
+    // spendFreeSkillPoints false (opcja "Spend free skill points" wyłączona): wolne punkty zostają niewydane
+    const plain = cached || wrap(evaluateGoal(ctx, all, weapon, sp.totals, goal, cycleCfg), null, false, spendFreeSkillPoints && spOver === 0 && sp.total < ctx.available);
+    let metrics = plain;
+    // wolne punkty potrafią też naprawić progi (INT tanieje czary, DEF/AGI podnoszą EHP), więc nie odrzucamy
+    // kandydata za braki - tylko za to, że nawet z wolnymi punktami nie pobije obecnego wyniku
+    const worthIt = plain.canAllocate && (bar === null || potential(plain.damage, sp.total) >= bar);
+    if (worthIt) {
+      const allocated = allocateFreeSkillPoints(ctx, all, weapon, sp, goal, cycleCfg, (m) => exactRank({ ...m, spOver: 0, cost }));
+      metrics = allocated.spent > 0 ? wrap(allocated.metrics, allocated.extra, true, true) : { ...plain, allocated: true };
+    }
+    if (exactCache.size > 60000) exactCache.clear();
+    exactCache.set(key, metrics);
+    return metrics;
+  };
+  const exactBetter = (metrics, current) => exactRank(metrics) > exactRank(current) + 1e-6;
+  if (best) {
+    let current = { ...best, metrics: evaluateExact(best.items, best.weapon) };
+    {
+      const all = [...best.items, best.weapon];
+      const sp = computeSkillPoints(all, true);
+      const plain = evaluateGoal(ctx, all, best.weapon, sp.totals, goal, cycleCfg);
+      if (plain.damage > 0 && spendFreeSkillPoints)
+        SKILLS.forEach((skill) => {
+          const bumped = evaluateGoal(ctx, all, best.weapon, { ...sp.totals, [skill]: (sp.totals[skill] || 0) + 5 }, goal, cycleCfg);
+          perPoint = Math.max(perPoint, (bumped.damage / plain.damage - 1) / 5);
+        });
+    }
+    const scoredWeapons = bySlot.weapon.map((item) => ({ item }));
+    // każda broń klasy (z każdym żywiołem powderów): szybka ocena odsiewa te bez szans, więc to tanie
+    const weaponBasesFor = () => scoredWeapons.map((entry) => entry.item);
+    // kandydat, który w szybkiej ocenie (bez wolnych punktów) nie ma szans nawet z wolnymi punktami, odpada od razu
+    const promising = (fast) => {
+      if (exactOk(current.metrics)) return potential(fast.damage, fast.sp.total) >= current.metrics.damage;
+      return true;
+    };
+    // aż żadna pojedyncza podmiana nie poprawia wyniku (każda zmiana może otworzyć nową w innym slocie)
+    for (let round = 0; round < (quickEffort ? 2 : 5); round += 1) {
+      await pause("Exact check: every item, every powder", 0.97 + Math.min(round, 2) * 0.01);
+      let improved = false;
+      gearSlots.forEach((slotId) => {
+        [...emptyOption(slotId), ...bySlot[slotId]].forEach((item) => {
+          if (item === current.picks[slotId] || (!item && !current.picks[slotId])) return;
+          const picks2 = { ...current.picks };
+          if (item) picks2[slotId] = item;
+          else delete picks2[slotId];
+          if (item && ringsClash(Object.fromEntries(Object.entries(current.picks).map(([id, pick]) => [id, { item: pick }])), slotId, item)) return;
+          const items2 = Object.values(picks2);
+          if (!promising(evaluate(items2, current.weapon))) return;
+          const metrics = evaluateExact(items2, current.weapon, exactOk(current.metrics) ? current.metrics.damage : null);
+          if (exactBetter(metrics, current.metrics)) {
+            current = { ...current, picks: picks2, items: items2, metrics };
+            improved = true;
+          }
+        });
+      });
+      weaponBasesFor().forEach((base) => {
+        powderElements.forEach((element) => {
+          const weapon = element ? powderedWeapon(base, element) : base;
+          if (weapon.name === current.weapon.name && (weapon.powders ? weapon.powders.element : null) === (current.weapon.powders ? current.weapon.powders.element : null)) return;
+          if (!promising(evaluate(current.items, weapon))) return;
+          const metrics = evaluateExact(current.items, weapon, exactOk(current.metrics) ? current.metrics.damage : null);
+          if (exactBetter(metrics, current.metrics)) {
+            current = { ...current, weapon, metrics };
+            improved = true;
+          }
+        });
+      });
+      if (!improved) break;
+    }
+    best = { ...current, ok: exactOk(current.metrics) };
+  }
   const picks = { ...best.picks, weapon: best.weapon };
   const allItems = Object.values(picks).filter(Boolean);
   const exactSp = computeSkillPoints(allItems, true);
-  const finalMetrics = evaluateGoal(ctx, allItems, best.weapon, exactSp.totals, goal, cycleCfg);
-  const spValid = exactSp.total <= ctx.available && exactSp.capOverflow === 0;
+  // wolne punkty z kroku 5 wchodzą do przydziału (pokazujemy je w panelu Skill Points jak w grze)
+  const freeExtra = (best.metrics && best.metrics.extra) || null;
+  const assignedSp = { ...exactSp.assigned };
+  const totalsSp = { ...exactSp.totals };
+  if (freeExtra) SKILLS.forEach((skill) => {
+    assignedSp[skill] += freeExtra[skill];
+    totalsSp[skill] += freeExtra[skill];
+  });
+  const spentSp = SKILLS.reduce((sum, skill) => sum + assignedSp[skill], 0);
+  const finalMetrics = evaluateGoal(ctx, allItems, best.weapon, totalsSp, goal, cycleCfg);
+  const spValid = spentSp <= ctx.available && exactSp.capOverflow === 0 && SKILLS.every((skill) => assignedSp[skill] <= MAX_ASSIGNED_PER_SKILL);
   const passed =
     spValid &&
     (minEhp <= 0 || finalMetrics.ehp >= minEhp) &&
@@ -2635,10 +2817,12 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
   const slotScore = (slotId) => {
     const without = allItems.filter((item) => item !== picks[slotId]);
     const sp = computeSkillPoints(without);
-    return finalMetrics.damage - evaluateGoal(ctx, without, best.weapon, sp.totals, goal, cycleCfg).damage;
+    const totals = freeExtra ? Object.fromEntries(SKILLS.map((skill) => [skill, (sp.totals[skill] || 0) + freeExtra[skill]])) : sp.totals;
+    return finalMetrics.damage - evaluateGoal(ctx, without, best.weapon, totals, goal, cycleCfg).damage;
   };
   return {
     mode: "damage",
+    effort,
     level,
     playerClass,
     // archetyp trzymamy tylko po to, żeby wspólne panele (Other picks, Build info, zakładki) miały czego użyć
@@ -2664,6 +2848,7 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
       requireSustain,
       excludeEvents,
       tradeableOnly,
+      spendFreeSkillPoints,
       minEhp,
       cycle: cycleCfg,
     },
@@ -2675,7 +2860,7 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
       const item = picks[slot.id] || null;
       return { ...slot, item, score: item ? (slot.id === "weapon" ? finalMetrics.damage : slotScore(slot.id)) : 0, contributions: [] };
     }),
-    skillPoints: { available: ctx.available, assigned: exactSp.assigned, totals: exactSp.totals, required: exactSp.total, remaining: ctx.available - exactSp.total, valid: spValid },
+    skillPoints: { available: ctx.available, assigned: assignedSp, totals: totalsSp, required: spentSp, minimum: exactSp.total, free: freeExtra, remaining: ctx.available - spentSp, valid: spValid },
     totals: itemStatTotals(allItems),
     guide: { level: GUIDE_LEVEL, sets: guideSets.length, used: allItems.filter((item) => guideNames.has(item.name)).length, from: best && best.guide ? best.guide : null },
     stats: { eligible: eligible.length, database: items.length, weapons: bySlot.weapon.length, ms: Math.round((typeof performance !== "undefined" ? performance.now() : 0) - started) },
@@ -2866,7 +3051,7 @@ function treeFocus(playerClass, treeSettings, goal, cycle) {
   });
   const mainArchetype = Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0] || null;
   // "Gorące" węzły: zdolność celu i czary z cyklu (węzeł zaklęcia i wszystkie jego ulepszenia).
-  const spellIds = new Set([goal, ...((cycle && cycle.ids) || [])].filter((id) => id !== null && id !== undefined));
+  const spellIds = new Set([...(Array.isArray(goal) ? goal : [goal]), ...((cycle && cycle.ids) || [])].filter((id) => id !== null && id !== undefined));
   const hot = new Set();
   nodes.forEach((node) => {
     const castsSpell = (node.effects || []).some((effect) => effect.type === "replace_spell" && spellIds.has(effect.base_spell));
@@ -3387,6 +3572,7 @@ select.mc-input option{background:#000;color:#fff}
 .wbr-welcome-source{padding-left:14px;position:relative}
 .wbr-welcome-source::before{content:"";position:absolute;left:0;top:.55em;width:6px;height:6px;background:#FFAA00;box-shadow:1px 1px 0 #000}
 .wbr-welcome-foot{border-top:3px solid #000;box-shadow:inset 0 2px 0 #3a3644;background:#0f0d14}
+.wbr-mc .wbr-why-btn{font-size:20px;font-weight:700;padding:14px 18px;letter-spacing:.02em;text-shadow:2px 2px 0 rgba(0,0,0,.55)}
 .wbr-welcome-btn{min-width:13rem;font-size:18px;padding:12px 18px;text-shadow:2px 2px 0 rgba(0,0,0,.6)}
 .wbr-mc .wbr-welcome .wbr-welcome-btn.mc-btn:disabled{background:#2c2a33;color:#b8b4c4;box-shadow:inset 2px 2px 0 #45414f,inset -2px -2px 0 #16141b}
 .wbr-mc .wbr-welcome .wbr-welcome-btn.mc-btn:disabled::before{content:"";position:absolute;left:0;top:0;bottom:0;width:var(--wbr-progress,0%);background:rgba(63,125,44,.55);transition:width .2s linear}
@@ -3395,6 +3581,27 @@ select.mc-input option{background:#000;color:#fff}
 .wbr-mc[data-theme=light] .wbr-welcome-backdrop{background:rgba(12,10,18,.7)}
 .wbr-mc[data-theme=light] .wbr-welcome .mc-btn-primary:not(:disabled){color:#fff}
 @media (prefers-reduced-motion:reduce){.wbr-welcome-btn:not(:disabled){animation:none}.wbr-welcome-btn:disabled::before{transition:none}}
+.wbr-mc .wbr-tile{cursor:pointer;transition:transform .12s ease-out,border-color .12s,background .12s;border-width:2px}
+.wbr-mc .wbr-tile:hover:not(:disabled){transform:translateY(-2px);border-color:#FFAA00 #7a5a10 #7a5a10 #FFAA00;background:#1b1622}
+.wbr-mc .wbr-tile:focus-visible{outline:2px solid #fff;outline-offset:1px}
+.wbr-mc .wbr-tile-on,.wbr-mc .wbr-tile-on:hover:not(:disabled){border-color:#FFAA00;background:#2a2112;box-shadow:0 0 0 1px #000,0 0 12px rgba(255,170,0,.25)}
+.wbr-mc .wbr-step{display:inline-flex;align-items:center;gap:6px;font-family:inherit;font-size:13px;line-height:1;padding:5px 8px 5px 5px;color:#aaa;background:#16131b;border:2px solid #000;box-shadow:inset 1px 1px 0 #3a3644;cursor:pointer}
+.wbr-mc .wbr-step:disabled{opacity:.45;cursor:default}
+.wbr-mc .wbr-step:hover:not(:disabled){color:#FFFFA0}
+.wbr-mc .wbr-step-num{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 3px;font-weight:700;color:#101228;background:#6c6c6c;text-shadow:none}
+.wbr-mc .wbr-step-done .wbr-step-num{background:#55FF55}
+.wbr-mc .wbr-step-done{color:#e0e0e0}
+.wbr-mc .wbr-step-on{color:#FFAA00;border-color:#FFAA00}
+.wbr-mc .wbr-step-on .wbr-step-num{background:#FFAA00}
+.wbr-mc .wbr-step-value{color:#8c8c8c;font-size:12px;max-width:9em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wbr-mc[data-theme=light] .wbr-tile.wbr-tile:hover:not(:disabled){background:#F4EEDD;border-color:#B8860B #E6D6A8 #E6D6A8 #B8860B}
+.wbr-mc[data-theme=light] .wbr-tile.wbr-tile-on,.wbr-mc[data-theme=light] .wbr-tile.wbr-tile-on:hover:not(:disabled){background:#FBEFCF;border-color:#B8860B;box-shadow:0 0 0 1px #3A3644,0 0 10px rgba(184,134,11,.35)}
+.wbr-mc[data-theme=light] .wbr-step{color:#46434F;background:#E4E1EA;border-color:#6E6A78;box-shadow:inset 1px 1px 0 #fff}
+.wbr-mc[data-theme=light] .wbr-step-done{color:#23212B}
+.wbr-mc[data-theme=light] .wbr-step-done .wbr-step-num{background:#2F8F2F;color:#fff}
+.wbr-mc[data-theme=light] .wbr-step-on{color:#854A00;border-color:#B8860B}
+.wbr-mc[data-theme=light] .wbr-step-on .wbr-step-num{background:#D98A00;color:#fff}
+.wbr-mc[data-theme=light] .wbr-step-value{color:#6E6A78}
 @media (prefers-reduced-motion:reduce){.wbr-drop,.wbr-pop,.wbr-backdrop,.wbr-hero-kicker,.wbr-hero-portraits img{animation:none}.wbr-tab{transition:none}}
 .wbr-mc .atree-wrap{container-type:inline-size}
 .wbr-mc .atree{--cell:min(40px,10cqw);display:grid;grid-template-columns:repeat(9,var(--cell));grid-auto-rows:var(--cell);width:max-content;margin:0 auto;padding:calc(var(--cell) * .5)}
@@ -5742,31 +5949,46 @@ function SkillPointPanel({ skillPoints }) {
       </div>
       <div>
         <div className="flex items-baseline justify-between text-sm">
-          <span className="text-zinc-400">Assigned to meet requirements</span>
+          <span className="text-zinc-400" title={skillPoints.free ? "Points for the items' requirements (+ free points spent where they add most)" : undefined}>{skillPoints.free ? "Assigned" : "Assigned to meet requirements"}</span>
           <span className="tabular-nums text-zinc-100">
-            {skillPoints.required} / {skillPoints.available}
+            {skillPoints.free && SKILLS.some((skill) => skillPoints.free[skill] > 0) ? (
+              <>
+                {skillPoints.minimum} <span style={ts({ color: "#55FF55" })}>(+{skillPoints.required - skillPoints.minimum})</span> / {skillPoints.available}
+              </>
+            ) : (
+              `${skillPoints.required} / ${skillPoints.available}`
+            )}
           </span>
         </div>
         <div className="mc-bar mt-1">
           <div className="mc-bar-fill" style={ts({ width: `${usedPct}%`, background: skillPoints.valid ? "#7FE828" : "#FF5555" })} />
         </div>
-        <p className="mt-1 text-xs text-zinc-500" title="Free points you can put into your archetype's skills.">
-          {skillPoints.remaining} free points.
-        </p>
+        {skillPoints.free && SKILLS.some((skill) => skillPoints.free[skill] > 0) ? (
+          <p className="mt-1 text-xs" style={ts({ color: "#55FF55" })} title={`The set itself needs ${skillPoints.minimum}; the rest went where it raises the goal most (or first where it gets the build over the EHP / mana / sustain filters).`}>
+            Free points spent: {SKILLS.filter((skill) => skillPoints.free[skill] > 0).map((skill) => `(+${skillPoints.free[skill]}) ${SKILL_STYLE[skill].short}`).join(", ")}
+            {skillPoints.remaining > 0 ? ` · ${skillPoints.remaining} left (no gain)` : ""}
+          </p>
+        ) : (
+          <p className="mt-1 text-xs text-zinc-500" title="Free points you can put into your archetype's skills.">
+            {skillPoints.remaining} free points.
+          </p>
+        )}
       </div>
       <ul className="flex flex-col gap-2">
         {SKILLS.map((skill) => {
           const assigned = skillPoints.assigned[skill];
+          const free = (skillPoints.free && skillPoints.free[skill]) || 0;
           return (
             <li key={skill} className="grid grid-cols-12 items-center gap-2 text-xs">
               <span className="col-span-4 truncate" style={ts({ color: SKILL_STYLE[skill].color })}>
                 {SKILL_STYLE[skill].symbol} {SKILL_LABELS[skill]}
               </span>
-              <div className="mc-bar col-span-4">
+              <div className="mc-bar col-span-3">
                 <div className="mc-bar-fill" style={ts({ width: `${Math.min(100, assigned)}%`, background: SKILL_STYLE[skill].color })} />
               </div>
-              <span className="col-span-2 text-right tabular-nums text-zinc-200" title="Points you assign">
-                {assigned}
+              <span className="col-span-3 whitespace-nowrap text-right tabular-nums text-zinc-200" title={free ? `${assigned - free} for the items' requirements + ${free} free points spent here` : "Points you assign"}>
+                {assigned - free}
+                {free > 0 && <span style={ts({ color: "#55FF55" })}> (+{free})</span>}
               </span>
               <span className="col-span-2 text-right tabular-nums text-zinc-500" title="Total with item bonuses">
                 {skillPoints.totals[skill]}
@@ -7253,11 +7475,12 @@ function toggleValue(list, value) {
   return list.includes(value) ? list.filter((entry) => entry !== value) : [...list, value];
 }
 
-function ToggleChip({ pressed, onClick, color, children }) {
+function ToggleChip({ pressed, onClick, color, children, title = undefined }) {
   return (
     <button
       type="button"
       aria-pressed={pressed}
+      title={title}
       onClick={onClick}
       className={`mc-btn mc-btn-sm ${pressed ? "mc-btn-on" : ""}`}
       style={ts(color ? { color } : pressed ? { color: "#FFAA00" } : undefined)}
@@ -7586,7 +7809,23 @@ function reachableEhp(playerClass, level) {
   return table[Math.min(table.length - 1, Math.max(0, Math.round(level) - 1))] || 1000;
 }
 
-const DEFAULT_DAMAGE_FORM = { preset: "", goal: null, minEhp: null, cycle: "", cps: 3, steal: true, gain: true, sustain: false, noEvents: true, tradeable: false };
+// Cel z formularza: jedno id (czar / main attack) albo tablica kilku id - wtedy maksymalizujemy sumę obrażeń
+// jednego rzutu każdego z nich (w kolejności listy celów).
+function resolveGoal(goals, formGoal) {
+  if (Array.isArray(formGoal)) {
+    const chosen = goals.filter((entry) => formGoal.some((id) => String(id) === String(entry.id)));
+    if (chosen.length >= 2)
+      return { id: chosen.map((entry) => entry.id), name: chosen.map((entry) => entry.name).join(" + "), damage: chosen.reduce((sum, entry) => sum + entry.damage, 0), cost: null, kind: "multi", parts: chosen };
+    if (chosen.length === 1) return chosen[0];
+    return goals[0] || null;
+  }
+  return goals.find((entry) => String(entry.id) === String(formGoal)) || goals[0] || null;
+}
+function goalKey(goal) {
+  return Array.isArray(goal) ? goal.join("+") : String(goal);
+}
+
+const DEFAULT_DAMAGE_FORM = { preset: "", goal: null, minEhp: null, cycle: "", cps: 3, steal: true, gain: true, sustain: false, noEvents: true, tradeable: false, freeSp: true };
 
 // Suwak EHP chodzi co 5% tego, co da się osiągnąć na danym poziomie; domyślnie 25%.
 function ehpStep(ehpMax) {
@@ -7624,10 +7863,16 @@ function DamageForm({
   options,
   onOptions,
   onBrowse,
+  sweep = null,
+  sweepOpen = false,
+  onSweepToggle = null,
+  onSweepPick = null,
+  shownBuild = null,
 }) {
   const classConfig = playerClass ? CLASSES[playerClass] : null;
   const set = (patch) => onForm({ ...form, ...patch });
-  const goal = goals.find((entry) => String(entry.id) === String(form.goal)) || goals[0] || null;
+  const goal = resolveGoal(goals, form.goal);
+  const goalIds = goal ? (Array.isArray(goal.id) ? goal.id : [goal.id]) : [];
   const cycleIds = [...String(form.cycle || "")].filter((digit) => "1234".includes(digit)).map(Number);
   const minEhp = form.minEhp === null || form.minEhp === undefined ? defaultMinEhp(ehpMax) : Math.min(form.minEhp, ehpMax);
   const ready = Boolean(playerClass && level && treeIds.length > 0 && goal);
@@ -7638,6 +7883,9 @@ function DamageForm({
   const hint = "text-xs text-zinc-500";
   // pole "cps" trzyma tekst, żeby dało się je wyczyścić i wpisać nową liczbę (wartość przyjmujemy, gdy ma sens)
   const [cpsText, setCpsText] = useState(String(form.cps));
+  useEffect(() => {
+    setCpsText((text) => (Number(String(text).replace(",", ".")) === form.cps ? text : String(form.cps)));
+  }, [form.cps]);
   useEffect(() => {
     setCpsText((text) => (Number(text.replace(",", ".")) === form.cps ? text : String(form.cps)));
   }, [form.cps]);
@@ -7723,7 +7971,8 @@ function DamageForm({
           <label htmlFor="new-goal" className={label}>
             Maximise
           </label>
-          <select id="new-goal" value={goal ? String(goal.id) : ""} onChange={(event) => set({ goal: event.target.value === DAMAGE_GOAL_MAIN ? DAMAGE_GOAL_MAIN : Number(event.target.value) })} className="mc-input w-full">
+          <select id="new-goal" value={goal ? (goal.kind === "multi" ? "multi" : String(goal.id)) : ""} onChange={(event) => event.target.value !== "multi" && set({ goal: event.target.value === DAMAGE_GOAL_MAIN ? DAMAGE_GOAL_MAIN : Number(event.target.value) })} className="mc-input w-full">
+            {goal && goal.kind === "multi" && <option value="multi">{goal.name} (sum)</option>}
             {goals.map((entry) => (
               <option key={entry.id} value={String(entry.id)}>
                 {entry.name}
@@ -7731,8 +7980,28 @@ function DamageForm({
               </option>
             ))}
           </select>
+          <div className="flex flex-wrap gap-1" role="group" aria-label="Spells to maximise together">
+            {goals.map((entry) => {
+              const on = goalIds.some((id) => String(id) === String(entry.id));
+              return (
+                <ToggleChip
+                  key={String(entry.id)}
+                  pressed={on}
+                  title={on ? (goalIds.length > 1 ? `Take ${entry.name} out of the sum` : "At least one has to stay") : `Add ${entry.name} to the sum`}
+                  onClick={() => {
+                    // zaznacz / odznacz; kilka zaznaczonych = maksymalizujemy sumę (jedno rzucenie każdego)
+                    const ids = on ? goalIds.filter((id) => String(id) !== String(entry.id)) : [...goalIds, entry.id];
+                    if (ids.length === 0) return;
+                    set({ goal: ids.length === 1 ? ids[0] : ids });
+                  }}
+                >
+                  {entry.name}
+                </ToggleChip>
+              );
+            })}
+          </div>
           <p className={hint} title="Every build is compared by this number, computed with your tree, powders and skill points.">
-            {goal ? (goal.kind === "melee" ? "Main attack damage per second." : `One hit of ${goal.name}.`) : ""}
+            {goal ? (goal.kind === "melee" ? "Main attack damage per second." : goal.kind === "multi" ? `Sum of one cast of ${goal.name}.` : `One hit of ${goal.name}.`) : ""} Tap several to maximise their sum.
           </p>
         </div>
       )}
@@ -7750,6 +8019,14 @@ function DamageForm({
               </span>
             </div>
             <McRange id="new-ehp" min={0} max={ehpMax} step={step} value={minEhp} accent="#55FF55" onChange={(event) => set({ minEhp: Number(event.target.value) })} className="w-full" />
+            {sweep && (
+              <div className="flex flex-col gap-1">
+                <button type="button" className="mc-link self-start text-xs" aria-expanded={sweepOpen} onClick={onSweepToggle}>
+                  {sweepOpen ? "▾ List of builds" : "▸ List of builds (expand)"}
+                </button>
+                {sweepOpen && <EhpSweepList sweep={sweep} shownBuild={shownBuild} onPick={onSweepPick} />}
+              </div>
+            )}
           </div>
           <label className="flex items-center gap-2 text-xs text-zinc-200" title="Health Regen (per 4 s) plus Life Steal (per 3 s) must add up to more than zero per second. Builds that drain your health are thrown away.">
             <input id="new-sustain" type="checkbox" className="mc-check" checked={Boolean(form.sustain)} onChange={() => set({ sustain: !form.sustain })} /> Life sustain &gt; 0 <span className="text-zinc-500">· regen + steal</span>
@@ -7818,6 +8095,9 @@ function DamageForm({
           </label>
           <label className="flex items-center gap-2 text-xs text-zinc-200" title="Only items that can be bought and sold on the Trade Market: no untradable or quest items. Pinned items stay.">
             <input id="new-tradeable" type="checkbox" className="mc-check" checked={Boolean(form.tradeable)} onChange={() => set({ tradeable: !form.tradeable })} /> Tradeable only <span className="text-zinc-500">· Trade Market</span>
+          </label>
+          <label className="flex items-center gap-2 text-xs text-zinc-200" title="When the set needs fewer skill points than your level gives, spend the rest where they raise the goal most (or first where they get the build over the filters). Off: the rest stays unspent, like a fresh build in Wynnbuilder.">
+            <input id="new-free-sp" type="checkbox" className="mc-check" checked={form.freeSp !== false} onChange={() => set({ freeSp: form.freeSp === false })} /> Spend free skill points <span className="text-zinc-500">· shown as (+X)</span>
           </label>
           <div className="mt-2">
             <ItemFilters options={options} onChange={onOptions} weaponType={classConfig ? classConfig.weapon : null} level={level || 120} onBrowse={onBrowse} />
@@ -7904,6 +8184,501 @@ function CycleSteps({ cycle, playerClass, spells = [], names = null, compact = f
 }
 
 // Ekran startowy: pięć klas z portretami - klik wybiera klasę (to samo co lista w formularzu).
+// ============================ KREATOR PIERWSZEGO BUILDU ============================
+// Po wyborze klasy główny panel prowadzi krok po kroku, tak jak wybór klasy: każda opcja to kafelek do kliknięcia
+// (ranga, poziom, drzewko, cel, próg EHP, cykl many, dodatki), a na końcu podsumowanie i Generate. Formularz po
+// lewej pokazuje te same ustawienia, więc można przełączać się między nimi w dowolnym momencie.
+const WIZARD_LEVELS = [20, 30, 40, 50, 60, 70, 80, 90, 100, 105, 110, 120];
+const WIZARD_EHP = [
+  { pct: 0, label: "Glass cannon", hint: "No minimum - pure damage" },
+  { pct: 10, label: "Fragile", hint: "A little safety" },
+  { pct: 20, label: "Light", hint: "Some survivability" },
+  { pct: 25, label: "Balanced", hint: "The default" },
+  { pct: 35, label: "Sturdy", hint: "Noticeably tankier" },
+  { pct: 50, label: "Tank", hint: "Half of the most EHP you can reach" },
+  { pct: 70, label: "Wall", hint: "Survival first" },
+];
+const WIZARD_STEPS = [
+  { id: "class", label: "Class" },
+  { id: "rank", label: "Rank" },
+  { id: "level", label: "Level" },
+  { id: "tree", label: "Ability tree" },
+  { id: "goal", label: "Maximise" },
+  { id: "ehp", label: "Effective HP" },
+  { id: "mana", label: "Mana" },
+  { id: "extras", label: "Extras" },
+  { id: "generate", label: "Generate" },
+];
+
+const WIZARD_CPS = [2, 3, 4, 5, 6, 8];
+
+function WizardTile({ selected = false, onClick, children, className = "", title = undefined, disabled = false }) {
+  return (
+    <button type="button" onClick={onClick} disabled={disabled} title={title} aria-pressed={selected} className={`wbr-tile mc-slot flex flex-col items-center gap-1 p-3 text-center ${selected ? "wbr-tile-on" : ""} ${className}`}>
+      {children}
+    </button>
+  );
+}
+
+function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, level, levelInput, onLevelInput, treeIds, apCap, preset, onPreset, onEditTree, goals, goal, form, onForm, ehpMax, options, onOptions, onGenerate, running, progress, treeSettings }) {
+  const ts = useTs();
+  const classConfig = CLASSES[playerClass];
+  const firstOpen = !rankConfirmed ? "rank" : !level ? "level" : treeIds.length === 0 ? "tree" : null;
+  const [view, setView] = useState(null);
+  const active = view || firstOpen || "goal";
+  const order = WIZARD_STEPS.map((entry) => entry.id);
+  const next = (from) => setView(order[Math.min(order.length - 1, order.indexOf(from) + 1)]);
+  const set = (patch) => onForm((current) => ({ ...current, ...patch }));
+  const step = ehpStep(ehpMax);
+  const minEhp = form.minEhp === null || form.minEhp === undefined ? defaultMinEhp(ehpMax) : Math.min(form.minEhp, ehpMax);
+  const cycleDigits = [...String(form.cycle || "")].filter((digit) => "1234".includes(digit));
+  const preview = useMemo(() => (level && treeIds.length > 0 ? classPreview(playerClass, level, treeSettings) : null), [playerClass, level, treeIds, treeSettings]);
+  const spells = preview ? preview.stats.spells : [];
+  const combos = preset && ARCHETYPE_COMBOS[preset] ? ARCHETYPE_COMBOS[preset].combos : [];
+  const [customCycle, setCustomCycle] = useState(() => [...String(form.cycle || "")].filter((digit) => "1234".includes(digit)).join(""));
+  const cycleOf = (text) => [...String(text || "")].filter((char) => "1234".includes(char)).join("");
+  const cyclePresets = (() => {
+    const list = combos.filter((entry) => /[1-4]/.test(entry.cycle)).map((entry) => ({ ...entry, source: null }));
+    const seen = new Set(list.map((entry) => cycleOf(entry.cycle)));
+    spells
+      .filter((spell) => spell.id >= 1 && spell.id <= 4 && spell.cost !== null && spell.cost !== undefined && spell.main && spell.main.type === "damage")
+      .forEach((spell) => {
+        const cycle = String(spell.id).repeat(3);
+        if (seen.has(cycle) || seen.has(String(spell.id))) return;
+        seen.add(cycle);
+        list.push({ name: `${spell.name} spam`, cycle, note: `Only ${spell.name}, cast again and again.`, source: null });
+      });
+    return list;
+  })();
+  const otherCyclePresets = classConfig.archetypes
+    .filter((arch) => arch !== preset && ARCHETYPE_COMBOS[arch])
+    .flatMap((arch) => ARCHETYPE_COMBOS[arch].combos.filter((entry) => /[1-4]/.test(entry.cycle)).map((entry) => ({ ...entry, source: arch })));
+  const customMana = customCycle ? cycleMana(spells, [...customCycle].map(Number), form.cps, form.gain) : null;
+  const customSelected = cycleDigits.length > 0 && cycleDigits.join("") === customCycle && ![...cyclePresets, ...otherCyclePresets].some((entry) => cycleOf(entry.cycle) === customCycle);
+  const renderCyclePreset = (entry) => {
+    const digits = [...entry.cycle].filter((char) => "1234".includes(char)).map(Number);
+    const mana = cycleMana(spells, digits, form.cps, form.gain);
+    return (
+      <WizardTile
+        key={`${entry.source || ""}:${entry.name}`}
+        selected={cycleDigits.join("") === digits.join("")}
+        onClick={() => {
+          set({ cycle: digits.join("") });
+          setCustomCycle(digits.join(""));
+          next("mana");
+        }}
+        className="items-start text-left"
+        title={entry.note}
+      >
+        <span className="text-base font-bold text-zinc-100">
+          {entry.name}
+          {entry.source && <span className="ml-1.5 text-xs font-normal text-zinc-500">{entry.source}</span>}
+        </span>
+        <CycleSteps cycle={entry.cycle} playerClass={playerClass} spells={spells} compact />
+        <span className="text-xs text-zinc-500">
+          {mana ? `${mana.used.toFixed(1)} mana/s at ${form.cps} clicks/s · items must give ${mana.fromItems.toFixed(1)}/s ≈ ${Math.ceil(mana.regen)} Mana Regen or ${Math.ceil(mana.steal)} Mana Steal` : "Some of these spells aren't in your tree yet."}
+        </span>
+      </WizardTile>
+    );
+  };
+  const selectedGoals = goal ? (Array.isArray(goal.id) ? goal.id : [goal.id]) : [];
+  const normalized = normalizeOptions(options);
+  const reachable = (index) => {
+    const id = order[index];
+    if (id === "class" || id === "rank") return true;
+    if (id === "level") return rankConfirmed;
+    if (id === "tree") return rankConfirmed && Boolean(level);
+    return rankConfirmed && Boolean(level) && treeIds.length > 0;
+  };
+  const summary = {
+    class: playerClass,
+    rank: rankConfirmed ? (RANKS.find((entry) => entry.id === rank) || RANKS[0]).label : null,
+    level: level ? `Lv ${level}` : null,
+    tree: treeIds.length > 0 ? preset || "own tree" : null,
+    goal: goal ? goal.name : null,
+    ehp: treeIds.length > 0 ? `${Math.round((minEhp / Math.max(1, ehpMax)) * 100)}%` : null,
+    mana: treeIds.length > 0 ? (cycleDigits.length ? `${cycleDigits.join("")} · ${form.cps} cps` : "off") : null,
+    extras: treeIds.length > 0 ? [form.sustain ? "sustain" : null, form.noEvents !== false ? "no events" : null, form.tradeable ? "tradeable" : null, normalized.avoidNegativeDefences ? "no -def" : null].filter(Boolean).join(", ") || "none" : null,
+    generate: null,
+  };
+  const heading = {
+    rank: ["Your rank", "Higher ranks lend ability points earlier (VIP+ 2 AP, HERO and above 4 AP)."],
+    level: ["Your level", "Items above it are left out; skill points and ability points come from it."],
+    tree: ["Ability tree", `Pick an archetype - it loads a suggested tree for ${apCap} AP. You can edit it in the Ability tree tab.`],
+    goal: ["What to maximise", "One spell (one cast, crits included), the main attack (damage per second) - or click several to maximise their sum. Numbers: with the best weapon for your level alone."],
+    ehp: ["How tanky", `Minimum effective HP, as a share of the most your level can reach (${formatNumber(ehpMax)}). Builds below it are thrown away.`],
+    mana: ["Mana: spell cycle", "The spells you cast in a loop must pay for themselves (Mana Regen, Mana Steal, ability mana). Pick a preset or type your own."],
+    extras: ["Extras", "Optional filters - click to toggle."],
+    generate: ["Ready", "The search takes about 5-13 s. You can change anything later in the panel on the left."],
+  }[active] || ["", ""];
+
+  return (
+    <section className="mc-panel wbr-fade flex flex-col gap-4 p-5">
+      <ol className="flex flex-wrap gap-1.5" aria-label="Setup steps">
+        {WIZARD_STEPS.map((entry, index) => {
+          const done = Boolean(summary[entry.id]);
+          const current = entry.id === active;
+          const can = reachable(index);
+          return (
+            <li key={entry.id}>
+              <button
+                type="button"
+                disabled={!can}
+                onClick={() => (entry.id === "class" ? onClassReset() : setView(entry.id))}
+                className={`wbr-step ${current ? "wbr-step-on" : done ? "wbr-step-done" : ""}`}
+                title={summary[entry.id] ? `${entry.label}: ${summary[entry.id]}` : entry.label}
+              >
+                <span className="wbr-step-num">{done && !current ? "✓" : index + 1}</span>
+                {entry.label}
+                {summary[entry.id] && <span className="wbr-step-value">{summary[entry.id]}</span>}
+              </button>
+            </li>
+          );
+        })}
+      </ol>
+
+      <div className="flex flex-col gap-1">
+        <h2 className="mc-title text-xl">{heading[0]}</h2>
+        <p className="text-sm text-zinc-300">{heading[1]}</p>
+      </div>
+
+      {active === "rank" && (
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+          {RANKS.map((entry) => (
+            <WizardTile
+              key={entry.id}
+              selected={rankConfirmed && rank === entry.id}
+              onClick={() => {
+                onRank({ target: { value: entry.id } });
+                next("rank");
+              }}
+            >
+              <span className="text-lg font-bold text-zinc-100">{entry.label}</span>
+              <span className="text-xs text-zinc-400">{entry.loan ? `+${entry.loan} ability points` : "no AP loan"}</span>
+            </WizardTile>
+          ))}
+        </div>
+      )}
+
+      {active === "level" && (
+        <div className="flex flex-col gap-3">
+          <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 xl:grid-cols-6">
+            {WIZARD_LEVELS.map((value) => (
+              <WizardTile
+                key={value}
+                selected={level === value}
+                onClick={() => {
+                  onLevelInput({ target: { value: String(value) } });
+                  next("level");
+                }}
+              >
+                <span className="text-xl font-bold text-zinc-100">{value}</span>
+                <span className="text-xs text-zinc-500">{availableSkillPoints(value)} SP</span>
+              </WizardTile>
+            ))}
+          </div>
+          <label className="flex items-center gap-2 text-sm text-zinc-300">
+            Other level
+            <input
+              type="number"
+              min={1}
+              max={120}
+              value={levelInput}
+              onChange={(event) => {
+                // Zostań na kroku poziomu podczas pisania: "7" to już poprawny poziom, więc bez tego kreator
+                // przeskakiwał do drzewka po pierwszej cyfrze "76". Dalej tylko Enter albo "Next".
+                setView("level");
+                onLevelInput(event);
+              }}
+              onKeyDown={(event) => event.key === "Enter" && level && next("level")}
+              placeholder="1-120"
+              className="mc-input w-24 tabular-nums"
+            />
+            {level && !WIZARD_LEVELS.includes(level) && (
+              <button type="button" className="mc-btn mc-btn-sm" onClick={() => next("level")}>
+                Next ›
+              </button>
+            )}
+          </label>
+        </div>
+      )}
+
+      {active === "tree" && (
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          {classConfig.archetypes.map((arch) => (
+            <WizardTile
+              key={arch}
+              selected={preset === arch && treeIds.length > 0}
+              onClick={() => {
+                onPreset(arch);
+                next("tree");
+              }}
+              title={ARCHETYPES[arch] ? ARCHETYPES[arch].focus : undefined}
+            >
+              {CLASS_PORTRAITS[playerClass] && <img src={CLASS_PORTRAITS[playerClass]} alt="" width={34} height={48} />}
+              <span className="text-lg font-bold text-zinc-100">{arch}</span>
+              <span className="text-xs text-zinc-400">{ARCHETYPE_TAGLINES[arch] || ""}</span>
+              <span className="text-xs text-zinc-500">{ARCHETYPES[arch] ? ARCHETYPES[arch].focus : ""}</span>
+            </WizardTile>
+          ))}
+          <WizardTile
+            selected={treeIds.length > 0 && !preset}
+            onClick={onEditTree}
+            title="Pick the abilities yourself in the Ability tree tab (or paste a Wynnbuilder tree code there), then come back to this tab"
+          >
+            <span className="text-2xl" aria-hidden="true">
+              ❋
+            </span>
+            <span className="text-lg font-bold text-zinc-100">Your own tree</span>
+            <span className="text-xs text-zinc-400">Custom - pick abilities yourself</span>
+            <span className="text-xs text-zinc-500">{treeIds.length > 0 && !preset ? `${treeIds.length} abilities chosen` : "Opens the Ability tree tab; your tree is used as soon as you come back"}</span>
+          </WizardTile>
+          {treeIds.length > 0 && !preset && (
+            <button type="button" className="mc-btn mc-btn-primary self-center sm:col-span-2 xl:col-span-4" onClick={() => next("tree")}>
+              Continue with my tree ›
+            </button>
+          )}
+        </div>
+      )}
+
+      {active === "goal" && (
+        <div className="flex flex-col gap-3">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-4">
+          {goals.map((entry, index) => (
+            <WizardTile
+              key={String(entry.id)}
+              selected={selectedGoals.some((id) => String(id) === String(entry.id))}
+              onClick={() => {
+                // kliknięcie zaznacza / odznacza; kilka zaznaczonych = maksymalizujemy ich sumę
+                const on = selectedGoals.some((id) => String(id) === String(entry.id));
+                const ids = on ? selectedGoals.filter((id) => String(id) !== String(entry.id)) : [...selectedGoals, entry.id];
+                if (ids.length === 0) return;
+                set({ goal: ids.length === 1 ? ids[0] : ids });
+              }}
+            >
+              <span className="text-base font-bold text-zinc-100">{entry.name}</span>
+              <span className="text-sm tabular-nums" style={ts({ color: "#FFAA00" })}>
+                ≈ {formatNumber(Math.round(entry.damage))}
+                {entry.kind === "melee" ? " /s" : ""}
+              </span>
+              <span className="text-xs text-zinc-500">
+                {entry.kind === "melee" ? "main attack DPS" : entry.cost !== null && entry.cost !== undefined ? `${entry.cost.toFixed(0)} mana` : "spell"}
+                {index === 0 ? " · strongest" : ""}
+              </span>
+            </WizardTile>
+          ))}
+        </div>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-sm text-zinc-400">
+              {selectedGoals.length > 1 ? (
+                <>
+                  Maximising the sum of <b className="mc-gold">{goal ? goal.name : ""}</b> (one cast of each).
+                </>
+              ) : (
+                "Click more spells to maximise several at once (their sum)."
+              )}
+            </span>
+            <button type="button" className="mc-btn mc-btn-primary" onClick={() => next("goal")}>
+              Next ›
+            </button>
+          </div>
+        </div>
+      )}
+
+      {active === "ehp" && (
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 xl:grid-cols-7">
+          {WIZARD_EHP.map((entry) => {
+            const value = step * Math.round(entry.pct / 5);
+            return (
+              <WizardTile
+                key={entry.pct}
+                selected={Math.round(minEhp) === Math.round(value)}
+                onClick={() => {
+                  set({ minEhp: value });
+                  next("ehp");
+                }}
+                title={entry.hint}
+              >
+                <span className="text-base font-bold text-zinc-100">{entry.label}</span>
+                <span className="text-sm tabular-nums" style={ts({ color: "#55FF55" })}>
+                  {entry.pct === 0 ? "any" : `≥ ${formatNumber(value)}`}
+                </span>
+                <span className="text-xs text-zinc-500">{entry.pct}% EHP</span>
+              </WizardTile>
+            );
+          })}
+        </div>
+      )}
+
+      {active === "mana" && (
+        <div className="flex flex-col gap-4">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+            <span className="text-sm text-zinc-300">Clicks per second</span>
+            <div className="flex flex-wrap gap-1.5">
+              {WIZARD_CPS.map((value) => (
+                <WizardTile key={value} selected={form.cps === value} onClick={() => set({ cps: value })} className="min-w-[2.75rem] px-2 py-1" title={`${value} clicks/s = one spell every ${(3 / value).toFixed(2)} s`}>
+                  <span className="text-sm font-bold text-zinc-100">{value}</span>
+                </WizardTile>
+              ))}
+            </div>
+            <label className="flex items-center gap-1.5 text-xs text-zinc-200">
+              <input type="checkbox" className="mc-check" checked={form.steal} onChange={() => set({ steal: !form.steal })} /> Mana Steal
+            </label>
+            <label className="flex items-center gap-1.5 text-xs text-zinc-200">
+              <input type="checkbox" className="mc-check" checked={form.gain} onChange={() => set({ gain: !form.gain })} /> Mana from abilities
+            </label>
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <span className="text-sm text-zinc-300">{preset && combos.length > 0 ? `Presets for ${preset}` : "Presets"}</span>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <WizardTile
+                selected={cycleDigits.length === 0}
+                onClick={() => {
+                  set({ cycle: "" });
+                  next("mana");
+                }}
+                className="items-start text-left"
+              >
+                <span className="text-base font-bold text-zinc-100">No mana filter</span>
+                <span className="text-xs text-zinc-500">Any build, whether or not it can keep casting.</span>
+              </WizardTile>
+              {cyclePresets.map(renderCyclePreset)}
+            </div>
+          </div>
+
+          {otherCyclePresets.length > 0 && (
+            <details className="flex flex-col gap-1.5">
+              <summary className="mc-link cursor-pointer text-sm">Presets from other {playerClass} archetypes ({otherCyclePresets.length})</summary>
+              <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2">{otherCyclePresets.map(renderCyclePreset)}</div>
+            </details>
+          )}
+
+          <div className={`mc-slot flex flex-col gap-2 p-3 ${customSelected ? "wbr-tile-on" : ""}`}>
+            <span className="text-base font-bold text-zinc-100">Your own cycle</span>
+            <span className="text-xs text-zinc-500">Type the spell numbers in the order you cast them (e.g. 1213), or click the spells below.</span>
+            <div className="flex items-center gap-1.5">
+              <input
+                id="wizard-cycle"
+                value={customCycle}
+                onChange={(event) => setCustomCycle(event.target.value.replace(/[^1-4]/g, "").slice(0, 16))}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && customCycle) {
+                    set({ cycle: customCycle });
+                    next("mana");
+                  }
+                }}
+                placeholder="e.g. 1213"
+                inputMode="numeric"
+                aria-label="Your own spell cycle"
+                className="mc-input w-0 min-w-0 flex-1 tabular-nums"
+              />
+              <button type="button" className="mc-btn mc-btn-sm" disabled={!customCycle} onClick={() => setCustomCycle(customCycle.slice(0, -1))} aria-label="Remove the last spell" title="Remove the last spell">
+                ⌫
+              </button>
+              <button type="button" className="mc-btn mc-btn-sm" disabled={!customCycle} onClick={() => setCustomCycle("")} aria-label="Clear your cycle" title="Clear">
+                ×
+              </button>
+            </div>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              {[1, 2, 3, 4].map((id) => {
+                const spell = spells.find((entry) => entry.id === id);
+                const known = Boolean(spell && spell.cost !== null && spell.cost !== undefined);
+                const name = spell ? spell.name : (CLASS_SPELL_NAMES[playerClass] || [])[id - 1] || `Spell ${id}`;
+                return (
+                  <WizardTile key={id} disabled={!known || customCycle.length >= 16} onClick={() => setCustomCycle(`${customCycle}${id}`)} className="p-2" title={known ? `${name}: ${(SPELL_CLICKS[playerClass] || SPELL_CLICKS.default)[id - 1]}, ${spell.cost.toFixed(1)} mana` : `${name} isn't in your ability tree`}>
+                    <span className="text-sm font-bold" style={ts({ color: known ? "#55FFFF" : "#8c8c8c" })}>
+                      + {id} · {name}
+                    </span>
+                    <span className="text-xs text-zinc-500">{known ? `${spell.cost.toFixed(1)} mana` : "not in tree"}</span>
+                  </WizardTile>
+                );
+              })}
+            </div>
+            {customCycle && <CycleSteps cycle={customCycle} playerClass={playerClass} spells={spells} compact />}
+            {customCycle && (
+              <span className="text-xs text-zinc-500">
+                {customMana ? `${customMana.used.toFixed(1)} mana/s at ${form.cps} clicks/s · items must give ${customMana.fromItems.toFixed(1)}/s ≈ ${Math.ceil(customMana.regen)} Mana Regen or ${Math.ceil(customMana.steal)} Mana Steal` : "Some of these spells aren't in your tree yet."}
+              </span>
+            )}
+            <button
+              type="button"
+              className="mc-btn self-end"
+              disabled={!customCycle}
+              onClick={() => {
+                set({ cycle: customCycle });
+                next("mana");
+              }}
+            >
+              Use this cycle ›
+            </button>
+          </div>
+        </div>
+      )}
+
+      {active === "extras" && (
+        <div className="flex flex-col gap-3">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
+            {[
+              ["Life sustain > 0", "Health Regen + Life Steal must beat zero", Boolean(form.sustain), () => set({ sustain: !form.sustain })],
+              ["No event items", "Skip limited-time festival items", form.noEvents !== false, () => set({ noEvents: !(form.noEvents !== false) })],
+              ["Tradeable only", "Only items you can buy on the Trade Market", Boolean(form.tradeable), () => set({ tradeable: !form.tradeable })],
+              ["Spend free skill points", "Unneeded points go where they add most, shown as (+X)", form.freeSp !== false, () => set({ freeSp: form.freeSp === false })],
+              ["Avoid negative defences", "No item with a negative elemental defence", normalized.avoidNegativeDefences, () => onOptions({ ...options, avoidNegativeDefences: !normalized.avoidNegativeDefences })],
+            ].map(([label, hint, on, toggle]) => (
+              <WizardTile key={label} selected={on} onClick={toggle} title={hint}>
+                <span className="text-base font-bold text-zinc-100">{label}</span>
+                <span className="text-xs" style={ts({ color: on ? "#55FF55" : "#8c8c8c" })}>
+                  {on ? "✓ on" : "off"}
+                </span>
+                <span className="text-xs text-zinc-500">{hint}</span>
+              </WizardTile>
+            ))}
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <span className="text-sm text-zinc-300">Weapon attack speed (none = any)</span>
+            <div className="grid grid-cols-3 gap-2 sm:grid-cols-7">
+              {ATTACK_SPEEDS.map((speed) => (
+                <WizardTile key={speed} selected={normalized.attackSpeeds.includes(speed)} onClick={() => onOptions({ ...options, attackSpeeds: toggleValue(normalized.attackSpeeds, speed) })} className="p-2">
+                  <span className="text-sm font-bold text-zinc-100">{ATTACK_SPEED_LABELS[speed]}</span>
+                </WizardTile>
+              ))}
+            </div>
+          </div>
+          <button type="button" className="mc-btn self-end" onClick={() => next("extras")}>
+            Next ›
+          </button>
+        </div>
+      )}
+
+      {active === "generate" && (
+        <div className="flex flex-col gap-3">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {WIZARD_STEPS.filter((entry) => entry.id !== "generate").map((entry) => (
+              <button key={entry.id} type="button" className="wbr-tile mc-slot flex flex-col items-start gap-0.5 p-2 text-left" onClick={() => (entry.id === "class" ? onClassReset() : setView(entry.id))}>
+                <span className="text-xs uppercase text-zinc-500">{entry.label}</span>
+                <span className="text-sm font-bold text-zinc-100">{summary[entry.id] || "—"}</span>
+              </button>
+            ))}
+          </div>
+          <button type="button" className="mc-btn mc-btn-primary wbr-why-btn w-full" onClick={onGenerate} disabled={running}>
+            {running ? `${progress ? progress.label : "Searching"}…` : "Generate Build"}
+          </button>
+        </div>
+      )}
+
+      {active !== "rank" && active !== "generate" && firstOpen === null && (
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-700 pt-3">
+          <span className="text-xs text-zinc-500">Everything after the tree has a sensible default - you can generate right away.</span>
+          <button type="button" className="mc-btn mc-btn-primary" onClick={onGenerate} disabled={running}>
+            {running ? "Searching…" : "Generate now"}
+          </button>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function ClassPicker({ onPick }) {
   return (
     <section className="mc-panel wbr-fade flex flex-col gap-4 p-5">
@@ -7916,7 +8691,7 @@ function ClassPicker({ onPick }) {
       </div>
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
         {Object.entries(CLASSES).map(([name, config]) => (
-          <button key={name} type="button" onClick={() => onPick(name)} className="wbr-class-tile mc-slot flex flex-col items-center gap-2 p-3 text-center">
+          <button key={name} type="button" onClick={() => onPick(name)} className="wbr-class-tile wbr-tile mc-slot flex flex-col items-center gap-2 p-3 text-center">
             {CLASS_PORTRAITS[name] && <img src={CLASS_PORTRAITS[name]} alt="" width={57} height={80} />}
             <span className="text-lg font-bold text-zinc-100">{name}</span>
             <span className="text-xs text-zinc-400">{capitalize(config.weapon)}</span>
@@ -8145,7 +8920,14 @@ function DamageSummary({ build }) {
           metrics.requireSustain ? metrics.sustain > 0 : null,
           `Health Regen ${formatNumber(Math.round(metrics.hpr))}/4s + Life Steal ${formatNumber(Math.round(metrics.lifeSteal))}/3s${metrics.requireSustain ? " - the filter asks for more than 0" : ""}`
         )}
-      {chip("Skill points", `${build.skillPoints.required} / ${build.skillPoints.available}`, build.skillPoints.valid, "Skill points this set needs, checked in the game's equip order")}
+      {chip(
+        "Skill points",
+        build.skillPoints.free && SKILLS.some((skill) => build.skillPoints.free[skill] > 0)
+          ? `${build.skillPoints.minimum} (+${SKILLS.reduce((sum, skill) => sum + build.skillPoints.free[skill], 0)}) / ${build.skillPoints.available}`
+          : `${build.skillPoints.required} / ${build.skillPoints.available}`,
+        build.skillPoints.valid,
+        build.skillPoints.free ? "Skill points the set needs (equip order checked) + (free points spent where they add most)" : "Skill points this set needs, checked in the game's equip order"
+      )}
     </div>
   );
 }
@@ -9480,7 +10262,13 @@ function PowderPanel({ build, stats, standalone = false }) {
               {plan.weapon.slot.item.name} <span className="text-xs text-zinc-500">({plan.weapon.count} slot{plan.weapon.count === 1 ? "" : "s"})</span>
             </span>
             <span className="tabular-nums">
-              {plan.weapon.mixed ? powderLabel(plan.weapon.slot.item.powders) : `${plan.weapon.count} × ${elementName(plan.weapon.element)} ${ROMAN[plan.weapon.tier - 1]}`}
+              {plan.weapon.mixed ? (
+                powderLabel(plan.weapon.slot.item.powders)
+              ) : (
+                <>
+                  {plan.weapon.count} × {elementName(plan.weapon.element)} {ROMAN[plan.weapon.tier - 1]}
+                </>
+              )}
             </span>
           </div>
           <p
@@ -9699,6 +10487,513 @@ function WelcomeDialog() {
             style={{ "--wbr-progress": `${ready ? 100 : waiting ? progress : 100}%` }}
           >
             <span className="relative">{label}</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================ LISTA BUILDÓW DLA KOLEJNYCH PROGÓW EHP ============================
+// Pod suwakiem Effective HP: po jednym buildzie na każdy krok suwaka (0-100%, co 5%). Liczone w tle szybkim
+// przebiegiem generatora (effort "quick"), wiersz po wierszu; build, który przechodzi już wyższy próg, jest też
+// wynikiem dla niego (nie liczymy drugi raz). Kliknięcie wiersza pokazuje ten build.
+const SWEEP_COLUMNS = { display: "grid", gridTemplateColumns: "4.1em 4.1em 0.6em 4.1em 2em minmax(0,1fr)", alignItems: "baseline", columnGap: "0.25em" };
+
+// Kolor od czerwonego (najmniej w liście) do zielonego (najwięcej), osobno dla EHP i obrażeń.
+function shadeColor(t) {
+  const hue = 120 * Math.max(0, Math.min(1, t));
+  const sat = 0.75;
+  const light = 0.6;
+  const k = (n) => (n + hue / 30) % 12;
+  const a = sat * Math.min(light, 1 - light);
+  const channel = (n) => Math.round(255 * (light - a * Math.max(-1, Math.min(k(n) - 3, 9 - k(n), 1))));
+  return `#${[channel(0), channel(8), channel(4)].map((value) => value.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function EhpSweepList({ sweep, shownBuild, onPick }) {
+  const ts = useTs();
+  const rows = sweep.rows || [];
+  const finished = rows.filter((row) => row.status !== "pending" && row.status !== "running").length;
+  const scored = rows.filter((row) => row.build && row.status !== "fail");
+  const range = (pick) => {
+    const values = scored.map((row) => pick(row.build.metrics));
+    return values.length ? [Math.min(...values), Math.max(...values)] : [0, 0];
+  };
+  const [ehpMin, ehpMax] = range((m) => m.ehp);
+  const [dmgMin, dmgMax] = range((m) => m.damage);
+  const shade = (value, min, max) => ts({ color: shadeColor(max > min ? (value - min) / (max - min) : 1) });
+  return (
+    <div className="wbr-drop mc-slot flex flex-col gap-0.5 px-2 py-2 text-xs">
+      <p className="text-zinc-400">
+        Best <span className="mc-gold">{sweep.goalLabel}</span> for each EHP step:
+      </p>
+      <div style={SWEEP_COLUMNS} className="pb-1 text-zinc-500">
+        <span className="text-right">step</span>
+        <span className="text-right" style={{ gridColumn: "2 / span 4" }}>
+          build EHP / min EHP
+        </span>
+        <span className="text-right">damage</span>
+      </div>
+      {rows.length === 0 && <p className="text-zinc-500">Starting…</p>}
+      {rows.map((row) => {
+        const current = Boolean(row.build && shownBuild && row.build === shownBuild);
+        const metrics = row.build ? row.build.metrics : null;
+        const color = row.status === "fail" ? "#FF5555" : undefined;
+        const shaded = metrics && row.status !== "fail";
+        return (
+          <button
+            key={row.pct}
+            type="button"
+            disabled={!row.build}
+            onClick={() => onPick(row)}
+            style={{ ...SWEEP_COLUMNS, ...ts({ color, background: current ? "rgba(255,170,0,0.16)" : undefined, boxShadow: current ? "inset 2px 0 0 #FFAA00" : undefined }) }}
+            className={`tabular-nums text-left hover:bg-white/5 disabled:cursor-default ${current ? "font-bold" : ""}`}
+            title={
+              row.status === "same"
+                ? "A build found for a neighbouring step also passes this one and deals at least as much, so it is the answer here too"
+                : row.status === "fail"
+                  ? "Nothing the quick search found passes this threshold with your other filters"
+                  : row.build
+                    ? "Show this build"
+                    : ""
+            }
+          >
+            <span className="text-right" style={current ? ts({ color: "#FFAA00" }) : undefined}>
+              ({row.pct}%)
+            </span>
+            <span className="text-right" style={shaded ? shade(metrics.ehp, ehpMin, ehpMax) : undefined}>
+              {metrics ? formatNumber(Math.round(metrics.ehp)) : ""}
+            </span>
+            <span className="text-center text-zinc-500">/</span>
+            <span className="text-right">{formatNumber(Math.round(row.minEhp))}</span>
+            <span className="text-zinc-500">EHP</span>
+            <span className="whitespace-nowrap text-right">
+              {row.status === "running" ? (
+                <span className="text-zinc-400">searching…</span>
+              ) : row.status === "pending" ? (
+                <span className="text-zinc-600">…</span>
+              ) : row.status === "unreachable" ? (
+                <span className="text-zinc-600">—</span>
+              ) : row.status === "fail" ? (
+                "fails"
+              ) : (
+                <>
+                  {row.status === "same" && <span className="text-zinc-500">=</span>}
+                  <span style={shade(metrics.damage, dmgMin, dmgMax)}>{formatNumber(Math.round(metrics.damage))}</span>
+                </>
+              )}
+            </span>
+          </button>
+        );
+      })}
+      <p className="pt-1 text-zinc-500">
+        {sweep.running ? `Searching ${finished} / ${rows.length}… (quick search per step)` : "Quick search per step · click a row to show that build."}
+      </p>
+    </div>
+  );
+}
+
+// ============================ "WHY THIS BUILD?" ============================
+// Wyjaśnienie wyniku liczone na żądanie: co maksymalizujemy i z czego to się bierze, jak build przechodzi filtry
+// (wzory z liczbami), co wnosi każdy przedmiot i dlaczego nie wygrał najlepszy konkurent w jego slocie.
+function goalLabelOf(build) {
+  if (!build) return "";
+  return build.goal === DAMAGE_GOAL_MAIN ? `${build.goalName || "Main attack"} DPS` : build.goalName || "Damage";
+}
+
+function buildItemPool(build, slotId) {
+  const slot = SLOTS.find((entry) => entry.id === slotId);
+  const options = build.options || normalizeOptions({});
+  const pinned = options.locked && options.locked[slotId];
+  const classWeapon = CLASSES[build.playerClass].weapon;
+  return ITEM_DB.filter((item) => {
+    if (pinned) return item.name === pinned;
+    if (item.level > build.level) return false;
+    if (slot.type === "weapon" ? item.type !== classWeapon : item.type !== slot.type) return false;
+    if ((options.excluded || []).includes(item.name) || (options.excludedTiers || []).includes(item.tier)) return false;
+    if (build.metrics.excludeEvents && eventOf(item)) return false;
+    if (build.metrics.tradeableOnly && isUntradable(item)) return false;
+    if (options.avoidNegativeDefences && hasNegativeDefence(item)) return false;
+    if (slot.type === "weapon" && options.attackSpeeds.length > 0 && !options.attackSpeeds.includes(item.atkSpd)) return false;
+    return true;
+  });
+}
+
+function explainBuild(build) {
+  const ctx = damageGoalContext(build.playerClass, build.level, build.treeSettings);
+  const cycle = build.metrics.cycle;
+  const minEhp = build.metrics.minEhp || 0;
+  const free = build.skillPoints.free || null;
+  const freeSum = free ? SKILLS.reduce((sum, skill) => sum + free[skill], 0) : 0;
+  const picks = Object.fromEntries(build.slots.map((slot) => [slot.id, slot.item]));
+  const weapon = picks.weapon;
+  const measure = (setPicks) => {
+    const list = SLOTS.map((slot) => setPicks[slot.id]).filter(Boolean);
+    const sp = computeSkillPoints(list);
+    const totals = free ? Object.fromEntries(SKILLS.map((skill) => [skill, (sp.totals[skill] || 0) + free[skill]])) : sp.totals;
+    const metrics = evaluateGoal(ctx, list, setPicks.weapon || null, totals, build.goal, cycle);
+    delete metrics.stats;
+    const spOver = Math.max(0, sp.total + freeSum - build.skillPoints.available) + sp.capOverflow;
+    const fails = [];
+    if (spOver > 0) fails.push(`needs ${spOver} skill point${spOver === 1 ? "" : "s"} more than level ${build.level} gives`);
+    if (minEhp > 0 && metrics.ehp < minEhp) fails.push(`EHP ${formatNumber(Math.round(metrics.ehp))} < ${formatNumber(Math.round(minEhp))}`);
+    if (cycle.ids.length > 0 && !(metrics.cycleOk && metrics.manaNet >= 0)) fails.push(`mana ${metrics.manaNet.toFixed(1)}/s for the cycle`);
+    if (build.metrics.requireSustain && !(metrics.sustain > 0)) fails.push(`life sustain ${metrics.sustain.toFixed(1)} HP/s`);
+    return { metrics, fails };
+  };
+  const base = measure(picks);
+  const slots = build.slots.map((slot) => {
+    const item = slot.item;
+    const pinned = Boolean(build.options && build.options.locked && build.options.locked[slot.id]);
+    if (!item) return { slot, item: null, pinned };
+    const without = slot.id === "weapon" ? null : measure({ ...picks, [slot.id]: null });
+    let rival = null; // najlepszy przedmiot, który dałby więcej, ale nie przechodzi filtrów
+    let runnerUp = null; // najlepszy przechodzący zamiennik
+    let checked = 0;
+    buildItemPool(build, slot.id).forEach((candidate) => {
+      if (candidate.name === item.name) return;
+      if ((slot.id === "ring1" || slot.id === "ring2") && ringsClash(Object.fromEntries(Object.entries(picks).map(([id, pick]) => [id, pick ? { item: pick } : null])), slot.id, candidate)) return;
+      const variants = slot.id === "weapon" && candidate.slots > 0 ? [candidate, ...ELEMENTS.map((element) => powderedWeapon(candidate, element))] : [candidate];
+      variants.forEach((variant) => {
+        checked += 1;
+        const result = measure({ ...picks, [slot.id]: variant });
+        if (result.fails.length === 0) {
+          if (!runnerUp || result.metrics.damage > runnerUp.metrics.damage) runnerUp = { item: variant, ...result };
+        } else if (result.metrics.damage > base.metrics.damage && (!rival || result.metrics.damage > rival.metrics.damage)) {
+          rival = { item: variant, ...result };
+        }
+      });
+    });
+    return { slot, item, pinned, without, rival, runnerUp, checked };
+  });
+  const stats = computeBuildStats(build, build.treeSettings);
+  const pickSpell = (id) => (id === DAMAGE_GOAL_MAIN ? stats.melee : stats.spells.find((spell) => spell.id === id));
+  let goalSpell = Array.isArray(build.goal) ? null : pickSpell(build.goal);
+  if (Array.isArray(build.goal)) {
+    // kilka celów: rozkład na żywioły z sumy ich głównych części
+    const per = [0, 0, 0, 0, 0, 0];
+    build.goal.map(pickSpell).forEach((spell) => {
+      if (spell && spell.main && spell.main.perElement) spell.main.perElement.forEach((value, index) => (per[index] += value || 0));
+    });
+    goalSpell = { main: { perElement: per } };
+  }
+  const goalStatsFull = goalStats(ctx, SLOTS.map((slot) => picks[slot.id]).filter(Boolean), weapon, build.skillPoints.totals).stats;
+  return { base, slots, stats, goalSpell, goalStats: goalStatsFull };
+}
+
+function WhySection({ title, children }) {
+  return (
+    <section className="flex flex-col gap-2">
+      <h3 className="wbr-welcome-sub">{title}</h3>
+      {children}
+    </section>
+  );
+}
+
+function WhyRow({ label, value, good = null, hint = null }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3 text-sm" title={hint || undefined}>
+      <span className="wbr-welcome-muted">{label}</span>
+      <span className={`text-right tabular-nums ${good === true ? "wbr-welcome-ok" : good === false ? "text-red-400" : ""}`}>{value}</span>
+    </div>
+  );
+}
+
+// Przycisk "Open in Wynnbuilder": ten sam build (przedmioty, powdery broni, skill pointy razem z wolnymi, poziom,
+// drzewko) jako link Wynnbuildera; opcjonalnie z tomami i aspektami poleconymi w zakładkach Tomes / Aspects.
+function WynnbuilderExport({ build, treeSettings }) {
+  const canExtras = !extrasLocked(build.level);
+  const [withExtras, setWithExtras] = useState(false);
+  const [message, setMessage] = useState("");
+  const [showLink, setShowLink] = useState(false);
+  const link = useMemo(() => {
+    const extras = withExtras && canExtras ? wynnbuilderExtras(build, extrasEnvFor(build, treeSettings, null, null)) : null;
+    const result = wynnbuilderLink(build, (treeSettings && treeSettings.selected) || [], extras);
+    const tomes = extras ? Object.values(extras.tomes).flat().filter(Boolean).length : 0;
+    const aspects = extras ? extras.aspects.filter(Boolean).length : 0;
+    return { ...result, tomes, aspects };
+  }, [build, treeSettings, withExtras, canExtras]);
+  useEffect(() => {
+    setMessage("");
+  }, [link.url]);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(link.url);
+      setMessage("Link copied.");
+      setShowLink(false);
+    } catch (error) {
+      setShowLink(true);
+      setMessage("Clipboard is blocked here - copy the link from the box below.");
+    }
+  };
+  const treeCount = ((treeSettings && treeSettings.selected) || []).length;
+  return (
+    <div className="mt-2 flex flex-col gap-1.5">
+      <div className="flex flex-col gap-2 sm:flex-row">
+        <a href={link.url} target="_blank" rel="noreferrer" className="mc-btn wbr-why-btn min-w-0 flex-1 whitespace-nowrap text-center" title="Opens this build in wynnbuilder.github.io/builder in a new tab">
+          Open in Wynnbuilder ↗
+        </a>
+        <button type="button" className="mc-btn" onClick={copy} title="Copy the Wynnbuilder link of this build">
+          Copy link
+        </button>
+      </div>
+      {canExtras && (
+        <label className="flex items-center gap-2 text-xs text-zinc-200" title="Adds the tomes and aspects the Tomes and Aspects tabs pick for this build.">
+          <input type="checkbox" className="mc-check" checked={withExtras} onChange={() => setWithExtras(!withExtras)} /> With the recommended tomes and aspects
+        </label>
+      )}
+      <p className="text-xs text-zinc-500">
+        {`9 items, weapon powders, skill points (with the free ones), level ${build.level} and your ability tree (${treeCount} abilities)`}
+        {withExtras && canExtras ? ` + ${link.tomes} tomes and ${link.aspects} aspects` : ""}
+        {` · Wynnbuilder data ${WB_IDS.version}.`}
+        {link.missing.length > 0 ? ` Not in Wynnbuilder's list, left empty: ${link.missing.join(", ")}.` : ""}
+      </p>
+      {message && <p className="text-xs text-emerald-300">{message}</p>}
+      {showLink && <input readOnly value={link.url} onFocus={(event) => event.target.select()} className="mc-input w-full text-xs" aria-label="Wynnbuilder link" />}
+    </div>
+  );
+}
+
+function WhyBuildDialog({ build, onClose }) {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      try {
+        setData(explainBuild(build));
+      } catch (caught) {
+        setError(caught.message);
+      }
+    }, 60);
+    return () => clearTimeout(timer);
+  }, [build]);
+  useEffect(() => {
+    if (typeof document === "undefined") return undefined;
+    const { body, documentElement } = document;
+    const previous = [body.style.overflow, documentElement.style.overflow];
+    body.style.overflow = "hidden";
+    documentElement.style.overflow = "hidden";
+    const onKey = (event) => event.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => {
+      body.style.overflow = previous[0];
+      documentElement.style.overflow = previous[1];
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [onClose]);
+
+  const m = build.metrics;
+  const goalLabel = goalLabelOf(build);
+  const options = build.options || normalizeOptions({});
+  const pinned = Object.entries(options.locked || {});
+  const sp = build.skillPoints;
+  const pct = (value) => `${value >= 0 ? "+" : ""}${(value * 100).toFixed(1)}%`;
+  const skillLine = (skill) => {
+    const total = sp.totals[skill] || 0;
+    const percent = skillPercent(total) * 100;
+    const effect = { str: "damage", dex: "crit chance", int: "spell cost reduction & water damage", def: "damage taken ↓ & fire damage", agi: "dodge & air damage" }[skill];
+    return `${total} → ${percent.toFixed(1)}% ${effect}`;
+  };
+
+  let elementShares = [];
+  let goalTotal = 0;
+  if (data && data.goalSpell && data.goalSpell.main && data.goalSpell.main.perElement) {
+    const per = data.goalSpell.main.perElement;
+    goalTotal = per.reduce((sum, value) => sum + value, 0);
+    elementShares = DAMAGE_PREFIXES.map((prefix, index) => ({ element: ELEMENT_BY_PREFIX[prefix], value: per[index] || 0 })).filter((entry) => entry.value > 0).sort((a, b) => b.value - a.value);
+  }
+  const weapon = (build.slots.find((slot) => slot.id === "weapon") || {}).item;
+  const weaponElements = weapon ? Object.entries(weapon.damage || {}).filter(([, value]) => value > 0) : [];
+  const stat = (key) => (data ? statValue(data.goalStats, key) : 0);
+  const hpNow = data ? Math.max(5, stat("hp") + stat("hpBonus")) : 0;
+  const defPct = data ? skillPercent(stat("def")) * SKILL_DAMAGE_MULT.def : 0;
+  const agiPct = data ? skillPercent(stat("agi")) * SKILL_DAMAGE_MULT.agi : 0;
+  const classMult = weapon ? 2 - (CLASS_DEFENSE[weapon.type] ?? 1) : 1;
+  const treeDefence = data ? Object.values(data.goalStats.defMult || {}).reduce((product, value) => product * (1 - value / 100), 1) : 1;
+  const topIds = Object.entries(build.totals || {})
+    .filter(([key, value]) => value > 0 && /(sdPct|sdRaw|mdPct|mdRaw|damPct|damRaw|DamPct|SdPct|SdRaw|DamRaw|critDamPct)$/.test(key))
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8);
+
+  return (
+    <div className="wbr-backdrop wbr-welcome-backdrop fixed inset-0 z-[60] flex items-center justify-center p-3 sm:p-6" role="dialog" aria-modal="true" aria-labelledby="wbr-why-title" onClick={(event) => event.target === event.currentTarget && onClose()}>
+      <div className="wbr-pop wbr-welcome flex max-h-full w-full max-w-3xl flex-col">
+        <div className="wbr-welcome-head flex items-center justify-between gap-3 px-5 pb-4 pt-5">
+          <div className="flex min-w-0 flex-col gap-1">
+            <span className="wbr-hero-kicker">Build explained</span>
+            <h2 id="wbr-why-title" className="wbr-hero-title wbr-welcome-title">
+              Why this build?
+            </h2>
+          </div>
+          <button type="button" className="mc-btn mc-btn-sm" onClick={onClose} aria-label="Close">
+            ✕
+          </button>
+        </div>
+        <div className="wbr-welcome-body flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto px-5 py-4 text-base" tabIndex={0}>
+          <WhySection title="What you asked for">
+            <p>
+              <b className="wbr-welcome-hl">{build.archetype} {build.playerClass}</b>, level {build.level}. The generator looks for the set of 9 items with the{" "}
+              <b className="wbr-welcome-hl">highest {goalLabel}</b> among all sets that pass every filter below. Filters are pass/fail, never weights: a set that misses one by a
+              little is thrown away, however strong it is.
+            </p>
+            <div className="flex flex-col gap-1">
+              <WhyRow label="Effective HP" value={m.minEhp > 0 ? `at least ${formatNumber(Math.round(m.minEhp))}` : "no minimum"} />
+              <WhyRow label="Mana: spell cycle" value={m.cycle.ids.length ? `${m.cycle.ids.join("")} at ${m.cycle.cps} clicks/s${m.cycle.steal ? ", Mana Steal counted" : ""}${m.cycle.gain ? ", ability mana counted" : ""}` : "no cycle"} />
+              <WhyRow label="Life sustain > 0" value={m.requireSustain ? "required" : "off"} />
+              <WhyRow
+                label="Items"
+                value={[m.excludeEvents ? "no limited-time event items" : null, m.tradeableOnly ? "tradeable only" : null, options.attackSpeeds.length ? `weapon speed ${options.attackSpeeds.map((speed) => ATTACK_SPEED_LABELS[speed]).join("/")}` : null, options.avoidNegativeDefences ? "no negative defences" : null, (options.excludedTiers || []).length ? `no ${options.excludedTiers.join("/")}` : null].filter(Boolean).join(" · ") || "every item up to your level"}
+              />
+              {pinned.length > 0 && <WhyRow label="Pinned by you" value={pinned.map(([slot, name]) => `${name} (${slot})`).join(", ")} />}
+            </div>
+          </WhySection>
+
+          <WhySection title={`The number it maximises: ${goalLabel}`}>
+            <p>
+              <b className="wbr-welcome-hl text-lg">{formatNumber(Math.round(m.damage))}</b> {build.goal === DAMAGE_GOAL_MAIN ? "damage per second with the main attack" : Array.isArray(build.goal) ? "the sum of one cast of each chosen spell (crits included; the main attack counts its damage per second)" : "average damage of one cast, crits included"}
+              {m.cycle && data && data.base.metrics.poisonDps > 0 ? ` (incl. poison ${formatNumber(Math.round(data.base.metrics.poisonDps))}/s spread over the casts)` : ""}.
+            </p>
+            {!data && !error && <p className="wbr-welcome-muted">Calculating…</p>}
+            {data && elementShares.length > 0 && (
+              <div className="flex flex-col gap-1">
+                <p className="wbr-welcome-muted text-sm">Damage by element (what decides "which element the build is"):</p>
+                {elementShares.map((entry) => (
+                  <div key={entry.element} className="flex items-center gap-2 text-sm">
+                    <span className="w-24 shrink-0" style={{ color: ELEMENT_STYLE[entry.element].color }}>
+                      {ELEMENT_STYLE[entry.element].symbol} {ELEMENT_STYLE[entry.element].label}
+                    </span>
+                    <div className="mc-bar flex-1">
+                      <div className="mc-bar-fill" style={{ width: `${(entry.value / goalTotal) * 100}%`, background: ELEMENT_STYLE[entry.element].color }} />
+                    </div>
+                    <span className="w-14 shrink-0 text-right tabular-nums">{((entry.value / goalTotal) * 100).toFixed(0)}%</span>
+                  </div>
+                ))}
+                <p className="text-sm">
+                  A spell's element comes from the <b>weapon</b>: its base damage ({weaponElements.map(([element, value]) => `${ELEMENT_STYLE[element] ? ELEMENT_STYLE[element].label : element} ${formatNumber(Math.round(value))}`).join(", ") || "neutral"}
+                  {weapon && weapon.powders ? `, plus ${weapon.powders.count}× ${weapon.powders.element} powder converting neutral damage` : ""}) is scaled by the spell's conversion. Tree masteries and item % bonuses only multiply the element that is already there, so a mastery for
+                  an element the weapon doesn't deal adds little.
+                </p>
+              </div>
+            )}
+            {data && (
+              <div className="flex flex-col gap-1">
+                <p className="wbr-welcome-muted text-sm">What multiplies it:</p>
+                {["str", "dex", "int", "def", "agi"].map((skill) => (
+                  <WhyRow key={skill} label={`${SKILL_STYLE[skill].symbol} ${SKILL_LABELS[skill]}`} value={skillLine(skill)} />
+                ))}
+                {topIds.map(([key, value]) => (
+                  <WhyRow key={key} label={(ID_DISPLAY.find((entry) => entry.key === key) || { label: key }).label + ((ID_DISPLAY.find((entry) => entry.key === key) || {}).unit === "%" ? " %" : " (raw)")} value={`+${formatNumber(value)}${(ID_DISPLAY.find((entry) => entry.key === key) || {}).unit === "%" ? "%" : ""} from items`} />
+                ))}
+              </div>
+            )}
+          </WhySection>
+
+          {data && (
+            <WhySection title="How it passes the filters">
+              <WhyRow
+                label="Effective HP"
+                value={`${formatNumber(Math.round(hpNow))} HP ÷ (${(AGILITY_DAMAGE_TAKEN * agiPct + (1 - agiPct) * (1 - defPct)).toFixed(3)} damage taken) ÷ ${(classMult * treeDefence).toFixed(2)} = ${formatNumber(Math.round(m.ehp))}`}
+                good={m.minEhp > 0 ? m.ehp >= m.minEhp : null}
+                hint={`Defence ${(defPct * 100).toFixed(1)}% less damage, Agility ${(agiPct * 100).toFixed(1)}% dodge (10% damage when dodging), class multiplier ${classMult.toFixed(2)}${treeDefence !== 1 ? `, tree resistances ×${treeDefence.toFixed(2)}` : ""}.`}
+              />
+              {m.cycle.ids.length > 0 && (
+                <>
+                  <WhyRow
+                    label="Mana in"
+                    value={`(Mana Regen ${formatNumber(Math.round(stat("mr")))} + 25) ÷ 5${m.cycle.steal ? ` + Mana Steal ${formatNumber(Math.round(stat("ms")))} ÷ 3` : ""}${m.manaGain > 0 ? ` + abilities ${m.manaGain.toFixed(1)}` : ""} = ${(m.manaIncome + m.manaGain).toFixed(1)}/s`}
+                  />
+                  <WhyRow label="Mana out" value={`cycle ${m.cycle.ids.join("")}: ${m.manaUsed.toFixed(1)}/s (3 clicks per spell ÷ ${m.cycle.cps} clicks/s)`} />
+                  <WhyRow label="Balance" value={`${m.manaNet >= 0 ? "+" : ""}${m.manaNet.toFixed(1)} mana/s`} good={m.manaNet >= 0} />
+                </>
+              )}
+              <WhyRow label="Life sustain" value={`Health Regen ${formatNumber(Math.round(m.hpr))}/4 s + Life Steal ${formatNumber(Math.round(m.lifeSteal))}/3 s = ${m.sustain >= 0 ? "+" : ""}${m.sustain.toFixed(1)} HP/s`} good={m.requireSustain ? m.sustain > 0 : null} />
+              <WhyRow
+                label="Skill points"
+                value={`${sp.minimum ?? sp.required} needed of ${sp.available}${sp.free && SKILLS.some((skill) => sp.free[skill] > 0) ? ` · free points spent: ${SKILLS.filter((skill) => sp.free[skill] > 0).map((skill) => `+${sp.free[skill]} ${SKILL_STYLE[skill].short}`).join(", ")}` : ""}`}
+                good={sp.valid}
+                hint="Checked in the game's equip order: items with negative skill points go on last, nothing may fall off."
+              />
+            </WhySection>
+          )}
+
+          {data && (
+            <WhySection title="Why each item">
+              <p className="wbr-welcome-muted text-sm">
+                For every slot: what the build loses without the item, and the strongest item that would deal more but breaks a filter (why it lost). Checked against every
+                allowed item of the slot{weapon && weapon.slots > 0 ? ", weapons with every powder element" : ""}.
+              </p>
+              <div className="flex flex-col gap-3">
+                {data.slots.map((entry) => (
+                  <div key={entry.slot.id} className="flex flex-col gap-0.5 border-l-2 pl-3 text-sm" style={{ borderColor: entry.item ? RARITY_COLORS[entry.item.tier] || "#888" : "#555" }}>
+                    <div className="flex items-baseline justify-between gap-2">
+                      <span>
+                        <span className="wbr-welcome-muted uppercase">{entry.slot.label}</span> <b style={{ color: entry.item ? RARITY_COLORS[entry.item.tier] : undefined }}>{entry.item ? entry.item.name : "empty"}</b>
+                        {entry.pinned ? <span className="wbr-welcome-hl"> · pinned by you</span> : null}
+                      </span>
+                      {entry.without && (
+                        <span className="tabular-nums" title="Damage the build loses without this item (the other slots stay)">
+                          {pct(entry.without.metrics.damage / Math.max(1e-9, m.damage) - 1)} without it
+                        </span>
+                      )}
+                    </div>
+                    {entry.without && (
+                      <span className="wbr-welcome-muted">
+                        Brings {formatNumber(Math.round(m.damage - entry.without.metrics.damage))} {goalLabel}, {formatNumber(Math.round(m.ehp - entry.without.metrics.ehp))} EHP
+                        {m.cycle.ids.length > 0 ? `, ${(m.manaNet - entry.without.metrics.manaNet).toFixed(1)} mana/s` : ""}
+                        {entry.item && SKILLS.some((skill) => (entry.item.reqs[skill] || 0) > 0) ? ` · needs ${SKILLS.filter((skill) => (entry.item.reqs[skill] || 0) > 0).map((skill) => `${entry.item.reqs[skill]} ${SKILL_STYLE[skill].short}`).join(", ")}` : ""}
+                      </span>
+                    )}
+                    {entry.slot.id === "weapon" && entry.item && <span className="wbr-welcome-muted">The weapon decides the base damage and its element for every spell.</span>}
+                    {entry.rival && (
+                      <span>
+                        <span className="text-red-400">✗</span> {entry.rival.item.name}
+                        {entry.rival.item.powders ? ` (${entry.rival.item.powders.element} powders)` : ""} would give {pct(entry.rival.metrics.damage / Math.max(1e-9, m.damage) - 1)}, but {entry.rival.fails.join(", ")}.
+                      </span>
+                    )}
+                    {entry.runnerUp && (
+                      <span className="wbr-welcome-muted">
+                        Next best that passes: {entry.runnerUp.item.name}
+                        {entry.runnerUp.item.powders ? ` (${entry.runnerUp.item.powders.element} powders)` : ""} ({pct(entry.runnerUp.metrics.damage / Math.max(1e-9, m.damage) - 1)}).
+                      </span>
+                    )}
+                    {!entry.rival && entry.item && !entry.pinned && <span className="wbr-welcome-ok">No allowed item deals more here, even ignoring the filters.</span>}
+                  </div>
+                ))}
+              </div>
+            </WhySection>
+          )}
+
+          <WhySection title="How it was searched">
+            <p className="text-sm">
+              {formatNumber(build.stats ? build.stats.eligible : 0)} of {formatNumber(build.stats ? build.stats.database : 0)} items passed your item filters ({formatNumber(build.stats ? build.stats.weapons : 0)} weapons). Trying every
+              combination is impossible (hundreds of items per slot, 9 slots), so the search works in stages:
+            </p>
+            <ol className="flex list-decimal flex-col gap-1 pl-6 text-sm">
+              <li>Every weapon with every powder element is scored alone; the best few each start a <b>beam</b> that adds one slot at a time and keeps the 22 most promising partial sets (exact damage, EHP, mana and skill points at every step).</li>
+              <li>The same beam once more with 20% EHP to spare, and short beams steered by the damage of the tree's other spells - different routes to different sets.</li>
+              <li>The best candidates get polished: single swaps against a shortlist, then against every item of every slot, weapon swaps and swaps of two slots at once.</li>
+              <li>An exact final check: skill points in the game's equip order, free skill points spent where they add most, every item of every slot and every weapon with every powder - until no single swap improves the result.</li>
+              {build.level >= 100 && <li>From level 100 the Wynnbuilder guide builds for your class start as ready candidates{build.guide && build.guide.from ? ` - this result grew from "${build.guide.from}"` : ""}.</li>}
+            </ol>
+            <p className="wbr-welcome-muted text-sm">
+              {build.effort === "quick" ? "This build comes from the List of builds, which uses a quick search (step 2 is skipped and fewer candidates are polished); Generate at this EHP step runs the full search. " : ""}
+              Search took {build.stats ? (build.stats.ms / 1000).toFixed(1) : "?"} s. It is a heuristic: no single item swap improves this build (checked above), but a completely different set could
+              still be stronger - generating with other settings (another spell, EHP step or cycle) feeds every build of this session back in as a starting point.
+            </p>
+            {build.warnings && build.warnings.length > 0 && (
+              <ul className="flex flex-col gap-1 text-sm text-red-400">
+                {build.warnings.map((warning) => (
+                  <li key={warning}>! {warning}</li>
+                ))}
+              </ul>
+            )}
+          </WhySection>
+          {error && <p className="text-red-400">Could not explain this build: {error}</p>}
+        </div>
+        <div className="wbr-welcome-foot flex justify-end px-5 pb-5 pt-4">
+          <button type="button" className="mc-btn mc-btn-primary wbr-welcome-btn" onClick={onClose}>
+            Close
           </button>
         </div>
       </div>
@@ -10052,8 +11347,20 @@ function wbTreeShape(playerClass) {
   return (WB_TREE_CACHE[playerClass] = { head, children });
 }
 function encodeTreeHash(playerClass, selectedIds) {
+  return wbBitsToB64(treeBits(playerClass, selectedIds));
+}
+function wbBitsToB64(bits) {
+  let out = "";
+  for (let i = 0; i < bits.length; i += 6) {
+    let value = 0;
+    for (let j = 0; j < 6; j++) value |= (bits[i + j] || 0) << j;
+    out += WB_B64[value];
+  }
+  return out;
+}
+function treeBits(playerClass, selectedIds) {
   const { head, children } = wbTreeShape(playerClass);
-  if (!head) return "";
+  if (!head) return [];
   const active = new Set(selectedIds);
   const visited = new Set();
   const bits = [];
@@ -10068,13 +11375,162 @@ function encodeTreeHash(playerClass, selectedIds) {
     });
   };
   traverse(head);
-  let out = "";
-  for (let i = 0; i < bits.length; i += 6) {
-    let value = 0;
-    for (let j = 0; j < 6; j++) value |= (bits[i + j] || 0) << j;
-    out += WB_B64[value];
+  return bits;
+}
+
+// LINK DO WYNNBUILDERA ("Open in Wynnbuilder"): build zakodowany tak jak robi to Wynnbuilder (ENCODING.md, wersja
+// binarna V12; port encodeBuild z js/builder/build_encode_decode.js): nagłówek (flaga 12 + numer wersji danych),
+// 9 przedmiotów po numerach Wynnbuildera (+1, 0 = pusty slot) z powderami, tomy, skill pointy (ASSIGNED = sumy
+// jak w polach Wynnbuildera, z bonusami przedmiotów), poziom, aspekty i drzewko (te same bity co kod "Copy Tree").
+// Bity idą od najmłodszego, 6 na znak base64 Wynnbuildera. Numery przedmiotów i stałe kodowania:
+// src/wynnbuilder-ids.json (npm run update-items).
+const WB_BUILDER_URL = "https://wynnbuilder.github.io/builder/#";
+const WB_POWDER_ELEMENTS = { earth: 0, thunder: 1, water: 2, fire: 3, air: 4 };
+// Kolejność slotów tomów w Wynnbuilderze (tome_fields): 2 broni, 4 zbroi, gildia, lootrun, a potem stare nazwy typów:
+// gatherXp = marathon, dungeonXp = mysticism, mobXp = expertise.
+const WB_TOME_ORDER = [
+  ["weapon", 2],
+  ["armour", 4],
+  ["guild", 1],
+  ["lootrun", 1],
+  ["marathon", 2],
+  ["mysticism", 2],
+  ["expertise", 2],
+];
+function wbWriter() {
+  const enc = WB_IDS.encoding;
+  const bits = [];
+  const append = (value, length) => {
+    for (let i = 0; i < length; i++) bits.push((value >>> i) & 1);
+  };
+  return { bits, append, flag: (field, name) => append(enc[field][name], enc[field].BITLEN) };
+}
+function wbPowderIds(item) {
+  const enc = WB_IDS.encoding;
+  const list = item && item.powders && Array.isArray(item.powders.list) ? item.powders.list : [];
+  return list
+    .filter((powder) => powder && WB_POWDER_ELEMENTS[powder.element] !== undefined && powder.tier >= 1)
+    .map((powder) => WB_POWDER_ELEMENTS[powder.element] * enc.POWDER_TIERS + Math.min(enc.POWDER_TIERS, powder.tier) - 1);
+}
+function wbAppendPowders(out, powders) {
+  const enc = WB_IDS.encoding;
+  const tiers = enc.POWDER_TIERS;
+  if (powders.length === 0) {
+    out.flag("EQUIPMENT_POWDERS_FLAG", "NO_POWDERS");
+    return;
   }
-  return out;
+  out.flag("EQUIPMENT_POWDERS_FLAG", "HAS_POWDERS");
+  // powdery zebrane żywiołami w kolejności pojawienia się (jak w grze i w collectPowders Wynnbuildera)
+  const chunks = [];
+  const chunkOf = new Map();
+  powders.forEach((powder) => {
+    const element = Math.floor(powder / tiers);
+    if (!chunkOf.has(element)) {
+      chunkOf.set(element, chunks.length);
+      chunks.push([]);
+    }
+    chunks[chunkOf.get(element)].push(powder);
+  });
+  let previous = -1;
+  chunks.forEach((chunk) => {
+    let i = 0;
+    while (i < chunk.length) {
+      const powder = chunk[i];
+      if (previous >= 0) {
+        out.flag("POWDER_REPEAT_OP", "NO_REPEAT");
+        if (powder % tiers === previous % tiers) {
+          out.flag("POWDER_REPEAT_TIER_OP", "REPEAT_TIER");
+          const count = enc.POWDER_ELEMENTS.length;
+          const wrap = ((((powder - previous) / tiers) % count) + count) % count;
+          out.append(wrap - 1, enc.POWDER_WRAPPER_BITLEN);
+        } else {
+          out.flag("POWDER_REPEAT_TIER_OP", "CHANGE_POWDER");
+          out.flag("POWDER_CHANGE_OP", "NEW_POWDER");
+          out.append(powder, enc.POWDER_ID_BITLEN);
+        }
+      } else out.append(powder, enc.POWDER_ID_BITLEN);
+      while (++i < chunk.length && chunk[i] === powder) out.flag("POWDER_REPEAT_OP", "REPEAT");
+      previous = powder;
+    }
+  });
+  out.flag("POWDER_REPEAT_OP", "NO_REPEAT");
+  out.flag("POWDER_REPEAT_TIER_OP", "CHANGE_POWDER");
+  out.flag("POWDER_CHANGE_OP", "NEW_ITEM");
+}
+// build: slots (9 przedmiotów), level, playerClass, skillPoints.totals; treeIds: wybrane zdolności;
+// extras (opcjonalnie): { tomes: { slotId: [tome|null, ...] }, aspects: [{ aspect, tier } | null, ...] }.
+// Zwraca { url, hash, missing: [nazwy przedmiotów bez numeru Wynnbuildera] }.
+function wynnbuilderLink(build, treeIds, extras = null) {
+  const enc = WB_IDS.encoding;
+  const out = wbWriter();
+  out.append(0xc, 6);
+  out.append(WB_IDS.versionIndex, 10);
+  const missing = [];
+  const bySlot = Object.fromEntries((build.slots || []).map((slot) => [slot.id, slot.item]));
+  SLOTS.forEach((slot, index) => {
+    const item = bySlot[slot.id] || null;
+    out.append(enc.EQUIPMENT_KIND.NORMAL, enc.EQUIPMENT_KIND.BITLEN);
+    const id = item ? WB_IDS.items[item.name] : undefined;
+    if (item && id === undefined) missing.push(item.name);
+    out.append(id === undefined ? 0 : id + 1, enc.ITEM_ID_BITLEN);
+    if (index <= 3 || slot.id === "weapon") wbAppendPowders(out, slot.id === "weapon" && id !== undefined ? wbPowderIds(item) : []);
+  });
+  // Tomy
+  const tomeSkills = Object.fromEntries(SKILLS.map((skill) => [skill, 0]));
+  const tomeSlots = extras && extras.tomes ? WB_TOME_ORDER.flatMap(([slotId, count]) => Array.from({ length: count }, (_, i) => (extras.tomes[slotId] || [])[i] || null)) : [];
+  if (tomeSlots.every((tome) => !tome)) out.flag("TOMES_FLAG", "NO_TOMES");
+  else {
+    out.flag("TOMES_FLAG", "HAS_TOMES");
+    tomeSlots.forEach((tome) => {
+      if (!tome) out.flag("TOME_SLOT_FLAG", "UNUSED");
+      else {
+        out.flag("TOME_SLOT_FLAG", "USED");
+        out.append(tome.tomeId, enc.TOME_ID_BITLEN);
+        SKILLS.forEach((skill) => (tomeSkills[skill] += (tome.ids && tome.ids[skill]) || 0));
+      }
+    });
+  }
+  // Skill pointy: Wynnbuilder trzyma w polach sumy (przydzielone + przedmioty [+ tomy]); podajemy wszystkie pięć.
+  const totals = (build.skillPoints && build.skillPoints.totals) || {};
+  out.flag("SP_FLAG", "ASSIGNED");
+  SKILLS.forEach((skill) => {
+    out.flag("SP_ELEMENT_FLAG", "ELEMENT_ASSIGNED");
+    out.append(Math.round((totals[skill] || 0) + tomeSkills[skill]) & ((1 << enc.MAX_SP_BITLEN) - 1), enc.MAX_SP_BITLEN);
+  });
+  // Poziom
+  if (build.level === enc.MAX_LEVEL) out.flag("LEVEL_FLAG", "MAX");
+  else {
+    out.flag("LEVEL_FLAG", "OTHER");
+    out.append(Math.max(1, Math.min(build.level, (1 << enc.LEVEL_BITLEN) - 1)), enc.LEVEL_BITLEN);
+  }
+  // Aspekty
+  const aspects = extras && extras.aspects ? Array.from({ length: enc.NUM_ASPECTS }, (_, i) => extras.aspects[i] || null) : [];
+  if (aspects.every((entry) => !entry)) out.flag("ASPECTS_FLAG", "NO_ASPECTS");
+  else {
+    out.flag("ASPECTS_FLAG", "HAS_ASPECTS");
+    aspects.forEach((entry) => {
+      if (!entry) out.flag("ASPECT_SLOT_FLAG", "UNUSED");
+      else {
+        out.flag("ASPECT_SLOT_FLAG", "USED");
+        out.append(entry.aspect.id, enc.ASPECT_ID_BITLEN);
+        out.append(Math.max(0, Math.min(enc.ASPECT_TIERS, entry.tier) - 1), enc.ASPECT_TIER_BITLEN);
+      }
+    });
+  }
+  // Drzewko - zawsze na końcu
+  treeBits(build.playerClass, treeIds || []).forEach((bit) => out.append(bit, 1));
+  const hash = wbBitsToB64(out.bits);
+  return { url: WB_BUILDER_URL + hash, hash, missing };
+}
+// Tomy i aspekty polecane w zakładkach Tomes / Aspects -> format dla wynnbuilderLink.
+function wynnbuilderExtras(build, env) {
+  if (!env || extrasLocked(build.level)) return null;
+  const tomes = {};
+  pickTomes(build, env).groups.forEach((group) => {
+    tomes[group.slot.id] = group.picks.map((pick) => pick.tome || null);
+  });
+  const aspects = pickAspects(build, env).slots.map((slot) => (slot.aspect ? { aspect: slot.aspect, tier: slot.tier } : null));
+  return { tomes, aspects };
 }
 function decodeTreeHash(playerClass, text) {
   const { head, children } = wbTreeShape(playerClass);
@@ -11461,6 +12917,12 @@ export default function BuildRecommender() {
   const buildMode = "new";
   const [damageForm, setDamageForm] = useState(DEFAULT_DAMAGE_FORM);
   const [damageRunning, setDamageRunning] = useState(false);
+  // Lista buildów dla kolejnych progów EHP (pod suwakiem) i okno "Why this build?"
+  const [sweepOpen, setSweepOpen] = useState(false);
+  const [sweep, setSweep] = useState(null);
+  const sweepToken = useRef(0);
+  const sweepSource = useRef(null);
+  const [whyOpen, setWhyOpen] = useState(false);
   const [damageProgress, setDamageProgress] = useState(null);
   // Wyniki zakładki New z tej sesji (te same ustawienia poza progiem EHP) - wracają do szukania jako punkty startu.
   const damageHistory = useRef(new Map());
@@ -11535,8 +12997,24 @@ export default function BuildRecommender() {
     [buildMode, playerClass, level, treeIds, damageTreeSettings]
   );
   const ehpMax = playerClass && level ? reachableEhp(playerClass, level) : 100000;
-  const damageGoal = damageGoals.find((entry) => String(entry.id) === String(damageForm.goal)) || damageGoals[0] || null;
+  const damageGoal = resolveGoal(damageGoals, damageForm.goal);
   const damageMinEhp = damageForm.minEhp === null || damageForm.minEhp === undefined ? defaultMinEhp(ehpMax) : Math.min(damageForm.minEhp, ehpMax);
+  // ustawienia generatora bez progu EHP: lista buildów pod suwakiem obowiązuje, dopóki się nie zmienią
+  const sweepKeyNow = JSON.stringify([
+    playerClass,
+    level,
+    treeIds,
+    damageGoal ? damageGoal.id : null,
+    [...String(damageForm.cycle || "")].filter((digit) => "1234".includes(digit)).join(""),
+    damageForm.cps,
+    damageForm.steal,
+    damageForm.gain,
+    Boolean(damageForm.sustain),
+    damageForm.noEvents !== false,
+    Boolean(damageForm.tradeable),
+    damageForm.freeSp !== false,
+    itemFilterKey(normalizeOptions(options)),
+  ]);
   // ograniczenia ustawione w zakładce "Old" (rzadkości, budżet, przypięte, rynek) działają też tutaj
   const damageRestrictions = useMemo(() => {
     const parts = [];
@@ -11569,13 +13047,14 @@ export default function BuildRecommender() {
       (generated.mode === "damage"
         ? generated.level !== level ||
           generated.playerClass !== playerClass ||
-          generated.goal !== (damageGoal ? damageGoal.id : null) ||
+          goalKey(generated.goal) !== (damageGoal ? goalKey(damageGoal.id) : "null") ||
           Math.round(generated.metrics.minEhp) !== Math.round(damageMinEhp) ||
           generated.metrics.cycle.ids.join("") !== [...String(damageForm.cycle || "")].filter((digit) => "1234".includes(digit)).join("") ||
           generated.metrics.cycle.cps !== damageForm.cps ||
           Boolean(generated.metrics.requireSustain) !== Boolean(damageForm.sustain) ||
           Boolean(generated.metrics.excludeEvents) !== (damageForm.noEvents !== false) ||
           Boolean(generated.metrics.tradeableOnly) !== Boolean(damageForm.tradeable) ||
+          (generated.metrics.spendFreeSkillPoints !== false) !== (damageForm.freeSp !== false) ||
           itemFilterKey(generated.options) !== itemFilterKey(normalizeOptions(options)) ||
           generated.treeSettings.selected.length !== treeIds.length
         : generated.level !== level || generated.playerClass !== playerClass || generated.archetype !== archetype || !sameOptions(generated.options, options))
@@ -11612,34 +13091,39 @@ export default function BuildRecommender() {
     setDamageProgress({ label: "Starting", fraction: 0 });
     setBuildError(null);
     const cycleDigits = [...String(damageForm.cycle || "")].filter((digit) => "1234".includes(digit)).join("");
-    const historyKey = JSON.stringify([playerClass, level, treeIds, damageGoal.id, cycleDigits, damageForm.cps, damageForm.steal, damageForm.gain, Boolean(damageForm.sustain), damageForm.noEvents !== false, Boolean(damageForm.tradeable), normalizeOptions(options)]);
+    // Portfel sesji: każdy build tej klasy wygenerowany w tej sesji (inny cel, próg EHP, cykl, poziom, filtry) jest
+    // punktem startu dla następnego - generator i tak sprawdza go od nowa pod bieżące filtry i bieżący cel. Testy
+    // portfelowe pokazały, że build zbudowany pod jeden czar bywa lepszy w innym niż build zbudowany pod ten drugi.
+    const historyKey = playerClass;
     const seeds = damageHistory.current.get(historyKey) || [];
+    // te same ustawienia (bez progu EHP) liczy potem lista buildów pod suwakiem
+    const params = {
+      playerClass,
+      level,
+      archetype: damageForm.preset || archetype || null,
+      treeSettings: damageTreeSettings,
+      goal: damageGoal.id,
+      cycle: { ids: [...String(damageForm.cycle || "")].filter((digit) => "1234".includes(digit)).map(Number), cps: damageForm.cps, steal: damageForm.steal, gain: damageForm.gain },
+      requireSustain: Boolean(damageForm.sustain),
+      excludeEvents: damageForm.noEvents !== false,
+      tradeableOnly: Boolean(damageForm.tradeable),
+      spendFreeSkillPoints: damageForm.freeSp !== false,
+      options,
+      powders: options.powders,
+    };
+    const key = sweepKeyNow;
     setTimeout(async () => {
       try {
         const started = performance.now();
-        const build = await generateDamageBuild({
-          seeds,
-          playerClass,
-          level,
-          archetype: damageForm.preset || archetype || null,
-          treeSettings: damageTreeSettings,
-          goal: damageGoal.id,
-          cycle: { ids: [...String(damageForm.cycle || "")].filter((digit) => "1234".includes(digit)).map(Number), cps: damageForm.cps, steal: damageForm.steal, gain: damageForm.gain },
-          minEhp: damageMinEhp,
-          requireSustain: Boolean(damageForm.sustain),
-          excludeEvents: damageForm.noEvents !== false,
-          tradeableOnly: Boolean(damageForm.tradeable),
-          options,
-          powders: options.powders,
-          onProgress: setDamageProgress,
-        });
+        const build = await generateDamageBuild({ ...params, seeds, minEhp: damageMinEhp, onProgress: setDamageProgress });
         setResult({ build, run: (result ? result.run : 0) + 1, ms: Math.max(1, Math.round(performance.now() - started)), at: new Date() });
+        sweepAfterGenerate(key, params, build);
         setGuideView(null);
         setSolverView(null);
         setTab("build");
         const seed = { picks: Object.fromEntries(build.slots.filter((slot) => slot.item && slot.id !== "weapon").map((slot) => [slot.id, slot.item])), weapon: build.slots.find((slot) => slot.id === "weapon").item };
         const signature = (entry) => [entry.weapon && entry.weapon.name, ...Object.values(entry.picks).map((item) => item.name).sort()].join("|");
-        const kept = [seed, ...seeds.filter((entry) => signature(entry) !== signature(seed))].slice(0, 12);
+        const kept = [seed, ...seeds.filter((entry) => signature(entry) !== signature(seed))].slice(0, 24);
         damageHistory.current.set(historyKey, kept);
       } catch (error) {
         setBuildError(error.message);
@@ -11647,6 +13131,111 @@ export default function BuildRecommender() {
       setDamageRunning(false);
       setDamageProgress(null);
     }, 30);
+  }
+
+  // ---- lista buildów dla kolejnych progów EHP ----
+  // zmiana ustawień przerywa liczenie listy dla starych ustawień (wynik i tak byłby ukryty)
+  useEffect(() => {
+    if (sweep && sweep.key !== sweepKeyNow && sweep.running) {
+      sweepToken.current += 1;
+      setSweep((current) => (current ? { ...current, running: false, rows: null } : current));
+    }
+  }, [sweepKeyNow]); // eslint-disable-line react-hooks/exhaustive-deps
+  // lista rozwinięta i widoczna, a jeszcze nie policzona: liczymy (po wygenerowaniu, po rozwinięciu, po powrocie
+  // do tych samych ustawień)
+  useEffect(() => {
+    if (!sweepOpen || !sweep || sweep.key !== sweepKeyNow || sweep.rows || sweep.running || !sweepSource.current || sweepSource.current.key !== sweep.key) return undefined;
+    const shown = result && result.build && result.build.mode === "damage" ? result.build : null;
+    const timer = setTimeout(() => runSweep(sweepSource.current, shown), 50);
+    return () => clearTimeout(timer);
+  }, [sweepOpen, sweep, sweepKeyNow]); // eslint-disable-line react-hooks/exhaustive-deps
+  // ---- lista buildów dla kolejnych progów EHP ----
+  function rememberSeed(build) {
+    const seeds = damageHistory.current.get(build.playerClass) || [];
+    const seed = { picks: Object.fromEntries(build.slots.filter((slot) => slot.item && slot.id !== "weapon").map((slot) => [slot.id, slot.item])), weapon: build.slots.find((slot) => slot.id === "weapon").item };
+    const signature = (entry) => [entry.weapon && entry.weapon.name, ...Object.values(entry.picks).map((item) => item.name).sort()].join("|");
+    damageHistory.current.set(build.playerClass, [seed, ...seeds.filter((entry) => signature(entry) !== signature(seed))].slice(0, 24));
+  }
+
+  async function runSweep(source, mainBuild) {
+    const token = (sweepToken.current += 1);
+    const step = ehpStep(source.ehpMax);
+    const rows = Array.from({ length: 21 }, (_, index) => ({ pct: index * 5, minEhp: step * index, status: "pending", build: null }));
+    const publish = (running) => setSweep((current) => (current && current.key === source.key ? { ...current, rows: rows.map((row) => ({ ...row })), running } : current));
+    publish(true);
+    for (let index = 0; index < rows.length; index += 1) {
+      if (sweepToken.current !== token) return;
+      const row = rows[index];
+      const previous = index > 0 ? rows[index - 1] : null;
+      if (previous && (previous.status === "fail" || previous.status === "unreachable")) {
+        row.status = "unreachable";
+        continue;
+      }
+      if (mainBuild && Math.round(mainBuild.metrics.minEhp) === Math.round(row.minEhp)) {
+        row.build = mainBuild;
+        row.status = mainBuild.passed ? "done" : "fail";
+      } else if (previous && previous.build && previous.build.passed && previous.build.metrics.ehp >= row.minEhp) {
+        // zestaw z poprzedniego progu przechodzi i ten, więc jest też odpowiedzią dla niego
+        row.build = { ...previous.build, metrics: { ...previous.build.metrics, minEhp: row.minEhp } };
+        row.status = "same";
+      } else {
+        row.status = "running";
+        publish(true);
+        try {
+          const seeds = damageHistory.current.get(source.params.playerClass) || [];
+          const build = await generateDamageBuild({ ...source.params, seeds, minEhp: row.minEhp, effort: "quick", onProgress: () => {} });
+          if (sweepToken.current !== token) return;
+          row.build = build;
+          row.status = build.passed ? "done" : "fail";
+          if (build.passed) {
+            rememberSeed(build);
+            // build z wyższego progu przechodzi też wszystkie niższe - jeśli jest mocniejszy, jest lepszą odpowiedzią
+            // także dla nich (lista zostaje malejąca, jak powinna)
+            for (let lower = 0; lower < index; lower += 1) {
+              const target = rows[lower];
+              if (target.build && target.build.passed && target.build.metrics.damage < build.metrics.damage) {
+                target.build = { ...build, metrics: { ...build.metrics, minEhp: target.minEhp } };
+                target.status = "same";
+              }
+            }
+          }
+        } catch (error) {
+          row.status = "fail";
+        }
+      }
+      publish(true);
+    }
+    publish(false);
+  }
+
+  function sweepAfterGenerate(key, params, build) {
+    const sameSettings = sweepSource.current && sweepSource.current.key === key;
+    const source = { key, params, ehpMax: reachableEhp(params.playerClass, params.level) };
+    sweepSource.current = source;
+    if (sameSettings) {
+      // ten sam zestaw ustawień: pełny wynik trafia do swojego wiersza (lepszy niż szybki przebieg listy)
+      setSweep((current) =>
+        current && current.key === key && current.rows
+          ? { ...current, rows: current.rows.map((row) => (Math.round(row.minEhp) === Math.round(build.metrics.minEhp) ? { ...row, build, status: build.passed ? "done" : "fail" } : row)) }
+          : current
+      );
+      return;
+    }
+    sweepToken.current += 1;
+    setSweep({ key, rows: null, running: false, goalLabel: goalLabelOf(build) });
+  }
+
+  function toggleSweep() {
+    setSweepOpen((open) => !open);
+  }
+
+  function pickSweepRow(row) {
+    if (!row.build) return;
+    setResult({ build: row.build, run: (result ? result.run : 0) + 1, ms: row.build.stats ? row.build.stats.ms : 0, at: new Date() });
+    setDamageForm((current) => ({ ...current, minEhp: row.minEhp }));
+    setGuideView(null);
+    setSolverView(null);
+    setTab("build");
   }
 
   function handleClassChange(event) {
@@ -11826,6 +13415,11 @@ export default function BuildRecommender() {
                   options={options}
                   onOptions={setOptions}
                   onBrowse={() => setBrowseOpen(true)}
+                  sweep={sweep && sweep.key === sweepKeyNow ? sweep : null}
+                  sweepOpen={sweepOpen}
+                  onSweepToggle={toggleSweep}
+                  onSweepPick={pickSweepRow}
+                  shownBuild={result && result.build && result.build.mode === "damage" ? result.build : null}
                 />
               {buildError && <p className="text-xs text-red-400">{buildError}</p>}
             </section>
@@ -11836,7 +13430,7 @@ export default function BuildRecommender() {
             </p>
           </aside>
 
-          <main className="flex flex-col gap-4 lg:col-span-8 xl:col-span-9" aria-live="polite">
+          <main className={`flex flex-col gap-4 lg:col-span-8 xl:col-span-9 ${tab === "build" && !build ? "order-first lg:order-none" : ""}`} aria-live="polite">
             <div className="wbr-tabs" role="tablist" aria-label="Views">
               {[
                 ["build", guideView ? "Guide build" : solverView ? "Solver build" : "Build", null, "◈"],
@@ -11874,13 +13468,22 @@ export default function BuildRecommender() {
             </div>
 
             {tab === "tree" && !playerClass && <NeedsPick what="a class" why="The ability tree is per class." />}
+            {tab === "tree" && playerClass && !build && (
+              <button type="button" className="mc-btn mc-btn-primary self-start" onClick={() => setTab("build")}>
+                ◂ Back to the setup guide{treeIds.length > 0 ? ` · use this tree (${treeIds.length} abilities)` : ""}
+              </button>
+            )}
             {tab === "tree" && playerClass && (
               <AbilityTree
                 playerClass={playerClass}
                 level={effectiveLevel}
                 rank={rank}
                 selected={treeSelections[playerClass] || []}
-                onChange={(ids) => setTreeSelections((current) => ({ ...current, [playerClass]: ids }))}
+                onChange={(ids) => {
+                  setTreeSelections((current) => ({ ...current, [playerClass]: ids }));
+                  // ręczna zmiana drzewka = "własne drzewko" (archetyp do przewodnika i Build info zostaje w `archetype`)
+                  setDamageForm((current) => (current.preset ? { ...current, preset: "" } : current));
+                }}
                 buildArchetype={archetype}
                 onUseArchetype={(arch) => setArchetype(arch)}
               />
@@ -11936,6 +13539,38 @@ export default function BuildRecommender() {
               />
             )}
 
+            {tab === "build" && !build && buildMode === "new" && playerClass && (
+              <SetupWizard
+                playerClass={playerClass}
+                onClassReset={() => handleClassChange({ target: { value: "" } })}
+                rank={rank}
+                rankConfirmed={rankConfirmed}
+                onRank={(event) => {
+                  setRank(event.target.value);
+                  setRankConfirmed(true);
+                  saveRank(event.target.value);
+                }}
+                level={level}
+                levelInput={levelInput}
+                onLevelInput={(event) => setLevelInput(event.target.value)}
+                treeIds={treeIds}
+                apCap={apCap}
+                preset={damageForm.preset}
+                onPreset={applyTreePreset}
+                onEditTree={() => setTab("tree")}
+                goals={damageGoals}
+                goal={damageGoal}
+                form={damageForm}
+                onForm={setDamageForm}
+                ehpMax={ehpMax}
+                options={options}
+                onOptions={setOptions}
+                onGenerate={handleGenerateDamage}
+                running={damageRunning}
+                progress={damageProgress}
+                treeSettings={damageTreeSettings}
+              />
+            )}
             {tab === "build" && !build && buildMode === "new" && playerClass && (
               <ClassOverview
                 key={playerClass}
@@ -12025,7 +13660,7 @@ export default function BuildRecommender() {
                   <p className="text-sm text-zinc-400">
                     {build.mode === "damage" ? (
                       <>
-                        Damage first · <span className="tabular-nums font-bold text-amber-400">{formatNumber(Math.round(build.metrics.damage))}</span> {build.goal === DAMAGE_GOAL_MAIN ? "main attack DPS" : `per ${build.goalName} hit`} · from{" "}
+                        Damage first · <span className="tabular-nums font-bold text-amber-400">{formatNumber(Math.round(build.metrics.damage))}</span> {build.goal === DAMAGE_GOAL_MAIN ? "main attack DPS" : Array.isArray(build.goal) ? `${build.goalName} (sum of one cast each)` : `per ${build.goalName} hit`} · from{" "}
                       </>
                     ) : (
                       <>
@@ -12116,6 +13751,13 @@ export default function BuildRecommender() {
                     />
                   ))}
                 </div>
+                {build.mode === "damage" && !guideView && !solverView && <WynnbuilderExport build={build} treeSettings={buildTreeSettings} />}
+                {build.mode === "damage" && !guideView && !solverView && (
+                  <button type="button" onClick={() => setWhyOpen(true)} className="mc-btn mc-btn-primary wbr-why-btn mt-2 w-full">
+                    Why this build?
+                  </button>
+                )}
+                {whyOpen && build.mode === "damage" && <WhyBuildDialog build={build} onClose={() => setWhyOpen(false)} />}
               </div>
 
               <div className="flex flex-col gap-3 xl:sticky xl:top-4 xl:max-h-[calc(100vh-2rem)] xl:overflow-y-auto xl:pr-1">
@@ -12185,6 +13827,14 @@ export default function BuildRecommender() {
 // interfejs - testy nie mają własnej kopii wzorów. Dodatkowy eksport obok komponentu wyłącza tylko Fast Refresh
 // tego pliku w `npm run dev` (po zapisie strona przeładowuje się w całości).
 export const __engine = {
+  wynnbuilderLink,
+  decodeTreeHash,
+  encodeTreeHash,
+  wynnbuilderExtras,
+  pickTomes,
+  pickAspects,
+  extrasEnvFor,
+  WB_IDS,
   CLASSES,
   SLOTS,
   SKILLS,
@@ -12215,4 +13865,5 @@ export const __engine = {
   singleCopy,
   classPreview,
   setBonusSkills,
+  allocateFreeSkillPoints,
 };

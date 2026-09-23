@@ -45,7 +45,7 @@ export function archetypeCycles(playerClass, archetype, level, treeSettings) {
  * Build a scenario.
  * @param {object} s
  *   playerClass, archetype, level          required
- *   goal       "first" (strongest spell, the UI default) | "main" | "random" | spell id
+ *   goal       "first" (strongest spell, the UI default) | "main" | "random" | "multi" (two goals, their sum) | spell id
  *   ehpPct     minimum EHP as % of the reachable maximum (the UI slider; 0 = off)
  *   cycle      "none" | "first" | "random" | array of spell ids
  *   cps, steal, gain, requireSustain, excludeEvents, tradeableOnly, options  as in the UI
@@ -61,6 +61,7 @@ export function makeScenario(s) {
   let goal = goals[0].id;
   if (s.goal === "main") goal = E.DAMAGE_GOAL_MAIN;
   else if (s.goal === "random") goal = r.pick(goals).id;
+  else if (s.goal === "multi" && goals.length >= 2) goal = [goals[0].id, r.pick(goals.slice(1)).id];
   else if (typeof s.goal === "number" && goals.some((entry) => entry.id === s.goal)) goal = s.goal;
   const ehpMax = E.reachableEhp(playerClass, level);
   const ehpPct = s.ehpPct ?? 25;
@@ -86,7 +87,7 @@ export function makeScenario(s) {
     options: E.normalizeOptions(s.options || {}),
     powders: "auto",
   };
-  const goalName = (goals.find((entry) => entry.id === goal) || { name: String(goal) }).name;
+  const goalName = (Array.isArray(goal) ? goal : [goal]).map((id) => (goals.find((entry) => entry.id === id) || { name: String(id) }).name).join(" + ");
   const label = `${playerClass}/${archetype} L${level} ${goalName} EHP≥${ehpPct}%${cycleIds.length ? ` cycle ${cycleIds.join("")}@${cycle.cps}` : ""}${params.requireSustain ? " sustain" : ""}${params.tradeableOnly ? " tradeable" : ""}${params.excludeEvents ? "" : " +events"}${describeOptions(params.options)}`;
   return { label, params, meta: { ehpMax, ehpPct, goals, cycles, treeIds: tree.ids } };
 }

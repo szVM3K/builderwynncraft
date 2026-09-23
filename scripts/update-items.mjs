@@ -7,6 +7,9 @@ import fs from "node:fs";
 
 const REPO = "wynnbuilder/wynnbuilder.github.io";
 const OUTPUT = new URL("../src/wynncraft-items.json", import.meta.url);
+// Numery przedmiotów Wynnbuildera + stałe kodowania linku (przycisk "Open in Wynnbuilder"): osobny plik, żeby "id"
+// nie mieszało się z identyfikacjami przedmiotów.
+const IDS_OUTPUT = new URL("../src/wynnbuilder-ids.json", import.meta.url);
 // Pola Wynnbuildera, których aplikacja nie potrzebuje (opisy, dane o dropie, wewnętrzne ID).
 const SKIP = new Set([
   "lore", "dropInfo", "emblem", "id", "category", "sets", "classReq",
@@ -117,3 +120,29 @@ Object.entries((!Array.isArray(raw) && raw.sets) || {}).forEach(([name, data]) =
 });
 fs.writeFileSync(OUTPUT, JSON.stringify({ version, source, items, sets }));
 console.log(`Saved ${items.length} items and ${Object.keys(sets).length} sets (Wynnbuilder data ${version}) to ${OUTPUT.pathname}`);
+
+// Link do Wynnbuildera: numer wersji danych (indeks w wynn_version_names z js/load_item.js), stałe kodowania tej
+// wersji (data/<wersja>/encoding_consts.json) i numer każdego przedmiotu (stały między wersjami).
+async function fetchText(url) {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Download failed: HTTP ${response.status} for ${url}`);
+  return response.text();
+}
+if (version !== "local") {
+  const raw_base = `https://raw.githubusercontent.com/${REPO}/master`;
+  const loader = await fetchText(`${raw_base}/js/load_item.js`);
+  const block = loader.slice(loader.indexOf("wynn_version_names = ["), loader.indexOf("];", loader.indexOf("wynn_version_names = [")));
+  const versionNames = [...block.matchAll(/'([\d.]+)'/g)].map((match) => match[1]);
+  const versionIndex = versionNames.indexOf(version);
+  if (versionIndex < 0) throw new Error(`Version ${version} is not in Wynnbuilder's wynn_version_names`);
+  const encoding = JSON.parse(await fetchText(`${raw_base}/data/${version}/encoding_consts.json`));
+  const ids = {};
+  (Array.isArray(raw) ? raw : raw.items).forEach((item) => {
+    if (item.remapID !== undefined || typeof item.id !== "number") return;
+    ids[item.displayName || item.name] = item.id;
+  });
+  fs.writeFileSync(IDS_OUTPUT, JSON.stringify({ version, versionIndex, encoding, items: ids }));
+  console.log(`Saved ${Object.keys(ids).length} Wynnbuilder item numbers (version index ${versionIndex}) to ${IDS_OUTPUT.pathname}`);
+} else {
+  console.log("Local items file: src/wynnbuilder-ids.json left as it is (needs a Wynnbuilder data version).");
+}
