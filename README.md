@@ -32,6 +32,8 @@ npm test             # matrix (5 classes × 3 archetypes × levels 30/50/70/90/1
 npm run test:sp      # skill point solver only: 20,000 random item sets, a few seconds
 npm run test:wynnbuilder  # "Open in Wynnbuilder" links: 10 builds encoded and decoded back, ~1 min
 npm run test:stable  # same settings twice = same build (5 scenarios), a few minutes
+npm run test:workers # Web Worker tasks give the same build as one thread (2 scenarios), a few minutes
+npm run test:deep    # deep optimality certificate: exhaustive pair swaps + triples for 8 builds, ~15-20 min
 npm run test:matrix  # the matrix only
 npm run test:soak    # endless random scenarios in parallel shards until Ctrl+C
 ```
@@ -48,6 +50,17 @@ What is checked for each generated build (`tests/harness/checks.js`):
   (other goals, EHP thresholds, cycles, levels) under this run's filters - if one passes and deals more damage, the
   result is provably not the best. A failed build that one swap would fix is an error too.
 - **Inefficiencies** (warn): free skill points that would add > 1 % damage, empty slots, searches over 15 s.
+
+**Deep certificate** (`npm run test:deep`, `deepCheck` in `tests/harness/checks.js`, `tests/deep/*.deep.js`): for
+8 full-effort builds (all classes, levels 60-120, with EHP thresholds and a mana cycle) the candidate list of every
+slot is built from *all* single swaps - the best ~16 by damage, 8 by EHP, 8 cheapest in skill points, 8 for mana
+(with a cycle), 8 strongest that break a filter on their own (they need a partner) and "slot empty", about 30-40
+per slot - and then **every pair of slots × every pair from those lists** is evaluated exactly (~30-50 thousand pair
+builds per build), plus every triple of slots over the top 5 of each list and 5,000 random triples. Any move that
+passes the filters and beats the build by more than 0.5 % fails the test; smaller gains are reported. The first run
+found two builds with a better pair (Warrior Paladin L95 +3.4 %: chestplate + ring; Archer Boltslinger L60
++1.1 %: necklace + powdered weapon) - both fixed by the exact pair stage below; triples never beat pairs. Now all 8
+pass; the largest remaining gain is +0.09 %. `DEEP_PER_SLOT` / `DEEP_TRIPLES` change the size.
 
 Useful variables (PowerShell: `$env:NAME="value"; npm run …`, cmd: `set NAME=value && npm run …`, bash:
 `NAME=value npm run …`):
@@ -213,6 +226,16 @@ filters). The Skill points panel and the summary show them in brackets: `Strengt
 **Spend free skill points** (Items, on by default) turns this off - the rest then stays unspent, as in a fresh
 Wynnbuilder build.
 
+**Exact pair swaps.** The winner of every pass then gets the same pair check as the deep test, inside the search:
+candidate lists per slot (best by damage, EHP, skill point cost, mana, strongest that break a filter alone, empty
+slot, every weapon with every powder element), every pair of slots × every pair from the lists, exact skill points
+with free points. To keep it affordable a pair is only fully evaluated when, without free points or with a coarse
+2-step split of them, it already reaches 90 % of the current result (measured on the pairs that really win: the
+coarse split is 3-7 % below the full one); free points are skipped entirely when an optimistic bound (every skill
+gets all free points at once) can't pass the filters or beat the result. After an improvement the build goes back
+through single swaps and restarts. When nothing passes the filters, the lists are short "repair" lists (EHP, skill
+point cost, mana).
+
 **The first result is final.** The search doesn't stop at the first answer: it restarts from its own result
 (approximate swaps, then the exact check again) until nothing improves, does the same from the three next-best
 candidates of the polishing step (other weapons and sets - local optima differ), and then runs whole extra
@@ -228,6 +251,21 @@ Every build of the class generated in the same session (any goal, EHP threshold,
 into the next search as a starting point and re-checked against the current filters (and checked exactly "as is"
 at the end), so switching spells or dragging the EHP slider never loses a better build you already found. A
 progress bar shows the stage and pass.
+
+**Background thread (Web Worker).** The search runs in a Web Worker, so the page never freezes while it works
+(before: frames froze for up to ~0.7 s at a time) and **Stop** (next to the progress bar) ends it at once and keeps
+the previous build. The List of builds runs there too. The GitHub Pages build starts the worker from
+`src/engine-worker.js` (Vite bundles it as a separate file); the single-file version starts it from its own
+`<script id="wbr-app">` through a Blob URL. If workers can't start (old browser, blocked), the search runs on the
+page as before - the result is the same, only the page is busier. The build comes back as plain data and its items
+are swapped for this page's item objects (`rehydrateBuild`); live market prices stay on the page, so searches with
+a budget or "listed only" and live prices run on the page.
+
+The generator can also hand the "converge" starts (the winner + 3 other strong candidates) to helper threads -
+`generateDamageBuild({ task })` computes one start, and `tests/workers.test.js` checks the result equals the
+single-thread one. It is **off by default**: helpers start without the main thread's memory of evaluated sets, and
+measured on 4 scenarios that made 4 cores only 0.89-1.24x as fast (slower on 2 cores). `window.WBR_WORKER_COUNT = 4`
+turns it on for experiments.
 
 - **Guide builds at level 100+**: from level 100 the generator treats the Wynnbuilder guide builds as the
   reference for that class — at high level nothing in the database beats them. Their weapons join the weapon list

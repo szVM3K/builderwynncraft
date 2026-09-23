@@ -7,7 +7,7 @@
 //           filter was found by an independent search)
 //   warn  - likely improvement / inefficiency (e.g. unspent skill points that would add damage, slow search)
 //   info  - statistics worth watching, never fails a test
-import { E } from "./scenarios.js";
+import { E, rng } from "./scenarios.js";
 
 const SLOT_TYPE = Object.fromEntries(E.SLOTS.map((slot) => [slot.id, slot.type]));
 const GEAR_SLOTS = E.SLOTS.map((slot) => slot.id).filter((id) => id !== "weapon");
@@ -421,4 +421,131 @@ export function summarize(findings) {
     counts[key] = (counts[key] || 0) + 1;
   });
   return counts;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// DEEP certificate (npm run test:deep): stronger than checkBuild's sampled 2-opt.
+//  - Candidate list per slot from ALL single swaps (feasible or not): best by damage, by EHP, by lowest skill point
+//    cost, by mana (with a cycle), the strongest ones that break a filter on their own (they need a partner that
+//    pays for them - the typical 2-opt move) and "slot empty". About 30-40 per slot.
+//  - Pairs: every pair of slots (36) × every combination of their lists - exhaustive on those lists.
+//  - Triples: every triple of slots (84) × the top few of each list, plus `triples` random triples from the full lists.
+// Any move that passes every filter and beats the build by more than limits.gainError is an error: the generator
+// provably left that much on the table. The best gains found (even tiny ones) are reported, so a run also measures
+// how close the builds are to optimal within these neighbourhoods.
+export async function deepCheck(scenario, build, { perSlot = 16, tripleTop = 5, triples = 5000, seed = 1, limits = DEFAULT_LIMITS } = {}) {
+  const started = performance.now();
+  const { params } = scenario;
+  const picks = picksOf(build);
+  const { evaluate } = makeEvaluator(params);
+  const findings = [];
+  const add = (severity, code, message, data = {}) => findings.push({ severity, code, message, data });
+  const damage = build.metrics.damage;
+  const gainOf = (metrics) => (build.passed ? metrics.damage / Math.max(1e-9, damage) - 1 : Infinity);
+  const pinned = params.options.locked || {};
+  const key = (item) => (item ? `${item.name}${powderKey(item)}` : "-");
+
+  const lists = {};
+  let singleEvals = 0;
+  for (const slot of E.SLOTS) {
+    await tick();
+    if (pinned[slot.id]) {
+      lists[slot.id] = [];
+      continue;
+    }
+    const pool = eligiblePool(params, slot.id);
+    const variants = slot.id === "weapon" ? pool.flatMap(weaponVariants) : pool;
+    const scored = [];
+    variants.forEach((candidate) => {
+      if (key(candidate) === key(picks[slot.id])) return;
+      scored.push({ candidate, metrics: evaluate({ ...picks, [slot.id]: candidate }) });
+      singleEvals += 1;
+    });
+    const top = (list, score, count) => [...list].sort((a, b) => score(b) - score(a)).slice(0, count).map((entry) => entry.candidate);
+    const chosen = [
+      ...top(scored, (entry) => entry.metrics.damage, perSlot),
+      ...top(scored, (entry) => entry.metrics.ehp, Math.ceil(perSlot / 2)),
+      ...top(scored, (entry) => -entry.metrics.sp.total, Math.ceil(perSlot / 2)),
+      ...(params.cycle.ids.length ? top(scored, (entry) => entry.metrics.manaNet, Math.ceil(perSlot / 2)) : []),
+      ...top(scored.filter((entry) => !entry.metrics.feasible), (entry) => entry.metrics.damage, Math.ceil(perSlot / 2)),
+    ];
+    const unique = [...new Map(chosen.map((item) => [key(item), item])).values()];
+    lists[slot.id] = slot.id === "weapon" ? unique : [...unique, null];
+  }
+
+  // Pairs - exhaustive over the lists
+  const slots = E.SLOTS.map((slot) => slot.id).filter((id) => lists[id].length > 0);
+  let bestPair = null;
+  let pairEvals = 0;
+  for (let i = 0; i < slots.length; i += 1) {
+    for (let j = i + 1; j < slots.length; j += 1) {
+      await tick();
+      for (const a of lists[slots[i]]) {
+        for (const b of lists[slots[j]]) {
+          if (!a && slots[i] === "weapon") continue;
+          const trial = { ...picks, [slots[i]]: a, [slots[j]]: b };
+          const metrics = evaluate(trial);
+          pairEvals += 1;
+          if (!metrics.feasible) continue;
+          const gain = gainOf(metrics);
+          if (!bestPair || gain > bestPair.gain) bestPair = { gain, move: { [slots[i]]: key(a), [slots[j]]: key(b) }, damage: metrics.damage };
+        }
+      }
+    }
+  }
+
+  // Triples - systematic on the top of each list, then random over the full lists
+  let bestTriple = null;
+  let tripleEvals = 0;
+  const tryTriple = (s1, a, s2, b, s3, c) => {
+    const trial = { ...picks, [s1]: a, [s2]: b, [s3]: c };
+    const metrics = evaluate(trial);
+    tripleEvals += 1;
+    if (!metrics.feasible) return;
+    const gain = gainOf(metrics);
+    if (!bestTriple || gain > bestTriple.gain) bestTriple = { gain, move: { [s1]: key(a), [s2]: key(b), [s3]: key(c) }, damage: metrics.damage };
+  };
+  for (let i = 0; i < slots.length; i += 1) {
+    for (let j = i + 1; j < slots.length; j += 1) {
+      await tick();
+      for (let k = j + 1; k < slots.length; k += 1) {
+        for (const a of lists[slots[i]].slice(0, tripleTop)) for (const b of lists[slots[j]].slice(0, tripleTop)) for (const c of lists[slots[k]].slice(0, tripleTop)) tryTriple(slots[i], a, slots[j], b, slots[k], c);
+      }
+    }
+  }
+  const random = rng(seed);
+  for (let n = 0; n < triples && slots.length >= 3; n += 1) {
+    if (n % 500 === 0) await tick();
+    const chosen = [];
+    while (chosen.length < 3) {
+      const slotId = random.pick(slots);
+      if (!chosen.includes(slotId)) chosen.push(slotId);
+    }
+    const [s1, s2, s3] = chosen;
+    const a = random.pick(lists[s1]);
+    const b = random.pick(lists[s2]);
+    const c = random.pick(lists[s3]);
+    if ((!a && s1 === "weapon") || (!b && s2 === "weapon") || (!c && s3 === "weapon")) continue;
+    tryTriple(s1, a, s2, b, s3, c);
+  }
+
+  for (const [code, best, label] of [
+    ["NOT_2OPT_DEEP", bestPair, "pair"],
+    ["NOT_3OPT", bestTriple, "triple"],
+  ]) {
+    if (!best) continue;
+    if (!build.passed) add("error", `FAILED_BUT_${label.toUpperCase()}_PASSES`, `build fails its filters, but the ${label} ${JSON.stringify(best.move)} passes them`, best);
+    else if (best.gain > limits.gainError) add("error", code, `${label} ${JSON.stringify(best.move)} gives +${(best.gain * 100).toFixed(2)} % and passes every filter`, best);
+    else if (best.gain > limits.gainWarn) add("warn", `NEAR_${code}`, `${label} ${JSON.stringify(best.move)} gives +${(best.gain * 100).toFixed(3)} %`, best);
+  }
+  const stats = {
+    listSizes: Object.fromEntries(slots.map((id) => [id, lists[id].length])),
+    singleEvals,
+    pairEvals,
+    tripleEvals,
+    bestPairGain: bestPair ? bestPair.gain : null,
+    bestTripleGain: bestTriple ? bestTriple.gain : null,
+    ms: Math.round(performance.now() - started),
+  };
+  return { findings, stats };
 }

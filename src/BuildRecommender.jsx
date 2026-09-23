@@ -2035,15 +2035,18 @@ function sustainProxy(item) {
 // (1/4 pozostałych naraz), najpierw tak, żeby zestaw przeszedł progi (DEF/AGI podnoszą EHP, INT obniża koszt
 // czarów), potem pod obrażenia. Punkty tylko dodają, więc przydział nigdy nie psuje wymagań przedmiotów.
 // rank(metrics) porównuje wyniki (większy = lepszy); zwraca dodatkowe punkty i metryki z nimi.
-function allocateFreeSkillPoints(ctx, items, weapon, sp, goal, cycle, rank, altGoals = null) {
+// coarse: szybka, zgrubna wersja (2 kroki po połowie wolnych punktów) - tylko jako sito przed pełnym rozdziałem
+function allocateFreeSkillPoints(ctx, items, weapon, sp, goal, cycle, rank, altGoals = null, coarse = false) {
   const extra = { str: 0, dex: 0, int: 0, def: 0, agi: 0 };
   const evalWith = (bonus) => evaluateGoal(ctx, items, weapon, Object.fromEntries(SKILLS.map((skill) => [skill, (sp.totals[skill] || 0) + bonus[skill]])), goal, cycle, altGoals);
   let current = evalWith(extra);
   let left = ctx.available - sp.total;
   if (left <= 0 || sp.capOverflow > 0) return { extra, metrics: current, spent: 0 };
   let currentRank = rank(current);
-  while (left > 0) {
-    const chunk = Math.max(1, Math.ceil(left / 4));
+  let steps = 0;
+  while (left > 0 && (!coarse || steps < 2)) {
+    steps += 1;
+    const chunk = Math.max(1, Math.ceil(left / (coarse ? 2 : 4)));
     let step = null;
     SKILLS.forEach((skill) => {
       const room = MAX_ASSIGNED_PER_SKILL - (sp.assigned[skill] || 0) - extra[skill];
@@ -2081,7 +2084,7 @@ function yieldToBrowser() {
   });
 }
 
-async function generateDamageBuild({ playerClass, level, archetype = null, treeSettings, goal, cycle, minEhp = 0, requireSustain = false, options = DEFAULT_OPTIONS, items = ITEM_DB, powders = "auto", objective = "damage", onProgress = null, seeds = [], excludeEvents = true, tradeableOnly = false, effort = "full", spendFreeSkillPoints = true }) {
+async function generateDamageBuild({ playerClass, level, archetype = null, treeSettings, goal, cycle, minEhp = 0, requireSustain = false, options = DEFAULT_OPTIONS, items = ITEM_DB, powders = "auto", objective = "damage", onProgress = null, seeds = [], excludeEvents = true, tradeableOnly = false, effort = "full", spendFreeSkillPoints = true, task = null, parallel = null, caches = null }) {
   // effort "quick" (lista buildów dla każdego progu EHP): bez wiązki z zapasem EHP i wiązek pod inne czary,
   // mniej kandydatów do dopieszczania - ok. 2-3 razy szybciej, wynik zwykle o kilka procent słabszy.
   const quickEffort = effort === "quick";
@@ -2182,7 +2185,9 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
 
   // Ten sam zestaw (ta sama broń z tymi samymi powderami + te same przedmioty w dowolnej kolejności) ocenia się
   // w wiązce, dopieszczaniu i podmianach wiele razy - wynik trzymamy w pamięci podręcznej na czas jednego szukania.
-  const evalCache = new Map();
+  // caches: pamięć ocen dzielona przez kolejne zadania tego samego szukania w wątku pomocniczym (wartości zależą
+  // tylko od zestawu, więc wynik się nie zmienia - liczy się tylko szybciej)
+  const evalCache = (caches && caches.evalCache) || new Map();
   let evalCached = 0;
   const evaluate = (items2, weapon) => {
     let byWeapon = null;
@@ -2395,11 +2400,12 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
   return [byFeasible, byValue, byDamage, ...perWeapon.values()].filter(Boolean);
   };
 
-  let finalists = await runPhase("Searching", 0, minEhp > 0 && objective === "damage" ? 0.33 : 0.6);
+  // tryb zadania (wątek pomocniczy) pomija wiązkę: dostaje gotowy start
+  let finalists = task ? [] : await runPhase("Searching", 0, minEhp > 0 && objective === "damage" ? 0.33 : 0.6);
   // Krok 2b: druga wiązka z zapasem EHP (+20%). Zestaw, który przechodzi wyższy próg, przechodzi też niższy, a wiązka
   // prowadzona od początku "bardziej obronnie" trafia w inne kombinacje - bez tego zdarzało się, że wyższy próg dawał
   // większe obrażenia niż niższy (np. 35% EHP > 30%), czyli przy niższym progu gubiliśmy lepszy zestaw.
-  if (objective === "damage" && minEhp > 0 && !quickEffort) {
+  if (objective === "damage" && minEhp > 0 && !quickEffort && !task) {
     for (const [index, margin] of DAMAGE_BEAM.ladder.entries()) {
       ehpTarget = minEhp * margin;
       const span = 0.29 / DAMAGE_BEAM.ladder.length;
@@ -2412,7 +2418,7 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
   // Zestaw zbudowany "pod Uproot" bywał mocniejszy w Blood Sorrow niż zestaw zbudowany pod sam Blood Sorrow
   // (testy portfelowe: +2-29%), bo liniowe wagi celu przy pustym zestawie źle przewidują, co się opłaci.
   // Kandydaci z tych wiązek konkurują dalej obrażeniami właściwego celu.
-  if (objective === "damage" && !quickEffort) {
+  if (objective === "damage" && !quickEffort && !task) {
     for (const [index] of altGoals.entries()) {
       phase = index;
       const around = await runPhase("Searching around other spells", 0.62, 0.66);
@@ -2424,7 +2430,7 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
     candidate.ok = feasible(candidate.metrics);
   });
   // gotowe zestawy z poradnika jako punkt odniesienia (i punkt startu dla kroku 3)
-  guideSets.forEach((set) => {
+  if (!task) guideSets.forEach((set) => {
     let seedWeapon = set.weapon;
     let seedMetrics = null;
     powderElements.forEach((element) => {
@@ -2466,9 +2472,9 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
     });
     return { picks, items: Object.values(picks), weapon: seedWeapon, metrics: seedMetrics, ok: feasible(seedMetrics) };
   };
-  const seedCandidates = (seeds || []).map(candidateFromSeed).filter(Boolean);
+  const seedCandidates = task ? [] : (seeds || []).map(candidateFromSeed).filter(Boolean);
   finalists.push(...seedCandidates);
-  if (objective === "damage" && !finalists.some((candidate) => candidate.ok)) {
+  if (!task && objective === "damage" && !finalists.some((candidate) => candidate.ok)) {
     // nic nie przeszło progów: drugi przebieg maksymalizuje EHP (z tym samym filtrem many), żeby mieć z czego
     // podnosić obrażenia w kroku 3
     phase = "ehp";
@@ -2615,7 +2621,7 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
   // Krok 5: ostateczna kontrola DOKŁADNA - Skill Pointy w kolejności zakładania z gry (a nie przybliżone),
   // wolne punkty wydane pod cel, każdy przedmiot z bazy w każdym slocie i każda broń klasy z każdym żywiołem
   // powderów. Wynik to zestaw, którego nie poprawia żadna pojedyncza podmiana (to samo sprawdzają testy QA).
-  const exactCache = new Map();
+  const exactCache = (caches && caches.exactCache) || new Map();
   const exactOk = (metrics) =>
     metrics.spOver === 0 &&
     (minEhp <= 0 || metrics.ehp >= minEhp) &&
@@ -2630,33 +2636,51 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
   // liczymy z liczby JEGO wolnych punktów, a nie z zysku obecnego zestawu.
   let perPoint = 0;
   const potential = (damage, spTotal) => damage * (1 + perPoint * Math.max(0, ctx.available - spTotal)) * 1.02;
+  // Wynik zależy tylko od zestawu, progu "bar" i perPoint (nie od tego, co wcześniej trafiło do pamięci): w pamięci
+  // trzymamy ocenę bez wolnych punktów i - osobno - z rozdzielonymi punktami, a decyzję, którą oddać, podejmujemy
+  // przy każdym odczycie. Dzięki temu równoległe starty (Web Workery, każdy z własną pamięcią) liczą to samo.
   const evaluateExact = (items2, weapon, bar = null) => {
     const key = `${weapon.name}${weapon.powders ? `+${weapon.powders.element}` : ""}|${items2.map((item) => item.name).sort().join("|")}`;
-    const cached = exactCache.get(key);
-    if (cached && (cached.allocated || bar === null || !cached.canAllocate || potential(cached.damage, cached.sp.total) < bar)) return cached;
-    const all = [...items2, weapon];
-    const sp = computeSkillPoints(all, true);
-    const illegal = activeSets(all).some((entry) => entry.illegal);
-    const spOver = Math.max(0, sp.total - ctx.available) + sp.capOverflow + (illegal ? ILLEGAL_SET_OVERFLOW : 0);
-    const cost = budget ? buildCost(all, lockedNames).total : 0;
-    const wrap = (metrics, extra, allocated, canAllocate) => {
-      const out = { ...metrics, sp, spOver, cost, extra, allocated, canAllocate };
-      delete out.stats;
-      return out;
-    };
-    // spendFreeSkillPoints false (opcja "Spend free skill points" wyłączona): wolne punkty zostają niewydane
-    const plain = cached || wrap(evaluateGoal(ctx, all, weapon, sp.totals, goal, cycleCfg), null, false, spendFreeSkillPoints && spOver === 0 && sp.total < ctx.available);
-    let metrics = plain;
+    let entry = exactCache.get(key);
+    if (!entry) {
+      const all = [...items2, weapon];
+      const sp = computeSkillPoints(all, true);
+      const illegal = activeSets(all).some((set) => set.illegal);
+      const spOver = Math.max(0, sp.total - ctx.available) + sp.capOverflow + (illegal ? ILLEGAL_SET_OVERFLOW : 0);
+      const cost = budget ? buildCost(all, lockedNames).total : 0;
+      const wrap = (metrics, extra, allocated, canAllocate) => {
+        const out = { ...metrics, sp, spOver, cost, extra, allocated, canAllocate };
+        delete out.stats;
+        return out;
+      };
+      // spendFreeSkillPoints false (opcja "Spend free skill points" wyłączona): wolne punkty zostają niewydane
+      const plain = wrap(evaluateGoal(ctx, all, weapon, sp.totals, goal, cycleCfg), null, false, spendFreeSkillPoints && spOver === 0 && sp.total < ctx.available);
+      entry = { plain, all, sp, cost, wrap, alloc: null };
+      if (exactCache.size > 60000) exactCache.clear();
+      exactCache.set(key, entry);
+    }
+    const plain = entry.plain;
     // wolne punkty potrafią też naprawić progi (INT tanieje czary, DEF/AGI podnoszą EHP), więc nie odrzucamy
     // kandydata za braki - tylko za to, że nawet z wolnymi punktami nie pobije obecnego wyniku
-    const worthIt = plain.canAllocate && (bar === null || potential(plain.damage, sp.total) >= bar);
-    if (worthIt) {
-      const allocated = allocateFreeSkillPoints(ctx, all, weapon, sp, goal, cycleCfg, (m) => exactRank({ ...m, spOver: 0, cost }));
-      metrics = allocated.spent > 0 ? wrap(allocated.metrics, allocated.extra, true, true) : { ...plain, allocated: true };
+    const worthIt = plain.canAllocate && (bar === null || potential(plain.damage, entry.sp.total) >= bar);
+    if (!worthIt) return plain;
+    // Bezpieczne cięcie: wariant "każda umiejętność dostaje WSZYSTKIE wolne punkty naraz" jest górną granicą każdego
+    // prawdziwego rozdziału (obrażenia, EHP i mana tylko rosną ze skill pointami). Jeśli nawet on nie przechodzi
+    // progów albo nie bije obecnego wyniku, rozdzielanie (kilkadziesiąt ocen) nic nie zmieni - wynik jest ten sam.
+    if (bar !== null && !entry.alloc) {
+      if (entry.optimistic === undefined) {
+        const free = ctx.available - entry.sp.total;
+        const totals = Object.fromEntries(SKILLS.map((skill) => [skill, (entry.sp.totals[skill] || 0) + Math.max(0, Math.min(free, MAX_ASSIGNED_PER_SKILL - (entry.sp.assigned[skill] || 0)))]));
+        const best = evaluateGoal(ctx, entry.all, weapon, totals, goal, cycleCfg);
+        entry.optimistic = { damage: best.damage, ok: exactOk({ ...best, spOver: 0, cost: entry.cost }) };
+      }
+      if (!entry.optimistic.ok || entry.optimistic.damage < bar) return plain;
     }
-    if (exactCache.size > 60000) exactCache.clear();
-    exactCache.set(key, metrics);
-    return metrics;
+    if (!entry.alloc) {
+      const allocated = allocateFreeSkillPoints(ctx, entry.all, weapon, entry.sp, goal, cycleCfg, (m) => exactRank({ ...m, spOver: 0, cost: entry.cost }));
+      entry.alloc = allocated.spent > 0 ? entry.wrap(allocated.metrics, allocated.extra, true, true) : { ...plain, allocated: true };
+    }
+    return entry.alloc;
   };
   // przy tym samym braku do progów (nic nie przechodzi) wygrywa zestaw z większymi obrażeniami
   const exactBetter = (metrics, current) => {
@@ -2673,50 +2697,15 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
   // nie poprawi; wtedy ponowne kliknięcie z tymi samymi ustawieniami liczy to samo i daje ten sam build.
   let overall = null;
   let passSeed = null;
-  const passes = { count: 0, gains: 0, restarts: 0, others: 0 };
+  const passes = { count: 0, gains: 0, restarts: 0, others: 0, parallel: 0, pairs: 0 };
   const convergeMemo = new Map();
   const refineMemo = new Map();
   const polishMemo = new Map();
   const exactMemo = new Map();
+  const taskMemo = new Map();
   const keyOf = (candidate) => [candidate.weapon.name, candidate.weapon.powders ? candidate.weapon.powders.element : "", ...gearSlots.map((id) => (candidate.picks[id] ? candidate.picks[id].name : ""))].join("|");
-  for (let pass = 0; pass < (quickEffort ? 1 : 5); pass += 1) {
-  passes.count += 1;
-  perPoint = 0;
-  // poprzedni wynik stoi tam, gdzie postawiłoby go ponowne kliknięcie: przed zestawami z sesji (po zestawach
-  // "naprawczych", jeśli żaden kandydat z wiązki nie przechodził progów)
-  const seedAt = seedCandidates.length > 0 ? finalists.indexOf(seedCandidates[0]) : finalists.length;
-  const pool = passSeed ? [...finalists.slice(0, seedAt), passSeed, ...finalists.slice(seedAt)] : finalists;
-  const passLabel = (label) => (pass === 0 ? label : `Pass ${pass + 1}: ${label.charAt(0).toLowerCase()}${label.slice(1)}`);
-  let best = null;
-  // Dopieszczamy każdą z kandydatur (najwyżej tyle, ile mówi DAMAGE_BEAM.finalists plus zestawy z poradnika)
-  // i dopiero z nich wybieramy wynik.
-  // Dwa etapy: każda kandydatura dostaje krótkie dopieszczanie (2 rundy), a trzy najlepsze po nim - pełne.
-  const seen = new Set();
-  const unique = pool.filter((candidate) => {
-    const key = [candidate.weapon.name, ...SEARCH_ORDER.map((id) => (candidate.picks[id] ? candidate.picks[id].name : ""))].join("|");
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-  // na krótkie dopieszczanie idzie najwyżej DAMAGE_BEAM.quick kandydatur (przechodzące progi pierwsze, potem wartość)
-  const shortlist = [...unique].sort((a, b) => (a.ok !== b.ok ? (a.ok ? -1 : 1) : value(b.metrics) - value(a.metrics))).slice(0, quickEffort ? 12 : DAMAGE_BEAM.quick);
-  const quick = [];
-  for (const [index, candidate] of shortlist.entries()) {
-    await pause(passLabel("Polishing candidates"), 0.7 + (0.15 * index) / shortlist.length);
-    const quickKey = `q|${keyOf(candidate)}|${candidate.ok}`;
-    if (!polishMemo.has(quickKey)) polishMemo.set(quickKey, polish(candidate, shortPools(candidate), 2));
-    quick.push(polishMemo.get(quickKey));
-  }
-  const ranked = [...quick].sort((a, b) => (better(a, b) ? -1 : better(b, a) ? 1 : 0));
-  const runnersUp = [...quick];
-  for (const candidate of ranked.slice(0, quickEffort ? 2 : DAMAGE_BEAM.finalists)) {
-    await pause(passLabel("Polishing the best candidates"), 0.86);
-    const fullKey = `f|${keyOf(candidate)}|${candidate.ok}`;
-    if (!polishMemo.has(fullKey)) polishMemo.set(fullKey, polish(candidate, shortPools(candidate), 4));
-    const polished = polishMemo.get(fullKey);
-    runnersUp.push(polished);
-    if (better(polished, best)) best = polished;
-  }
+  let passIndex = 0;
+  const passLabel = (label) => (passIndex === 0 ? label : `Pass ${passIndex + 1}: ${label.charAt(0).toLowerCase()}${label.slice(1)}`);
   // Zwycięzca dostaje jeszcze przebieg po CAŁEJ bazie dla każdego slotu, więc wynik jest zestawem, którego nie da
   // się poprawić podmianą jednego przedmiotu.
   const fullPools = {};
@@ -2738,12 +2727,6 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
     }
     return out;
   };
-  if (best) {
-    const refineKey = `r|${keyOf(best)}`;
-    if (!refineMemo.has(refineKey)) refineMemo.set(refineKey, await refine(best));
-    best = refineMemo.get(refineKey);
-  }
-
   // Szukanie liczy Skill Pointy w wersji przybliżonej; wynik sprawdzamy dokładnie. Gdy dokładne rozłożenie
   // punktów zepchnie zestaw tuż pod próg (np. EHP 1,069 przy progu 1,071), bierzemy najlepszego z pozostałych
   // dopieszczonych kandydatów, który przechodzi dokładnie.
@@ -2759,27 +2742,139 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
       (!requireSustain || metrics.sustain > 0)
     );
   };
-  if (best && best.ok && !exactPass(best)) {
-    const fallback = runnersUp.filter((candidate) => candidate.ok && candidate !== best).sort((a, b) => objectiveOf(b.metrics) - objectiveOf(a.metrics)).find(exactPass);
-    if (fallback) best = fallback;
-  }
-
+  // względny zysk celu z jednego wolnego punktu (pierwsze 5 punktów najlepszej umiejętności zestawu startowego)
+  const perPointFrom = (start) => {
+    let out = 0;
+    const all = [...start.items, start.weapon];
+    const sp = computeSkillPoints(all, true);
+    const plain = evaluateGoal(ctx, all, start.weapon, sp.totals, goal, cycleCfg);
+    if (plain.damage > 0 && spendFreeSkillPoints)
+      SKILLS.forEach((skill) => {
+        const bumped = evaluateGoal(ctx, all, start.weapon, { ...sp.totals, [skill]: (sp.totals[skill] || 0) + 5 }, goal, cycleCfg);
+        out = Math.max(out, (bumped.damage / plain.damage - 1) / 5);
+      });
+    return out;
+  };
+  // DOKŁADNE PARY: dwa sloty naraz (także broń z powderami), dokładny rachunek z wolnymi punktami. Pojedyncza podmiana
+  // nie znajdzie ruchów w rodzaju "mocniejsza klata, ale jej wymagania / brak EHP opłaca inny pierścień" - test
+  // test:deep znajdował takie (+1-3,4 %), choć przybliżone pary (pairClimb) je przeoczyły. Lista na slot, jak w teście:
+  // najlepsi pod obrażenia, EHP, najtańsi w skill pointach, pod manę (z cyklem), najmocniejsi łamiący próg w pojedynkę
+  // i pusty slot; potem każda para slotów × każda para z list. Zwraca lepszy zestaw albo null.
+  const PAIR_LIST = 16;
+  const exactPairs = async (start) => {
+    perPoint = perPointFrom(start);
+    const repairing = !exactOk(start.metrics);
+    const lists = {};
+    const allSlots = [...gearSlots, "weapon"];
+    const sameWeapon = (a, b) => a.name === b.name && (a.powders ? a.powders.element : null) === (b.powders ? b.powders.element : null);
+    const wrapped = (picks) => Object.fromEntries(Object.entries(picks).map(([id, pick]) => [id, { item: pick }]));
+    for (const slotId of allSlots) {
+      await pause(passLabel("Exact check: pairs of slots"), 0.99);
+      const scored = [];
+      if (slotId === "weapon") {
+        bySlot.weapon.forEach((base) =>
+          powderElements.forEach((element) => {
+            const weapon = element ? powderedWeapon(base, element) : base;
+            if (sameWeapon(weapon, start.weapon)) return;
+            scored.push({ candidate: weapon, metrics: evaluate(start.items, weapon) });
+          })
+        );
+      } else {
+        [...emptyOption(slotId), ...bySlot[slotId]].forEach((item) => {
+          if (item === start.picks[slotId] || (!item && !start.picks[slotId])) return;
+          const picks2 = { ...start.picks };
+          if (item) picks2[slotId] = item;
+          else delete picks2[slotId];
+          if (item && ringsClash(wrapped(start.picks), slotId, item)) return;
+          scored.push({ candidate: item, metrics: evaluate(Object.values(picks2), start.weapon) });
+        });
+      }
+      const top = (list, score, count) => [...list].sort((a, b) => score(b) - score(a)).slice(0, count).map((entry) => entry.candidate);
+      // nic nie przechodzi progów: pary mają najpierw je spełnić, więc krótkie listy przedmiotów "naprawczych"
+      const chosen = repairing
+        ? [
+            ...top(scored, (entry) => entry.metrics.damage, 4),
+            ...top(scored, (entry) => entry.metrics.ehp, PAIR_LIST / 2),
+            ...top(scored, (entry) => -entry.metrics.sp.total, PAIR_LIST / 2),
+            ...(cycleCfg.ids.length > 0 ? top(scored, (entry) => entry.metrics.manaNet, PAIR_LIST / 2) : []),
+          ]
+        : [
+            ...top(scored, (entry) => entry.metrics.damage, PAIR_LIST),
+            ...top(scored, (entry) => entry.metrics.ehp, PAIR_LIST / 2),
+            ...top(scored, (entry) => -entry.metrics.sp.total, PAIR_LIST / 2),
+            ...(cycleCfg.ids.length > 0 ? top(scored, (entry) => entry.metrics.manaNet, PAIR_LIST / 2) : []),
+            ...top(scored.filter((entry) => !feasible(entry.metrics)), (entry) => entry.metrics.damage, PAIR_LIST / 2),
+          ];
+      const seen = new Set();
+      lists[slotId] = chosen.filter((candidate) => {
+        const key = candidate ? `${candidate.name}|${candidate.powders ? candidate.powders.element : ""}` : "-";
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      if (slotId !== "weapon" && !lockedSlot(slotId) && !lists[slotId].includes(null) && start.picks[slotId]) lists[slotId].push(null);
+      if (slotId !== "weapon" && lockedSlot(slotId)) lists[slotId] = [];
+    }
+    let best = { ...start };
+    for (let i = 0; i < allSlots.length; i += 1) {
+      for (let j = i + 1; j < allSlots.length; j += 1) {
+        const a = allSlots[i];
+        const b = allSlots[j];
+        if (lists[a].length === 0 || lists[b].length === 0) continue;
+        await pause(passLabel("Exact check: pairs of slots"), 0.99);
+        for (const itemA of lists[a]) {
+          for (const itemB of lists[b]) {
+            const picks2 = { ...start.picks };
+            let weapon = start.weapon;
+            for (const [slotId, item] of [
+              [a, itemA],
+              [b, itemB],
+            ]) {
+              if (slotId === "weapon") weapon = item;
+              else if (item) picks2[slotId] = item;
+              else delete picks2[slotId];
+            }
+            if (!weapon) continue;
+            if ((itemA && a !== "weapon" && ringsClash(wrapped(picks2), a, itemA)) || (itemB && b !== "weapon" && ringsClash(wrapped(picks2), b, itemB))) continue;
+            const items2 = Object.values(picks2);
+            const fast = evaluate(items2, weapon);
+            const bar = exactOk(best.metrics) ? best.metrics.damage : null;
+            if (bar !== null && potential(fast.damage, fast.sp.total) < bar) continue;
+            // sito: dokładnie, ale bez wolnych punktów albo z ich zgrubnym rozdziałem; pełny rozdział tylko dla par,
+            // które już tak biją obecny wynik
+            // (bez przechodzącego zestawu "bar" nie ma: wtedy liczy się tylko to, co już bez wolnych punktów zmniejsza
+            // braki do progów - listy są wtedy krótsze, same przedmioty "naprawcze", patrz wyżej)
+            {
+              const plain = evaluateExact(items2, weapon, Infinity);
+              if (!exactBetter(plain, best.metrics)) {
+                if (!plain.canAllocate) continue;
+                if (bar === null) continue;
+                if (potential(plain.damage, plain.sp.total) < bar) continue;
+                else {
+                // zgrubny rozdział (2 kroki) wychodzi 3-7 % poniżej pełnego i bywa tuż pod progiem EHP, więc przepuszczamy
+                // wszystko, co nim sięga 90 % obecnego wyniku (zmierzone na parach, które naprawdę wygrywały)
+                const rough = allocateFreeSkillPoints(ctx, [...items2, weapon], weapon, plain.sp, goal, cycleCfg, (m) => exactRank({ ...m, spOver: 0, cost: plain.cost }), null, true);
+                if (rough.metrics.damage < bar * PAIR_SIEVE) continue;
+                }
+              }
+            }
+            const metrics = evaluateExact(items2, weapon, bar);
+            if (exactBetter(metrics, best.metrics)) best = { ...start, picks: picks2, items: items2, weapon, metrics };
+          }
+        }
+      }
+    }
+    return best.metrics === start.metrics ? null : best;
+  };
+  const PAIR_SIEVE = 0.9;
+  const pairsMemo = new Map();
   const exactStage = async (start) => {
     // perPoint liczony od nowa dla każdego startu: wynik zależy tylko od zestawu startowego (dzięki temu kolejne
     // przebiegi mogą brać gotowe wyniki, a ponowne kliknięcie liczy dokładnie to samo). Pamięć ocen zostaje: trzyma
     // tylko wyniki niezależne od startu, a decyzję "czy rozdzielać wolne punkty" podejmujemy przy każdym odczycie.
     perPoint = 0;
     let current = { ...start, metrics: evaluateExact(start.items, start.weapon) };
-    {
-      const all = [...start.items, start.weapon];
-      const sp = computeSkillPoints(all, true);
-      const plain = evaluateGoal(ctx, all, start.weapon, sp.totals, goal, cycleCfg);
-      if (plain.damage > 0 && spendFreeSkillPoints)
-        SKILLS.forEach((skill) => {
-          const bumped = evaluateGoal(ctx, all, start.weapon, { ...sp.totals, [skill]: (sp.totals[skill] || 0) + 5 }, goal, cycleCfg);
-          perPoint = Math.max(perPoint, (bumped.damage / plain.damage - 1) / 5);
-        });
-    }
+    perPoint = perPointFrom(start);
     const scoredWeapons = bySlot.weapon.map((item) => ({ item }));
     // każda broń klasy (z każdym żywiołem powderów): szybka ocena odsiewa te bez szans, więc to tanie
     const weaponBasesFor = () => scoredWeapons.map((entry) => entry.item);
@@ -2851,11 +2946,98 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
     convergeMemo.set(memoKey, champion);
     return champion;
   };
+  // ZADANIE = start (+ opcjonalnie przybliżone podmiany) -> converge. Wynik zależy tylko od startu i ustawień, więc
+  // zadania mogą liczyć się równolegle w innych wątkach (Web Workery) - z identycznym wynikiem jak tutaj.
+  const runTaskLocal = async (candidate, withRefine) => {
+    let start = candidate;
+    if (withRefine) {
+      const refinedKey = keyOf(candidate);
+      if (!refineMemo.has(refinedKey)) refineMemo.set(refinedKey, await refine(candidate, true));
+      start = refineMemo.get(refinedKey);
+    }
+    return converge(start);
+  };
+  // Zestaw w formie do przesłania między wątkami: nazwy przedmiotów w kolejności slotów zestawu (kolejność sumowania
+  // statystyk zostaje ta sama), broń z żywiołem powderów i - dla wyników - dokładne metryki.
+  const packCandidate = (candidate, withMetrics) => ({
+    picks: Object.entries(candidate.picks).map(([slotId, item]) => [slotId, item.name]),
+    weapon: candidate.weapon.name,
+    powder: candidate.weapon.powders ? (candidate.weapon.powders.mixed ? powders : candidate.weapon.powders.element) : null,
+    guide: candidate.guide || null,
+    metrics: withMetrics ? candidate.metrics : null,
+  });
+  const unpackCandidate = (packed) => {
+    if (!packed) return null;
+    const picks = {};
+    for (const [slotId, name] of packed.picks) {
+      const item = (bySlot[slotId] || []).find((entry) => entry.name === name);
+      if (!item) return null;
+      picks[slotId] = item;
+    }
+    const base = bySlot.weapon.find((entry) => entry.name === packed.weapon);
+    if (!base) return null;
+    const weapon = packed.powder ? powderedWeapon(base, packed.powder) : base;
+    const items2 = Object.values(picks);
+    const metrics = packed.metrics || evaluate(items2, weapon);
+    return { picks, items: items2, weapon, metrics, ok: packed.metrics ? exactOk(metrics) : feasible(metrics), guide: packed.guide || undefined };
+  };
+  // Tryb zadania (wątek pomocniczy): bez wiązki, tylko jedno zadanie od podanego startu.
+  if (task) {
+    const start = unpackCandidate(task.start);
+    if (!start) return { task: null };
+    const result = await runTaskLocal(start, task.refine);
+    return { task: packCandidate(result, true) };
+  }
+  for (let pass = 0; pass < (quickEffort ? 1 : 5); pass += 1) {
+  passIndex = pass;
+  passes.count += 1;
+  // poprzedni wynik stoi tam, gdzie postawiłoby go ponowne kliknięcie: przed zestawami z sesji (po zestawach
+  // "naprawczych", jeśli żaden kandydat z wiązki nie przechodził progów)
+  const seedAt = seedCandidates.length > 0 ? finalists.indexOf(seedCandidates[0]) : finalists.length;
+  const pool = passSeed ? [...finalists.slice(0, seedAt), passSeed, ...finalists.slice(seedAt)] : finalists;
+  let best = null;
+  // Dopieszczamy każdą z kandydatur (najwyżej tyle, ile mówi DAMAGE_BEAM.finalists plus zestawy z poradnika)
+  // i dopiero z nich wybieramy wynik.
+  // Dwa etapy: każda kandydatura dostaje krótkie dopieszczanie (2 rundy), a trzy najlepsze po nim - pełne.
+  const seen = new Set();
+  const unique = pool.filter((candidate) => {
+    const key = [candidate.weapon.name, ...SEARCH_ORDER.map((id) => (candidate.picks[id] ? candidate.picks[id].name : ""))].join("|");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  // na krótkie dopieszczanie idzie najwyżej DAMAGE_BEAM.quick kandydatur (przechodzące progi pierwsze, potem wartość)
+  const shortlist = [...unique].sort((a, b) => (a.ok !== b.ok ? (a.ok ? -1 : 1) : value(b.metrics) - value(a.metrics))).slice(0, quickEffort ? 12 : DAMAGE_BEAM.quick);
+  const quick = [];
+  for (const [index, candidate] of shortlist.entries()) {
+    await pause(passLabel("Polishing candidates"), 0.7 + (0.15 * index) / shortlist.length);
+    const quickKey = `q|${keyOf(candidate)}|${candidate.ok}`;
+    if (!polishMemo.has(quickKey)) polishMemo.set(quickKey, polish(candidate, shortPools(candidate), 2));
+    quick.push(polishMemo.get(quickKey));
+  }
+  const ranked = [...quick].sort((a, b) => (better(a, b) ? -1 : better(b, a) ? 1 : 0));
+  const runnersUp = [...quick];
+  for (const candidate of ranked.slice(0, quickEffort ? 2 : DAMAGE_BEAM.finalists)) {
+    await pause(passLabel("Polishing the best candidates"), 0.86);
+    const fullKey = `f|${keyOf(candidate)}|${candidate.ok}`;
+    if (!polishMemo.has(fullKey)) polishMemo.set(fullKey, polish(candidate, shortPools(candidate), 4));
+    const polished = polishMemo.get(fullKey);
+    runnersUp.push(polished);
+    if (better(polished, best)) best = polished;
+  }
   if (best) {
-    let champion = await converge(best);
-    // To samo od kilku innych mocnych kandydatów z dopieszczania (inna broń, inny zestaw): lokalne szczyty bywają
-    // różne, wygrywa najwyższy po dokładnym rachunku.
-    const tried = new Set([keyOf(best), keyOf(champion)]);
+    const refineKey = `r|${keyOf(best)}`;
+    if (!refineMemo.has(refineKey)) refineMemo.set(refineKey, await refine(best));
+    best = refineMemo.get(refineKey);
+  }
+  if (best && best.ok && !exactPass(best)) {
+    const fallback = runnersUp.filter((candidate) => candidate.ok && candidate !== best).sort((a, b) => objectiveOf(b.metrics) - objectiveOf(a.metrics)).find(exactPass);
+    if (fallback) best = fallback;
+  }
+  if (best) {
+    // Start od zwycięzcy dopieszczania i od trzech kolejnych mocnych kandydatów (inna broń, inny zestaw): lokalne
+    // szczyty bywają różne, wygrywa najwyższy po dokładnym rachunku. Zadania 2-4 mogą liczyć się równolegle.
+    const tried = new Set([keyOf(best)]);
     const others = [...runnersUp]
       .sort((a, b) => (better(a, b) ? -1 : better(b, a) ? 1 : 0))
       .filter((candidate) => {
@@ -2865,13 +3047,43 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
         return true;
       })
       .slice(0, quickEffort ? 0 : 3);
-    for (const [index, candidate] of others.entries()) {
-      await pause(passLabel(`Trying other strong starts (${index + 1}/${others.length})`), 0.985);
-      const refinedKey = keyOf(candidate);
-      if (!refineMemo.has(refinedKey)) refineMemo.set(refinedKey, await refine(candidate, true));
-      const result = await converge(refineMemo.get(refinedKey));
-      passes.others += 1;
-      if (exactBetter(result.metrics, champion.metrics)) champion = result;
+    const jobs = [{ candidate: best, refine: false }, ...others.map((candidate) => ({ candidate, refine: true }))].map((job) => ({ ...job, memoKey: `${job.refine ? "r" : "c"}|${keyOf(job.candidate)}` }));
+    const results = jobs.map((job) => taskMemo.get(job.memoKey) || null);
+    const remote = parallel ? jobs.map((job, index) => ({ job, index })).filter(({ index }) => index > 0 && !results[index]) : [];
+    let remoteDone = null;
+    if (remote.length > 0) {
+      passes.parallel += remote.length;
+      remoteDone = Promise.resolve()
+        .then(() => parallel(remote.map(({ job }) => ({ start: packCandidate(job.candidate, false), refine: job.refine }))))
+        .catch(() => null);
+    }
+    for (const [index, job] of jobs.entries()) {
+      if (results[index] || remote.some((entry) => entry.index === index)) continue;
+      await pause(passLabel(index === 0 ? "Exact check: every item, every powder" : `Trying other strong starts (${index}/${others.length})`), index === 0 ? 0.965 : 0.985);
+      results[index] = await runTaskLocal(job.candidate, job.refine);
+    }
+    if (remoteDone) {
+      await pause(passLabel(`Trying other strong starts (${remote.length} in parallel)`), 0.985);
+      const packed = await remoteDone;
+      for (const [k, { job, index }] of remote.entries()) {
+        const unpacked = packed && packed[k] ? unpackCandidate(packed[k]) : null;
+        // wątek pomocniczy zawiódł: liczymy tutaj (ten sam wynik, tylko wolniej)
+        results[index] = unpacked || (await runTaskLocal(job.candidate, job.refine));
+      }
+    }
+    jobs.forEach((job, index) => taskMemo.set(job.memoKey, results[index]));
+    passes.others += others.length;
+    let champion = results[0];
+    for (let index = 1; index < results.length; index += 1) if (exactBetter(results[index].metrics, champion.metrics)) champion = results[index];
+    // dokładne pary od zwycięzcy; po każdej poprawie znowu pojedyncze podmiany i restarty (converge)
+    for (let round = 0; round < (quickEffort ? 0 : 4); round += 1) {
+      const pairKey = keyOf(champion);
+      if (!pairsMemo.has(pairKey)) pairsMemo.set(pairKey, await exactPairs(champion));
+      const paired = pairsMemo.get(pairKey);
+      if (!paired) break;
+      passes.pairs += 1;
+      const next = await converge(paired);
+      champion = exactBetter(next.metrics, paired.metrics) ? next : paired;
     }
     best = { ...champion, ok: exactOk(champion.metrics) };
   }
@@ -7967,6 +8179,7 @@ function DamageForm({
   onGenerate,
   running,
   progress,
+  onStop = null,
   result,
   outdated,
   options,
@@ -8234,13 +8447,23 @@ function DamageForm({
             <div className="h-1.5 w-full" style={ts({ background: "#2b2b2b" })}>
               <div className="h-full transition-all" style={ts({ width: `${Math.round(((progress && progress.fraction) || 0) * 100)}%`, background: "#55FF55" })} />
             </div>
-            <p className={`${hint} truncate`}>{progress ? progress.label : "Searching"}…</p>
+            <div className="flex items-center gap-2">
+              <p className={`${hint} min-w-0 flex-1 truncate`}>
+                {progress ? progress.label : "Searching"}…{progress && progress.threads > 1 ? ` · ${progress.threads} threads` : ""}
+              </p>
+              {onStop && (
+                <button type="button" className="mc-btn mc-btn-sm" onClick={onStop} title="Stop the search and keep the previous build">
+                  Stop
+                </button>
+              )}
+            </div>
           </div>
         ) : outdated ? (
           <p className="text-xs text-amber-400">Settings changed: regenerate.</p>
         ) : result ? (
           <p className={hint} title={`Generated at ${result.at.toLocaleTimeString("en-GB")}`}>
             Build #{result.run} · <span className="tabular-nums">{(result.ms / 1000).toFixed(1)}</span> s
+            {result.build.stats && result.build.stats.threads > 1 ? ` · ${result.build.stats.threads} threads` : ""}
           </p>
         ) : (
           <p className={hint}>{ready ? "Damage first: the filters above are pass/fail." : !playerClass ? "Start with a class." : !rankConfirmed ? "Next: your rank." : !level ? "Next: your level." : "Next: an ability tree preset."}</p>
@@ -8329,7 +8552,7 @@ function WizardTile({ selected = false, onClick, children, className = "", title
   );
 }
 
-function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, level, levelInput, onLevelInput, treeIds, apCap, preset, onPreset, onEditTree, renderTree = null, goals, goal, form, onForm, ehpMax, options, onOptions, onGenerate, running, progress, treeSettings }) {
+function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, level, levelInput, onLevelInput, treeIds, apCap, preset, onPreset, onEditTree, renderTree = null, goals, goal, form, onForm, ehpMax, options, onOptions, onGenerate, running, progress, onStop = null, treeSettings }) {
   const ts = useTs();
   const classConfig = CLASSES[playerClass];
   const firstOpen = !rankConfirmed ? "rank" : !level ? "level" : treeIds.length === 0 ? "tree" : null;
@@ -8797,6 +9020,19 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
           <button type="button" className="mc-btn mc-btn-primary wbr-why-btn w-full" onClick={onGenerate} disabled={running}>
             {running ? `${progress ? progress.label : "Searching"}…` : "Generate Build"}
           </button>
+          {running && (
+            <div className="flex items-center gap-2">
+              <div className="h-1.5 flex-1" style={ts({ background: "#2b2b2b" })}>
+                <div className="h-full transition-all" style={ts({ width: `${Math.round(((progress && progress.fraction) || 0) * 100)}%`, background: "#55FF55" })} />
+              </div>
+              {progress && progress.threads > 1 && <span className="text-xs text-zinc-500">{progress.threads} threads</span>}
+              {onStop && (
+                <button type="button" className="mc-btn mc-btn-sm" onClick={onStop}>
+                  Stop
+                </button>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -13058,6 +13294,324 @@ function NeedsPick({ what, why, onGenerate = null }) {
   );
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// WEB WORKERY: generator liczy poza głównym wątkiem (strona się nie zacina, można przerwać). Opcjonalnie (domyślnie
+// wyłączone, patrz enginePool) starty z kroku "converge" (zwycięzca + 3 inne mocne kandydatury) liczą się równolegle. Wątek-koordynator prowadzi
+// cały generator; zadania wysyła do głównego wątku, który rozdziela je między wolne wątki pomocnicze i odsyła wyniki
+// (bez zagnieżdżonych workerów, które nie wszędzie działają). Zadanie to czysta funkcja startu, więc wynik jest
+// identyczny jak w jednym wątku (tests/workers.test.js). Bez workerów (albo gdy się nie uruchomią) liczymy jak dawniej.
+// Fabrykę workera ustawia punkt wejścia: src/main.jsx (Vite, osobny plik src/engine-worker.js) albo wersja
+// jednoplikowa (worker z tego samego skryptu przez Blob).
+export function startEngineWorker(scope) {
+  let nextRequest = 1;
+  let taskCaches = { job: null, caches: null };
+  const waiting = new Map();
+  scope.onmessage = async (event) => {
+    const message = event.data || {};
+    if (message.type === "tasksDone") {
+      const resolve = waiting.get(message.requestId);
+      if (resolve) {
+        waiting.delete(message.requestId);
+        resolve(message.results);
+      }
+      return;
+    }
+    if (message.type === "generate") {
+      const { id, params, helpers } = message;
+      try {
+        const parallel =
+          helpers > 0
+            ? (tasks) =>
+                new Promise((resolve) => {
+                  const requestId = nextRequest++;
+                  waiting.set(requestId, resolve);
+                  scope.postMessage({ type: "tasks", id, requestId, tasks });
+                })
+            : null;
+        let last = 0;
+        const build = await generateDamageBuild({
+          ...params,
+          parallel,
+          onProgress: (progress) => {
+            const now = Date.now();
+            if (now - last < 60 && progress.fraction < 1) return;
+            last = now;
+            scope.postMessage({ type: "progress", id, progress });
+          },
+        });
+        scope.postMessage({ type: "done", id, build });
+      } catch (error) {
+        scope.postMessage({ type: "error", id, message: String((error && error.message) || error) });
+      }
+      return;
+    }
+    if (message.type === "task") {
+      let result = null;
+      if (taskCaches.job !== message.job) taskCaches = { job: message.job, caches: { evalCache: new Map(), exactCache: new Map() } };
+      try {
+        result = (await generateDamageBuild({ ...message.params, task: message.task, caches: taskCaches.caches })).task;
+      } catch (error) {
+        result = null;
+      }
+      scope.postMessage({ type: "taskDone", id: message.id, result });
+    }
+  };
+  scope.postMessage({ type: "ready" });
+}
+
+const ENGINE_READY_TIMEOUT_MS = 20000;
+class EnginePool {
+  constructor(factory, size) {
+    this.factory = factory;
+    this.size = size;
+    this.slots = [];
+    this.jobs = new Map();
+    this.tasks = [];
+    this.nextId = 1;
+    this.failed = false;
+    this.waiters = [];
+  }
+  spawn() {
+    let worker;
+    try {
+      worker = this.factory();
+    } catch (error) {
+      this.fail();
+      return;
+    }
+    const slot = { worker, ready: false, busy: null };
+    slot.timer = setTimeout(() => {
+      if (!slot.ready) this.fail();
+    }, ENGINE_READY_TIMEOUT_MS);
+    worker.onmessage = (event) => this.handle(slot, event.data || {});
+    worker.onerror = () => {
+      if (!slot.ready) this.fail();
+      else this.crash(slot);
+    };
+    this.slots.push(slot);
+  }
+  ensure() {
+    if (this.failed) return;
+    while (this.slots.length < this.size) this.spawn();
+  }
+  fail() {
+    if (this.failed) return;
+    this.failed = true;
+    this.slots.forEach((slot) => {
+      clearTimeout(slot.timer);
+      try {
+        slot.worker.terminate();
+      } catch (error) {
+        // już zamknięty
+      }
+    });
+    this.slots = [];
+    this.jobs.forEach((job) => job.reject(Object.assign(new Error("Web Workers unavailable"), { fallback: true })));
+    this.jobs.clear();
+    this.waiters.splice(0).forEach((waiter) => waiter.reject(Object.assign(new Error("Web Workers unavailable"), { fallback: true })));
+  }
+  crash(slot) {
+    // wątek padł w trakcie: jego zadania liczymy od nowa gdzie indziej, a jego build kończy się błędem
+    this.slots = this.slots.filter((entry) => entry !== slot);
+    try {
+      slot.worker.terminate();
+    } catch (error) {
+      // już zamknięty
+    }
+    if (slot.busy && slot.busy.kind === "generate") {
+      const job = this.jobs.get(slot.busy.id);
+      if (job) {
+        this.jobs.delete(job.id);
+        job.reject(new Error("The search thread stopped unexpectedly"));
+      }
+    } else if (slot.busy && slot.busy.kind === "task") this.tasks.unshift(slot.busy.task);
+    this.ensure();
+    this.pump();
+  }
+  // wolny, gotowy wątek na koordynatora (czekamy, aż któryś się zwolni / wczyta). Pełne szukanie (z zadaniami dla
+  // pomocników) naraz tylko jedno - dwa koordynatory czekające nawzajem na wolne wątki zablokowałyby się. Szybkie
+  // szukanie (lista buildów) nie prosi o pomocników, więc może iść obok.
+  acquire(heavy) {
+    return new Promise((resolve, reject) => {
+      this.waiters.push({ resolve, reject, heavy });
+      this.pump();
+    });
+  }
+  pump() {
+    const free = () => this.slots.filter((slot) => slot.ready && !slot.busy);
+    // najpierw zadania pomocnicze (koordynator na nie czeka), potem nowi koordynatorzy
+    while (this.tasks.length > 0 && free().length > 0) {
+      const slot = free()[0];
+      const task = this.tasks.shift();
+      slot.busy = { kind: "task", task };
+      slot.worker.postMessage({ type: "task", id: task.id, job: task.job, params: task.params, task: task.task });
+    }
+    const heavyActive = () => [...this.jobs.values()].some((job) => job.heavy) || this.slots.some((slot) => slot.busy && slot.busy.kind === "reserved" && slot.busy.heavy);
+    for (let index = 0; index < this.waiters.length && free().length > 0; ) {
+      const waiter = this.waiters[index];
+      if (waiter.heavy && heavyActive()) {
+        index += 1;
+        continue;
+      }
+      const slot = free()[0];
+      slot.busy = { kind: "reserved", heavy: waiter.heavy };
+      this.waiters.splice(index, 1);
+      waiter.resolve(slot);
+    }
+  }
+  async generate(params, onProgress) {
+    if (this.failed) throw Object.assign(new Error("Web Workers unavailable"), { fallback: true });
+    this.ensure();
+    const heavy = params.effort !== "quick";
+    const slot = await this.acquire(heavy);
+    return new Promise((resolve, reject) => {
+      const id = this.nextId++;
+      const job = { id, slot, params, onProgress, resolve, reject, threads: 1, heavy };
+      this.jobs.set(id, job);
+      slot.busy = { kind: "generate", id };
+      slot.worker.postMessage({ type: "generate", id, params, helpers: heavy ? Math.max(0, this.size - 1) : 0 });
+    });
+  }
+  handle(slot, message) {
+    if (message.type === "ready") {
+      slot.ready = true;
+      clearTimeout(slot.timer);
+      this.pump();
+      return;
+    }
+    if (message.type === "progress" || message.type === "done" || message.type === "error" || message.type === "tasks") {
+      const job = this.jobs.get(message.id);
+      if (!job) return;
+      if (message.type === "progress") {
+        if (job.onProgress) job.onProgress({ ...message.progress, threads: job.threads });
+      } else if (message.type === "done" || message.type === "error") {
+        this.jobs.delete(job.id);
+        slot.busy = null;
+        if (message.type === "done") job.resolve({ build: message.build, threads: job.threads });
+        else job.reject(new Error(message.message));
+        this.pump();
+      } else {
+        // koordynator prosi o zadania: rozdzielamy je między wolne wątki i odsyłamy wyniki w tej samej kolejności
+        const results = new Array(message.tasks.length).fill(null);
+        let left = message.tasks.length;
+        job.threads = Math.max(job.threads, 1 + Math.min(message.tasks.length, this.size - 1));
+        message.tasks.forEach((task, index) => {
+          this.tasks.push({
+            id: `${job.id}.${message.requestId}.${index}`,
+            job: job.id,
+            params: job.params,
+            task,
+            done: (result) => {
+              results[index] = result;
+              left -= 1;
+              if (left === 0 && this.jobs.has(job.id)) job.slot.worker.postMessage({ type: "tasksDone", requestId: message.requestId, results });
+            },
+          });
+        });
+        this.pump();
+      }
+      return;
+    }
+    if (message.type === "taskDone") {
+      const task = slot.busy && slot.busy.kind === "task" ? slot.busy.task : null;
+      slot.busy = null;
+      if (task) task.done(message.result);
+      this.pump();
+    }
+  }
+  // "Stop": zamykamy wszystkie wątki (liczenie przerywa się od razu) i przy następnym szukaniu startujemy nowe
+  cancel() {
+    this.slots.forEach((slot) => {
+      clearTimeout(slot.timer);
+      try {
+        slot.worker.terminate();
+      } catch (error) {
+        // już zamknięty
+      }
+    });
+    this.slots = [];
+    this.tasks = [];
+    this.jobs.forEach((job) => job.reject(Object.assign(new Error("Stopped"), { cancelled: true })));
+    this.jobs.clear();
+    this.waiters.splice(0).forEach((waiter) => waiter.reject(Object.assign(new Error("Stopped"), { cancelled: true })));
+  }
+}
+
+let ENGINE_POOL = null;
+function enginePool() {
+  if (ENGINE_POOL) return ENGINE_POOL.failed ? null : ENGINE_POOL;
+  const factory = typeof globalThis !== "undefined" ? globalThis.__WBR_WORKER_FACTORY : null;
+  if (typeof Worker === "undefined" || typeof factory !== "function" || (typeof window !== "undefined" && window.WBR_NO_WORKERS)) return null;
+  const cores = (typeof navigator !== "undefined" && navigator.hardwareConcurrency) || 2;
+  const forced = typeof window !== "undefined" && Number(window.WBR_WORKER_COUNT) > 0 ? Number(window.WBR_WORKER_COUNT) : null;
+  // Domyślnie JEDEN wątek: generator poza stroną (bez zacinania, z "Stop"), ten sam czas co w głównym wątku.
+  // Pomocnicy (starty "converge" równolegle) dają ten sam wynik, ale liczą bez pamięci koordynatora - zmierzone
+  // na 4 scenariuszach: 0,89-1,24x na 4 rdzeniach, na 2 rdzeniach wolniej. Dlatego tylko na życzenie:
+  // window.WBR_WORKER_COUNT = 4 (do eksperymentów).
+  void cores;
+  ENGINE_POOL = new EnginePool(factory, forced || 1);
+  return ENGINE_POOL;
+}
+function warmEnginePool() {
+  const pool = enginePool();
+  if (pool) pool.ensure();
+}
+
+// Build z wątku ma kopie przedmiotów: podmieniamy je na obiekty z bazy tej strony (porównania, karty, podmiany) i
+// liczymy koszt tutaj (ceny na żywo są tylko w głównym wątku).
+function rehydrateBuild(build, params) {
+  const slots = build.slots.map((slot) => {
+    if (!slot.item) return slot;
+    const base = ITEM_BY_NAME.get(slot.item.name);
+    if (!base) return slot;
+    if (!slot.item.powders) return { ...slot, item: base };
+    const powdered = powderedWeapon(base, slot.item.powders.mixed ? params.powders : slot.item.powders.element);
+    const same = powdered && powdered.powders && JSON.stringify(powdered.powders.list) === JSON.stringify(slot.item.powders.list);
+    return { ...slot, item: same ? powdered : slot.item };
+  });
+  const out = { ...build, slots };
+  if (hasPriceData()) {
+    const normalized = normalizeOptions(params.options);
+    const lockedNames = new Set(Object.values(normalized.locked || {}));
+    out.cost = { ...buildCost(slots.map((slot) => slot.item).filter(Boolean), lockedNames), budget: normalized.budget > 0 ? normalized.budget : null };
+  }
+  return out;
+}
+
+// Generowanie z interfejsu: w wątkach, gdy się da, inaczej tutaj. Zestawy z sesji lecą jako same nazwy.
+// cancelRef.current = true przerywa liczenie w głównym wątku (przy workerach robi to pool.cancel()).
+async function runDamageGeneration(params, { onProgress = null, cancelRef = null } = {}) {
+  const normalized = normalizeOptions(params.options);
+  const needsLiveData = hasLiveData() && (normalized.budget > 0 || normalized.onlyListed);
+  const pool = needsLiveData ? null : enginePool();
+  if (pool) {
+    const seeds = (params.seeds || []).map((seed) => ({
+      picks: Object.fromEntries(Object.entries(seed.picks || {}).map(([slotId, item]) => [slotId, { name: item.name }])),
+      weapon: { name: seed.weapon.name },
+    }));
+    const wire = { ...params, seeds, onProgress: undefined, items: undefined };
+    delete wire.onProgress;
+    delete wire.items;
+    try {
+      const { build, threads } = await pool.generate(wire, onProgress);
+      const out = rehydrateBuild(build, params);
+      out.stats = { ...out.stats, threads };
+      return out;
+    } catch (error) {
+      if (!error.fallback) throw error;
+    }
+  }
+  const build = await generateDamageBuild({
+    ...params,
+    onProgress: (progress) => {
+      if (cancelRef && cancelRef.current) throw Object.assign(new Error("Stopped"), { cancelled: true });
+      if (onProgress) onProgress({ ...progress, threads: 1 });
+    },
+  });
+  build.stats = { ...build.stats, threads: 1 };
+  return build;
+}
+
 export default function BuildRecommender() {
   const [theme, setTheme] = useState(loadSavedTheme);
   THEME = theme; // style inline całego drzewa (ts/tc) czytają motyw w tym samym renderze
@@ -13094,6 +13648,11 @@ export default function BuildRecommender() {
   const sweepSource = useRef(null);
   const [whyOpen, setWhyOpen] = useState(false);
   const [damageProgress, setDamageProgress] = useState(null);
+  const stopRef = useRef(false);
+  // wątki wczytują się w tle od wyboru klasy, żeby pierwsze szukanie nie czekało na start
+  useEffect(() => {
+    if (playerClass) warmEnginePool();
+  }, [playerClass]);
   // Wyniki zakładki New z tej sesji (te same ustawienia poza progiem EHP) - wracają do szukania jako punkty startu.
   const damageHistory = useRef(new Map());
   const [buildError, setBuildError] = useState(null);
@@ -13291,7 +13850,8 @@ export default function BuildRecommender() {
     setTimeout(async () => {
       try {
         const started = performance.now();
-        const build = await generateDamageBuild({ ...params, seeds, minEhp: damageMinEhp, onProgress: setDamageProgress });
+        stopRef.current = false;
+        const build = await runDamageGeneration({ ...params, seeds, minEhp: damageMinEhp }, { onProgress: setDamageProgress, cancelRef: stopRef });
         setResult({ build, run: (result ? result.run : 0) + 1, ms: Math.max(1, Math.round(performance.now() - started)), at: new Date() });
         sweepAfterGenerate(key, params, build);
         setGuideView(null);
@@ -13302,11 +13862,17 @@ export default function BuildRecommender() {
         const kept = [seed, ...seeds.filter((entry) => signature(entry) !== signature(seed))].slice(0, 24);
         damageHistory.current.set(historyKey, kept);
       } catch (error) {
-        setBuildError(error.message);
+        // "Stop": zostaje poprzedni build, bez komunikatu o błędzie
+        if (!error.cancelled) setBuildError(error.message);
       }
       setDamageRunning(false);
       setDamageProgress(null);
     }, 30);
+  }
+
+  function handleStopDamage() {
+    stopRef.current = true;
+    if (ENGINE_POOL) ENGINE_POOL.cancel();
   }
 
   // ---- lista buildów dla kolejnych progów EHP ----
@@ -13359,7 +13925,7 @@ export default function BuildRecommender() {
         publish(true);
         try {
           const seeds = damageHistory.current.get(source.params.playerClass) || [];
-          const build = await generateDamageBuild({ ...source.params, seeds, minEhp: row.minEhp, effort: "quick", onProgress: () => {} });
+          const build = await runDamageGeneration({ ...source.params, seeds, minEhp: row.minEhp, effort: "quick" });
           if (sweepToken.current !== token) return;
           row.build = build;
           row.status = build.passed ? "done" : "fail";
@@ -13586,6 +14152,7 @@ export default function BuildRecommender() {
                   onGenerate={handleGenerateDamage}
                   running={damageRunning}
                   progress={damageProgress}
+                  onStop={handleStopDamage}
                   result={result && result.build.mode === "damage" ? result : null}
                   outdated={outdated && result && result.build.mode === "damage"}
                   options={options}
@@ -13760,6 +14327,7 @@ export default function BuildRecommender() {
                 onGenerate={handleGenerateDamage}
                 running={damageRunning}
                 progress={damageProgress}
+                onStop={handleStopDamage}
                 treeSettings={damageTreeSettings}
               />
             )}
