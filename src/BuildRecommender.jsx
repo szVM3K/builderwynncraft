@@ -2439,10 +2439,10 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
   });
   // Zestawy z poprzednich wyników w tej sesji (te same ustawienia, inny próg EHP): zestaw, który przeszedł wyższy
   // próg, przechodzi i niższy - dzięki temu przesuwanie suwaka EHP nie "gubi" lepszych buildów znalezionych wcześniej.
-  (seeds || []).forEach((seed) => {
-    if (!seed || !seed.weapon) return;
+  const candidateFromSeed = (seed) => {
+    if (!seed || !seed.weapon) return null;
     const base = bySlot.weapon.find((item) => item.name === seed.weapon.name);
-    if (!base) return;
+    if (!base) return null;
     const picks = {};
     gearSlots.forEach((slotId) => {
       // przypięty przedmiot zawsze na swoim miejscu, także w zestawach z historii
@@ -2464,8 +2464,10 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
         seedWeapon = powdered;
       }
     });
-    finalists.push({ picks, items: Object.values(picks), weapon: seedWeapon, metrics: seedMetrics, ok: feasible(seedMetrics) });
-  });
+    return { picks, items: Object.values(picks), weapon: seedWeapon, metrics: seedMetrics, ok: feasible(seedMetrics) };
+  };
+  const seedCandidates = (seeds || []).map(candidateFromSeed).filter(Boolean);
+  finalists.push(...seedCandidates);
   if (objective === "damage" && !finalists.some((candidate) => candidate.ok)) {
     // nic nie przeszło progów: drugi przebieg maksymalizuje EHP (z tym samym filtrem many), żeby mieć z czego
     // podnosić obrażenia w kroku 3
@@ -2610,73 +2612,6 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
     return best;
   };
 
-  let best = null;
-  // Dopieszczamy każdą z kandydatur (najwyżej tyle, ile mówi DAMAGE_BEAM.finalists plus zestawy z poradnika)
-  // i dopiero z nich wybieramy wynik.
-  // Dwa etapy: każda kandydatura dostaje krótkie dopieszczanie (2 rundy), a trzy najlepsze po nim - pełne.
-  const seen = new Set();
-  const unique = finalists.filter((candidate) => {
-    const key = [candidate.weapon.name, ...SEARCH_ORDER.map((id) => (candidate.picks[id] ? candidate.picks[id].name : ""))].join("|");
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-  // na krótkie dopieszczanie idzie najwyżej DAMAGE_BEAM.quick kandydatur (przechodzące progi pierwsze, potem wartość)
-  const shortlist = [...unique].sort((a, b) => (a.ok !== b.ok ? (a.ok ? -1 : 1) : value(b.metrics) - value(a.metrics))).slice(0, quickEffort ? 12 : DAMAGE_BEAM.quick);
-  const quick = [];
-  for (const [index, candidate] of shortlist.entries()) {
-    await pause("Polishing candidates", 0.7 + (0.15 * index) / shortlist.length);
-    quick.push(polish(candidate, shortPools(candidate), 2));
-  }
-  const ranked = [...quick].sort((a, b) => (better(a, b) ? -1 : better(b, a) ? 1 : 0));
-  const runnersUp = [...quick];
-  for (const candidate of ranked.slice(0, quickEffort ? 2 : DAMAGE_BEAM.finalists)) {
-    await pause("Polishing the best candidates", 0.86);
-    const polished = polish(candidate, shortPools(candidate), 4);
-    runnersUp.push(polished);
-    if (better(polished, best)) best = polished;
-  }
-  // Zwycięzca dostaje jeszcze przebieg po CAŁEJ bazie dla każdego slotu, więc wynik jest zestawem, którego nie da
-  // się poprawić podmianą jednego przedmiotu.
-  if (best) {
-    const fullPools = {};
-    gearSlots.forEach((slotId) => {
-      fullPools[slotId] = bySlot[slotId];
-    });
-    await pause("Checking every item for each slot", 0.9);
-    best = polish(best, fullPools, 6);
-    // Krok 4: podmiany PAR slotów. Pojedyncza podmiana nie znajdzie ruchów w rodzaju "mocniejszy hełm, ale wtedy
-    // trzeba oddać Skill Pointy / EHP innym przedmiotem" - para robi obie rzeczy naraz. Pula na slot: najlepsi pod
-    // obrażenia, EHP, manę i życie według wag tego zestawu.
-    for (let round = 0; round < (quickEffort ? 1 : 2); round += 1) {
-      await pause("Trying weapon and pair swaps", 0.94 + round * 0.03);
-      const swapped = weaponClimb(best);
-      const paired = pairClimb(swapped);
-      if (paired === best) break;
-      best = polish(paired, fullPools, 3);
-    }
-  }
-
-  // Szukanie liczy Skill Pointy w wersji przybliżonej; wynik sprawdzamy dokładnie. Gdy dokładne rozłożenie
-  // punktów zepchnie zestaw tuż pod próg (np. EHP 1,069 przy progu 1,071), bierzemy najlepszego z pozostałych
-  // dopieszczonych kandydatów, który przechodzi dokładnie.
-  const exactPass = (candidate) => {
-    const all = [...Object.values(candidate.picks), candidate.weapon].filter(Boolean);
-    const sp = computeSkillPoints(all, true);
-    const metrics = evaluateGoal(ctx, all, candidate.weapon, sp.totals, goal, cycleCfg);
-    return (
-      sp.total <= ctx.available &&
-      sp.capOverflow === 0 &&
-      (minEhp <= 0 || metrics.ehp >= minEhp) &&
-      (cycleCfg.ids.length === 0 || (metrics.cycleOk && metrics.manaNet >= 0)) &&
-      (!requireSustain || metrics.sustain > 0)
-    );
-  };
-  if (best && best.ok && !exactPass(best)) {
-    const fallback = runnersUp.filter((candidate) => candidate.ok && candidate !== best).sort((a, b) => objectiveOf(b.metrics) - objectiveOf(a.metrics)).find(exactPass);
-    if (fallback) best = fallback;
-  }
-
   // Krok 5: ostateczna kontrola DOKŁADNA - Skill Pointy w kolejności zakładania z gry (a nie przybliżone),
   // wolne punkty wydane pod cel, każdy przedmiot z bazy w każdym slocie i każda broń klasy z każdym żywiołem
   // powderów. Wynik to zestaw, którego nie poprawia żadna pojedyncza podmiana (to samo sprawdzają testy QA).
@@ -2723,16 +2658,125 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
     exactCache.set(key, metrics);
     return metrics;
   };
-  const exactBetter = (metrics, current) => exactRank(metrics) > exactRank(current) + 1e-6;
+  // przy tym samym braku do progów (nic nie przechodzi) wygrywa zestaw z większymi obrażeniami
+  const exactBetter = (metrics, current) => {
+    const a = exactRank(metrics);
+    const b = exactRank(current);
+    if (a > b + 1e-6) return true;
+    if (!exactOk(metrics) && !exactOk(current) && Math.abs(a - b) <= 1e-6) return metrics.damage > current.damage * (1 + 1e-9);
+    return false;
+  };
+
+  // PRZEBIEGI aż do skutku: wynik ma być ostateczny już za pierwszym kliknięciem. Kolejny przebieg startuje z tych
+  // samych kandydatów z wiązki (wiązka jest deterministyczna, więc jej nie powtarzamy) plus najlepszego zestawu z
+  // poprzedniego przebiegu - dokładnie to, co robiło drugie kliknięcie Generate. Kończymy, gdy przebieg niczego
+  // nie poprawi; wtedy ponowne kliknięcie z tymi samymi ustawieniami liczy to samo i daje ten sam build.
+  let overall = null;
+  let passSeed = null;
+  const passes = { count: 0, gains: 0, restarts: 0, others: 0 };
+  const convergeMemo = new Map();
+  const refineMemo = new Map();
+  const polishMemo = new Map();
+  const exactMemo = new Map();
+  const keyOf = (candidate) => [candidate.weapon.name, candidate.weapon.powders ? candidate.weapon.powders.element : "", ...gearSlots.map((id) => (candidate.picks[id] ? candidate.picks[id].name : ""))].join("|");
+  for (let pass = 0; pass < (quickEffort ? 1 : 5); pass += 1) {
+  passes.count += 1;
+  perPoint = 0;
+  // poprzedni wynik stoi tam, gdzie postawiłoby go ponowne kliknięcie: przed zestawami z sesji (po zestawach
+  // "naprawczych", jeśli żaden kandydat z wiązki nie przechodził progów)
+  const seedAt = seedCandidates.length > 0 ? finalists.indexOf(seedCandidates[0]) : finalists.length;
+  const pool = passSeed ? [...finalists.slice(0, seedAt), passSeed, ...finalists.slice(seedAt)] : finalists;
+  const passLabel = (label) => (pass === 0 ? label : `Pass ${pass + 1}: ${label.charAt(0).toLowerCase()}${label.slice(1)}`);
+  let best = null;
+  // Dopieszczamy każdą z kandydatur (najwyżej tyle, ile mówi DAMAGE_BEAM.finalists plus zestawy z poradnika)
+  // i dopiero z nich wybieramy wynik.
+  // Dwa etapy: każda kandydatura dostaje krótkie dopieszczanie (2 rundy), a trzy najlepsze po nim - pełne.
+  const seen = new Set();
+  const unique = pool.filter((candidate) => {
+    const key = [candidate.weapon.name, ...SEARCH_ORDER.map((id) => (candidate.picks[id] ? candidate.picks[id].name : ""))].join("|");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  // na krótkie dopieszczanie idzie najwyżej DAMAGE_BEAM.quick kandydatur (przechodzące progi pierwsze, potem wartość)
+  const shortlist = [...unique].sort((a, b) => (a.ok !== b.ok ? (a.ok ? -1 : 1) : value(b.metrics) - value(a.metrics))).slice(0, quickEffort ? 12 : DAMAGE_BEAM.quick);
+  const quick = [];
+  for (const [index, candidate] of shortlist.entries()) {
+    await pause(passLabel("Polishing candidates"), 0.7 + (0.15 * index) / shortlist.length);
+    const quickKey = `q|${keyOf(candidate)}|${candidate.ok}`;
+    if (!polishMemo.has(quickKey)) polishMemo.set(quickKey, polish(candidate, shortPools(candidate), 2));
+    quick.push(polishMemo.get(quickKey));
+  }
+  const ranked = [...quick].sort((a, b) => (better(a, b) ? -1 : better(b, a) ? 1 : 0));
+  const runnersUp = [...quick];
+  for (const candidate of ranked.slice(0, quickEffort ? 2 : DAMAGE_BEAM.finalists)) {
+    await pause(passLabel("Polishing the best candidates"), 0.86);
+    const fullKey = `f|${keyOf(candidate)}|${candidate.ok}`;
+    if (!polishMemo.has(fullKey)) polishMemo.set(fullKey, polish(candidate, shortPools(candidate), 4));
+    const polished = polishMemo.get(fullKey);
+    runnersUp.push(polished);
+    if (better(polished, best)) best = polished;
+  }
+  // Zwycięzca dostaje jeszcze przebieg po CAŁEJ bazie dla każdego slotu, więc wynik jest zestawem, którego nie da
+  // się poprawić podmianą jednego przedmiotu.
+  const fullPools = {};
+  gearSlots.forEach((slotId) => {
+    fullPools[slotId] = bySlot[slotId];
+  });
+  const refine = async (start, restart = false) => {
+    await pause(passLabel(restart ? "Restarting from the best build" : "Checking every item for each slot"), restart ? 0.975 : 0.9);
+    let out = polish(start, fullPools, 6);
+    // Krok 4: podmiany PAR slotów. Pojedyncza podmiana nie znajdzie ruchów w rodzaju "mocniejszy hełm, ale wtedy
+    // trzeba oddać Skill Pointy / EHP innym przedmiotem" - para robi obie rzeczy naraz. Pula na slot: najlepsi pod
+    // obrażenia, EHP, manę i życie według wag tego zestawu.
+    for (let round = 0; round < (quickEffort ? 1 : 2); round += 1) {
+      await pause(passLabel(restart ? "Restarting from the best build" : "Trying weapon and pair swaps"), restart ? 0.98 : 0.94 + round * 0.03);
+      const swapped = weaponClimb(out);
+      const paired = pairClimb(swapped);
+      if (paired === out) break;
+      out = polish(paired, fullPools, 3);
+    }
+    return out;
+  };
   if (best) {
-    let current = { ...best, metrics: evaluateExact(best.items, best.weapon) };
+    const refineKey = `r|${keyOf(best)}`;
+    if (!refineMemo.has(refineKey)) refineMemo.set(refineKey, await refine(best));
+    best = refineMemo.get(refineKey);
+  }
+
+  // Szukanie liczy Skill Pointy w wersji przybliżonej; wynik sprawdzamy dokładnie. Gdy dokładne rozłożenie
+  // punktów zepchnie zestaw tuż pod próg (np. EHP 1,069 przy progu 1,071), bierzemy najlepszego z pozostałych
+  // dopieszczonych kandydatów, który przechodzi dokładnie.
+  const exactPass = (candidate) => {
+    const all = [...Object.values(candidate.picks), candidate.weapon].filter(Boolean);
+    const sp = computeSkillPoints(all, true);
+    const metrics = evaluateGoal(ctx, all, candidate.weapon, sp.totals, goal, cycleCfg);
+    return (
+      sp.total <= ctx.available &&
+      sp.capOverflow === 0 &&
+      (minEhp <= 0 || metrics.ehp >= minEhp) &&
+      (cycleCfg.ids.length === 0 || (metrics.cycleOk && metrics.manaNet >= 0)) &&
+      (!requireSustain || metrics.sustain > 0)
+    );
+  };
+  if (best && best.ok && !exactPass(best)) {
+    const fallback = runnersUp.filter((candidate) => candidate.ok && candidate !== best).sort((a, b) => objectiveOf(b.metrics) - objectiveOf(a.metrics)).find(exactPass);
+    if (fallback) best = fallback;
+  }
+
+  const exactStage = async (start) => {
+    // perPoint liczony od nowa dla każdego startu: wynik zależy tylko od zestawu startowego (dzięki temu kolejne
+    // przebiegi mogą brać gotowe wyniki, a ponowne kliknięcie liczy dokładnie to samo). Pamięć ocen zostaje: trzyma
+    // tylko wyniki niezależne od startu, a decyzję "czy rozdzielać wolne punkty" podejmujemy przy każdym odczycie.
+    perPoint = 0;
+    let current = { ...start, metrics: evaluateExact(start.items, start.weapon) };
     {
-      const all = [...best.items, best.weapon];
+      const all = [...start.items, start.weapon];
       const sp = computeSkillPoints(all, true);
-      const plain = evaluateGoal(ctx, all, best.weapon, sp.totals, goal, cycleCfg);
+      const plain = evaluateGoal(ctx, all, start.weapon, sp.totals, goal, cycleCfg);
       if (plain.damage > 0 && spendFreeSkillPoints)
         SKILLS.forEach((skill) => {
-          const bumped = evaluateGoal(ctx, all, best.weapon, { ...sp.totals, [skill]: (sp.totals[skill] || 0) + 5 }, goal, cycleCfg);
+          const bumped = evaluateGoal(ctx, all, start.weapon, { ...sp.totals, [skill]: (sp.totals[skill] || 0) + 5 }, goal, cycleCfg);
           perPoint = Math.max(perPoint, (bumped.damage / plain.damage - 1) / 5);
         });
     }
@@ -2746,7 +2790,7 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
     };
     // aż żadna pojedyncza podmiana nie poprawia wyniku (każda zmiana może otworzyć nową w innym slocie)
     for (let round = 0; round < (quickEffort ? 2 : 5); round += 1) {
-      await pause("Exact check: every item, every powder", 0.97 + Math.min(round, 2) * 0.01);
+      await pause(passLabel("Exact check: every item, every powder"), 0.97 + Math.min(round, 2) * 0.01);
       let improved = false;
       gearSlots.forEach((slotId) => {
         [...emptyOption(slotId), ...bySlot[slotId]].forEach((item) => {
@@ -2778,8 +2822,73 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
       });
       if (!improved) break;
     }
-    best = { ...current, ok: exactOk(current.metrics) };
+    return current;
+  };
+  const exactStageMemo = async (start) => {
+    const memoKey = keyOf(start);
+    if (!exactMemo.has(memoKey)) exactMemo.set(memoKey, await exactStage(start));
+    return exactMemo.get(memoKey);
+  };
+  // Restart od własnego wyniku: dokładny rachunek (z wolnymi punktami) potrafi przenieść zestaw w miejsce, z którego
+  // przybliżone podmiany (pojedyncze, pary, broń) widzą kolejne ulepszenia - powtarzamy, aż nic nie przybywa.
+  const approxOf = (candidate) => {
+    const metrics = evaluate(candidate.items, candidate.weapon);
+    return { picks: candidate.picks, items: candidate.items, weapon: candidate.weapon, metrics, ok: feasible(metrics), guide: candidate.guide };
+  };
+  const converge = async (start) => {
+    const memoKey = keyOf(start);
+    if (convergeMemo.has(memoKey)) return convergeMemo.get(memoKey);
+    let champion = await exactStageMemo(start);
+    for (let loop = 0; loop < (quickEffort ? 0 : 6); loop += 1) {
+      const refined = await refine(approxOf(champion), true);
+      passes.restarts += 1;
+      // przybliżone podmiany nie ruszyły zestawu: dokładna kontrola dałaby ten sam wynik
+      if (keyOf(refined) === keyOf(champion)) break;
+      const again = await exactStageMemo(refined);
+      if (!exactBetter(again.metrics, champion.metrics)) break;
+      champion = again;
+    }
+    convergeMemo.set(memoKey, champion);
+    return champion;
+  };
+  if (best) {
+    let champion = await converge(best);
+    // To samo od kilku innych mocnych kandydatów z dopieszczania (inna broń, inny zestaw): lokalne szczyty bywają
+    // różne, wygrywa najwyższy po dokładnym rachunku.
+    const tried = new Set([keyOf(best), keyOf(champion)]);
+    const others = [...runnersUp]
+      .sort((a, b) => (better(a, b) ? -1 : better(b, a) ? 1 : 0))
+      .filter((candidate) => {
+        const key = keyOf(candidate);
+        if (tried.has(key)) return false;
+        tried.add(key);
+        return true;
+      })
+      .slice(0, quickEffort ? 0 : 3);
+    for (const [index, candidate] of others.entries()) {
+      await pause(passLabel(`Trying other strong starts (${index + 1}/${others.length})`), 0.985);
+      const refinedKey = keyOf(candidate);
+      if (!refineMemo.has(refinedKey)) refineMemo.set(refinedKey, await refine(candidate, true));
+      const result = await converge(refineMemo.get(refinedKey));
+      passes.others += 1;
+      if (exactBetter(result.metrics, champion.metrics)) champion = result;
+    }
+    best = { ...champion, ok: exactOk(champion.metrics) };
   }
+  if (!best) break;
+  if (overall && !exactBetter(best.metrics, overall.metrics)) break;
+  if (overall) passes.gains += 1;
+  overall = best;
+  passSeed = candidateFromSeed({ picks: best.picks, weapon: best.weapon });
+  if (!passSeed) break;
+  }
+  let best = overall;
+  // zestawy z sesji "jak są" (dokładnie, z wolnymi punktami): ponowne kliknięcie nigdy nie da gorszego wyniku
+  if (best)
+    seedCandidates.forEach((candidate) => {
+      const metrics = evaluateExact(candidate.items, candidate.weapon);
+      if (exactBetter(metrics, best.metrics)) best = { ...candidate, metrics, ok: exactOk(metrics) };
+    });
   const picks = { ...best.picks, weapon: best.weapon };
   const allItems = Object.values(picks).filter(Boolean);
   const exactSp = computeSkillPoints(allItems, true);
@@ -2863,7 +2972,7 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
     skillPoints: { available: ctx.available, assigned: assignedSp, totals: totalsSp, required: spentSp, minimum: exactSp.total, free: freeExtra, remaining: ctx.available - spentSp, valid: spValid },
     totals: itemStatTotals(allItems),
     guide: { level: GUIDE_LEVEL, sets: guideSets.length, used: allItems.filter((item) => guideNames.has(item.name)).length, from: best && best.guide ? best.guide : null },
-    stats: { eligible: eligible.length, database: items.length, weapons: bySlot.weapon.length, ms: Math.round((typeof performance !== "undefined" ? performance.now() : 0) - started) },
+    stats: { eligible: eligible.length, database: items.length, weapons: bySlot.weapon.length, passes, ms: Math.round((typeof performance !== "undefined" ? performance.now() : 0) - started) },
   };
 }
 
@@ -13700,6 +13809,12 @@ export default function BuildRecommender() {
                       </>
                     )}
                     <span className="tabular-nums">{build.stats.eligible.toLocaleString("en-US")}</span> eligible items
+                    {build.stats.passes && build.stats.passes.count > 1 && (
+                      <span title={`The search ran ${build.stats.passes.count} passes, each starting from the best build so far (plus ${build.stats.passes.restarts} restarts from its own result and other strong starts), until a pass found nothing better. Generating again with the same settings gives the same build.`}>
+                        {" "}
+                        · final after <span className="tabular-nums">{build.stats.passes.count}</span> passes
+                      </span>
+                    )}
                     {build.cost && (
                       <span
                         title={`Trade Market prices (WynnVentory). Pinned items aren't counted.${build.cost.unknown.length > 0 ? ` No market price: ${build.cost.unknown.join(", ")}.` : ""}`}

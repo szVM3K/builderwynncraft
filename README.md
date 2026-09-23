@@ -31,6 +31,7 @@ npm install          # once (installs vitest)
 npm test             # matrix (5 classes × 3 archetypes × levels 30/50/70/90/100) + skill point solver, ~15-40 min
 npm run test:sp      # skill point solver only: 20,000 random item sets, a few seconds
 npm run test:wynnbuilder  # "Open in Wynnbuilder" links: 10 builds encoded and decoded back, ~1 min
+npm run test:stable  # same settings twice = same build (5 scenarios), a few minutes
 npm run test:matrix  # the matrix only
 npm run test:soak    # endless random scenarios in parallel shards until Ctrl+C
 ```
@@ -209,10 +210,21 @@ filters). The Skill points panel and the summary show them in brackets: `Strengt
 **Spend free skill points** (Items, on by default) turns this off - the rest then stays unspent, as in a fresh
 Wynnbuilder build.
 
+**The first result is final.** The search doesn't stop at the first answer: it restarts from its own result
+(approximate swaps, then the exact check again) until nothing improves, does the same from the three next-best
+candidates of the polishing step (other weapons and sets - local optima differ), and then runs whole extra
+**passes**, each starting from the best build so far, until a pass finds nothing better. That is exactly what a
+second click on Generate used to do, so generating again with the same settings now gives the same build (checked
+by `npm run test:stable`). The build header shows "final after N passes". On 30 test scenarios the first result
+became +2.4% stronger on average (up to +19.5%, never weaker) and 29 of 30 came back identical on a second and
+third click (before: 24, and four got weaker); the one exception had nothing passing the filters and is fixed by
+the tie-break on damage. The price is time: about 2-3 times longer than before, typically 5-30 s, up to ~1.5 min
+for level 100+ builds with a high EHP threshold and a mana cycle.
+
 Every build of the class generated in the same session (any goal, EHP threshold, cycle, level or filters) is fed
-into the next search as a starting point and re-checked against the current filters, so switching spells or
-dragging the EHP slider never loses a better build you already found. A progress bar shows the stage; a search
-takes about 8-13 s at level 100+.
+into the next search as a starting point and re-checked against the current filters (and checked exactly "as is"
+at the end), so switching spells or dragging the EHP slider never loses a better build you already found. A
+progress bar shows the stage and pass.
 
 - **Guide builds at level 100+**: from level 100 the generator treats the Wynnbuilder guide builds as the
   reference for that class — at high level nothing in the database beats them. Their weapons join the weapon list
