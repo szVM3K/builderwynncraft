@@ -1,0 +1,393 @@
+// QA checks for one generated build. Every check is a *certificate*: when it reports a problem it also carries the
+// concrete evidence (the better build, the broken requirement, the two numbers that disagree), so a finding can be
+// reproduced and never depends on trusting the generator's own search.
+//
+// Severity:
+//   error - a calculation or constraint bug, or a provably suboptimal result (a better build that satisfies every
+//           filter was found by an independent search)
+//   warn  - likely improvement / inefficiency (e.g. unspent skill points that would add damage, slow search)
+//   info  - statistics worth watching, never fails a test
+import { E } from "./scenarios.js";
+
+const SLOT_TYPE = Object.fromEntries(E.SLOTS.map((slot) => [slot.id, slot.type]));
+const GEAR_SLOTS = E.SLOTS.map((slot) => slot.id).filter((id) => id !== "weapon");
+
+export const DEFAULT_LIMITS = {
+  gainError: 0.005, // a swap that adds > 0.5 % to the objective while passing every filter = the search missed it
+  gainWarn: 0.0005,
+  metricTolerance: 0.01, // generator metrics vs the UI's computeBuildStats()
+  unspentWarn: 0.01, // free skill points that would add > 1 % damage
+  pairsPerSlot: 4, // 2-opt: candidates per slot (by damage, by EHP, by mana) for pair swaps
+  slowMs: 15000,
+};
+
+// ---------------------------------------------------------------------------------------------------------------
+// Item eligibility - the generator's filters, re-implemented from the UI options (pinned items always allowed).
+export function isEligible(params, item, slotId) {
+  const options = params.options;
+  const pinned = options.locked && options.locked[slotId];
+  if (!item) return false;
+  if (pinned) return item.name === pinned;
+  if (item.level > params.level) return false;
+  if (slotId === "weapon") {
+    if (item.type !== E.CLASSES[params.playerClass].weapon) return false;
+    if (options.attackSpeeds.length && !options.attackSpeeds.includes(item.atkSpd)) return false;
+  } else if (item.type !== SLOT_TYPE[slotId]) return false;
+  if ((options.excluded || []).includes(item.name)) return false;
+  if ((options.excludedTiers || []).includes(item.tier)) return false;
+  if (params.excludeEvents && E.eventOf(item)) return false;
+  if (params.tradeableOnly && E.isUntradable(item)) return false;
+  if (options.avoidNegativeDefences && E.hasNegativeDefence(item)) return false;
+  return true;
+}
+
+let poolCache = new Map();
+export function eligiblePool(params, slotId) {
+  const key = JSON.stringify([slotId, params.playerClass, params.level, params.options, params.excludeEvents, params.tradeableOnly]);
+  if (!poolCache.has(key)) {
+    if (poolCache.size > 200) poolCache = new Map();
+    poolCache.set(key, E.ITEM_DB.filter((item) => isEligible(params, item, slotId)));
+  }
+  return poolCache.get(key);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Exact evaluation of a set of picks with the same formulas as the generator and the exact (equip-order) skill
+// point solver. Returns metrics + feasibility against the scenario's hard filters.
+export function makeEvaluator(params) {
+  const ctx = E.damageGoalContext(params.playerClass, params.level, params.treeSettings);
+  const cycle = { ids: params.cycle.ids || [], cps: params.cycle.cps || 9, steal: params.cycle.steal !== false, gain: params.cycle.gain !== false };
+  const cache = new Map();
+  const evaluate = (picks, extraSkills = null) => {
+    const key = extraSkills ? null : E.SLOTS.map((slot) => (picks[slot.id] ? `${picks[slot.id].name}${powderKey(picks[slot.id])}` : "-")).join("|");
+    if (key && cache.has(key)) return cache.get(key);
+    const items = E.SLOTS.map((slot) => picks[slot.id]).filter(Boolean);
+    const weapon = picks.weapon || null;
+    const sp = E.computeSkillPoints(items, true);
+    let totals = sp.totals;
+    if (extraSkills) totals = Object.fromEntries(E.SKILLS.map((skill) => [skill, (sp.totals[skill] || 0) + (extraSkills[skill] || 0)]));
+    const m = E.evaluateGoal(ctx, items, weapon, totals, params.goal, cycle);
+    delete m.stats;
+    const illegal = E.activeSets(items).some((set) => set.illegal);
+    const clash = picks.ring1 && picks.ring2 && picks.ring1.name === picks.ring2.name && E.singleCopy(picks.ring1);
+    const extra = extraSkills ? E.SKILLS.reduce((sum, skill) => sum + (extraSkills[skill] || 0), 0) : 0;
+    const spOk = sp.total + extra <= ctx.available && sp.capOverflow === 0 && E.SKILLS.every((skill) => (sp.assigned[skill] || 0) + ((extraSkills && extraSkills[skill]) || 0) <= E.MAX_ASSIGNED_PER_SKILL);
+    const ehpOk = params.minEhp <= 0 || m.ehp >= params.minEhp;
+    const manaOk = cycle.ids.length === 0 || (m.cycleOk && m.manaNet >= 0);
+    const sustainOk = !params.requireSustain || m.sustain > 0;
+    const out = { ...m, sp, spOk, illegal, clash, ehpOk, manaOk, sustainOk, feasible: spOk && !illegal && !clash && ehpOk && manaOk && sustainOk };
+    if (key) {
+      if (cache.size > 200000) cache.clear();
+      cache.set(key, out);
+    }
+    return out;
+  };
+  return { ctx, cycle, evaluate };
+}
+
+export function picksOf(build) {
+  return Object.fromEntries(build.slots.map((slot) => [slot.id, slot.item]));
+}
+
+// Powdered weapons are separate objects with `powders: { element, tier, count }`.
+export function powderKey(item) {
+  return item && item.powders ? `+${item.powders.count}x${item.powders.element}${item.powders.tier}` : "";
+}
+
+function namesOf(picks) {
+  return Object.fromEntries(Object.entries(picks).map(([slot, item]) => [slot, item ? `${item.name}${item.powders ? ` (${item.powders.count}× ${item.powders.element} ${item.powders.tier})` : ""}` : null]));
+}
+
+function weaponVariants(base) {
+  const variants = [base];
+  if (base.slots > 0) E.ELEMENTS.forEach((element) => variants.push(E.powderedWeapon(base, element)));
+  return variants;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Independent skill point verifier (final state, the same rules the app documents: a gear item's requirement is
+// checked against the assigned points plus the skill bonuses of all *other* gear; the weapon's against assigned
+// plus all gear; set bonuses and the weapon's own bonuses never help a requirement).
+export function verifySkillPoints(items, assigned, available) {
+  const problems = [];
+  const gear = items.filter((item) => item.category !== "weapon");
+  const weapon = items.find((item) => item.category === "weapon");
+  const gearBonus = Object.fromEntries(E.SKILLS.map((skill) => [skill, gear.reduce((sum, item) => sum + (item.stats[skill] || 0), 0)]));
+  const spent = E.SKILLS.reduce((sum, skill) => sum + (assigned[skill] || 0), 0);
+  if (spent > available) problems.push(`assigned ${spent} skill points, only ${available} available`);
+  E.SKILLS.forEach((skill) => {
+    if ((assigned[skill] || 0) < 0) problems.push(`negative assignment in ${skill}`);
+    if ((assigned[skill] || 0) > E.MAX_ASSIGNED_PER_SKILL) problems.push(`${skill} assigned ${assigned[skill]} > cap ${E.MAX_ASSIGNED_PER_SKILL}`);
+  });
+  gear.forEach((item) => {
+    E.SKILLS.forEach((skill) => {
+      const req = item.reqs[skill] || 0;
+      if (req <= 0) return;
+      const have = (assigned[skill] || 0) + gearBonus[skill] - (item.stats[skill] || 0);
+      if (have < req) problems.push(`${item.name} needs ${req} ${skill}, has ${have}`);
+    });
+  });
+  if (weapon) {
+    E.SKILLS.forEach((skill) => {
+      const req = weapon.reqs[skill] || 0;
+      if (req > 0 && (assigned[skill] || 0) + gearBonus[skill] < req) problems.push(`${weapon.name} needs ${req} ${skill}, has ${(assigned[skill] || 0) + gearBonus[skill]}`);
+    });
+  }
+  return problems;
+}
+
+// Lower bound on the skill points any valid assignment needs (final-state rules only; equip order can only add).
+export function skillPointLowerBound(items) {
+  const gear = items.filter((item) => item.category !== "weapon");
+  const weapon = items.find((item) => item.category === "weapon");
+  let total = 0;
+  E.SKILLS.forEach((skill) => {
+    const gearBonus = gear.reduce((sum, item) => sum + (item.stats[skill] || 0), 0);
+    let need = 0;
+    gear.forEach((item) => {
+      if ((item.reqs[skill] || 0) > 0) need = Math.max(need, item.reqs[skill] - (gearBonus - (item.stats[skill] || 0)));
+    });
+    if (weapon && (weapon.reqs[skill] || 0) > 0) need = Math.max(need, weapon.reqs[skill] - gearBonus);
+    total += Math.max(0, need);
+  });
+  return total;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The checks.
+export async function checkBuild(scenario, build, { limits = DEFAULT_LIMITS, pairs = true, elapsedMs = null } = {}) {
+  const { params } = scenario;
+  const findings = [];
+  const add = (severity, code, message, data = {}) => findings.push({ severity, code, message, data });
+  const picks = picksOf(build);
+  const items = Object.values(picks).filter(Boolean);
+  const { evaluate } = makeEvaluator(params);
+  const base = evaluate(picks);
+
+  // 1. Every slot holds an allowed item of the right type.
+  E.SLOTS.forEach((slot) => {
+    const item = picks[slot.id];
+    if (!item) {
+      if (eligiblePool(params, slot.id).length > 0) add("warn", "EMPTY_SLOT", `${slot.id} is empty although ${eligiblePool(params, slot.id).length} items are allowed`);
+      return;
+    }
+    const baseItem = E.ITEM_BY_NAME.get(item.name) || item;
+    if (!isEligible(params, baseItem, slot.id)) add("error", "FILTER_VIOLATION", `${slot.id}: ${item.name} breaks a filter (level ${item.level}, type ${item.type}, tier ${item.tier})`);
+  });
+  Object.entries(params.options.locked || {}).forEach(([slotId, name]) => {
+    if (!picks[slotId] || picks[slotId].name !== name)
+      add("error", "PINNED_DROPPED", `${name} was pinned to ${slotId} but the build has ${picks[slotId] ? picks[slotId].name : "nothing"} there${build.warnings && build.warnings.length ? "" : " - and no warning says so"}`);
+  });
+  if (base.illegal) add("error", "ILLEGAL_SET", "the build combines items of a set marked illegal");
+  if (base.clash) add("error", "RING_DUPLICATE", `${picks.ring1.name} can only be owned once but is on both rings`);
+
+  // 2. Skill points: the reported assignment must pass an independent verifier and add up.
+  const sp = build.skillPoints;
+  const spProblems = verifySkillPoints(items, sp.assigned, sp.available);
+  if (sp.valid && spProblems.length) add("error", "SP_INVALID", `skill points marked valid but: ${spProblems.join("; ")}`, { assigned: sp.assigned });
+  const setSkills = E.setBonusSkills(items);
+  E.SKILLS.forEach((skill, index) => {
+    const expected = (sp.assigned[skill] || 0) + items.reduce((sum, item) => sum + (item.stats[skill] || 0), 0) + (setSkills[index] || 0);
+    if (Math.abs(expected - (sp.totals[skill] || 0)) > 0) add("error", "SP_TOTALS", `${skill} total ${sp.totals[skill]} but assigned + bonuses = ${expected}`);
+  });
+  const spent = E.SKILLS.reduce((sum, skill) => sum + (sp.assigned[skill] || 0), 0);
+  if (spent !== sp.required) add("error", "SP_REQUIRED", `required ${sp.required} but assigned points sum to ${spent}`);
+  const lower = skillPointLowerBound(items);
+  if (sp.required < lower) add("error", "SP_BELOW_BOUND", `required ${sp.required} is below the lower bound ${lower} - impossible`);
+  else if (sp.required > lower) add("info", "SP_ABOVE_BOUND", `equip order costs ${sp.required - lower} skill points over the final-state bound`, { lower, required: sp.required });
+
+  // 3. Metrics agree with the UI's computeBuildStats() (independent code path for damage, EHP and mana).
+  const stats = E.computeBuildStats(build, params.treeSettings);
+  const close = (a, b, tol = limits.metricTolerance) => Math.abs(a - b) <= tol * Math.max(1, Math.abs(b));
+  const goalSpell = params.goal === E.DAMAGE_GOAL_MAIN ? null : stats.spells.find((spell) => spell.id === params.goal);
+  let uiDamage = params.goal === E.DAMAGE_GOAL_MAIN ? (stats.mainAttack ? stats.mainAttack.dps : 0) : goalSpell && goalSpell.main ? goalSpell.main.amount : 0;
+  // If the generator's objective adds poison (evaluateGoal → poisonDps), add the same share to the summary's number:
+  // DPS for the main attack, poison per cast for a spell (casts per second = clicks per second ÷ 3).
+  if (uiDamage > 0 && base.poisonDps) uiDamage += params.goal === E.DAMAGE_GOAL_MAIN ? base.poisonDps : base.poisonDps / (Math.max(0.1, params.cycle.cps || 9) / 3);
+  if (!close(build.metrics.damage, uiDamage)) add("error", "DAMAGE_MISMATCH", `generator damage ${Math.round(build.metrics.damage)} vs summary ${Math.round(uiDamage)}`);
+  if (!close(build.metrics.ehp, stats.ehp)) add("error", "EHP_MISMATCH", `generator EHP ${Math.round(build.metrics.ehp)} vs summary ${Math.round(stats.ehp)}`);
+  if (!close(build.metrics.damage, base.damage) || !close(build.metrics.ehp, base.ehp))
+    add("error", "EVAL_MISMATCH", `generator metrics (${Math.round(build.metrics.damage)} / ${Math.round(build.metrics.ehp)}) differ from a re-evaluation (${Math.round(base.damage)} / ${Math.round(base.ehp)})`);
+  if (params.cycle.ids.length) {
+    const spells = params.cycle.ids.map((id) => stats.spells.find((spell) => spell.id === id));
+    if (spells.every(Boolean)) {
+      const seconds = (3 * params.cycle.ids.length) / params.cycle.cps;
+      const used = spells.reduce((sum, spell) => sum + (spell.cost || 0), 0) / seconds;
+      const gained = params.cycle.gain !== false ? spells.reduce((sum, spell) => sum + (spell.manaGained || 0), 0) / seconds : 0;
+      const income = (stats.manaRegen + 25) / 5 + (params.cycle.steal !== false ? stats.manaSteal / 3 : 0);
+      const net = income + gained - used;
+      if (Math.abs(net - build.metrics.manaNet) > 0.05 + 0.02 * Math.abs(net)) add("error", "MANA_MISMATCH", `generator mana ${build.metrics.manaNet.toFixed(2)}/s vs summary ${net.toFixed(2)}/s`);
+    }
+  }
+
+  // 4. "passed" must mean every hard filter holds.
+  if (build.passed && !base.feasible)
+    add("error", "PASSED_BUT_INFEASIBLE", `build says it passes, but: ${[!base.spOk && "skill points", !base.ehpOk && `EHP ${Math.round(base.ehp)} < ${params.minEhp}`, !base.manaOk && `mana ${base.manaNet.toFixed(2)}/s`, !base.sustainOk && `sustain ${base.sustain.toFixed(1)}`, base.illegal && "illegal set", base.clash && "ring duplicate"].filter(Boolean).join(", ")}`);
+  if (!build.passed && base.feasible) add("error", "FEASIBLE_BUT_FAILED", "build reports a failed filter although every filter holds");
+
+  // 5. Local optimality: no single swap (any allowed item, any powder element on the weapon) may improve the
+  //    objective while passing every filter. For a failed build: no single swap may make it pass.
+  const bestSwaps = {};
+  const pairCandidates = {};
+  for (const slot of E.SLOTS) {
+    await tick();
+    const pool = eligiblePool(params, slot.id);
+    const variants = slot.id === "weapon" ? pool.flatMap(weaponVariants) : pool;
+    const scored = [];
+    variants.forEach((candidate) => {
+      if (picks[slot.id] && candidate.name === picks[slot.id].name && powderKey(candidate) === powderKey(picks[slot.id])) return;
+      const trial = { ...picks, [slot.id]: candidate };
+      const metrics = evaluate(trial);
+      scored.push({ candidate, metrics });
+      if (!metrics.feasible) return;
+      const gain = build.passed ? metrics.damage / Math.max(1e-9, base.damage) - 1 : Infinity;
+      if (!bestSwaps[slot.id] || gain > bestSwaps[slot.id].gain) bestSwaps[slot.id] = { gain, candidate, metrics };
+    });
+    if (pairs) {
+      const n = limits.pairsPerSlot;
+      const byDamage = [...scored].sort((a, b) => b.metrics.damage - a.metrics.damage).slice(0, n);
+      const byEhp = [...scored].sort((a, b) => b.metrics.ehp - a.metrics.ehp).slice(0, Math.ceil(n / 2));
+      const byMana = params.cycle.ids.length ? [...scored].sort((a, b) => b.metrics.manaNet - a.metrics.manaNet).slice(0, Math.ceil(n / 2)) : [];
+      const bySp = [...scored].sort((a, b) => a.metrics.sp.total - b.metrics.sp.total).slice(0, Math.ceil(n / 2));
+      pairCandidates[slot.id] = [...new Set([...byDamage, ...byEhp, ...byMana, ...bySp].map((entry) => entry.candidate))];
+    }
+  }
+  Object.entries(bestSwaps).forEach(([slotId, swap]) => {
+    if (!build.passed) {
+      add("error", "FAILED_BUT_ONE_SWAP_PASSES", `build fails its filters, but swapping ${slotId} to ${swap.candidate.name} passes them (damage ${Math.round(swap.metrics.damage)})`, { slotId, item: swap.candidate.name });
+    } else if (swap.gain > limits.gainError) {
+      add("error", "NOT_1OPT", `swap ${slotId}: ${picks[slotId] ? picks[slotId].name + powderKey(picks[slotId]) : "-"} → ${swap.candidate.name}${powderKey(swap.candidate)} gives +${(swap.gain * 100).toFixed(2)} % and passes every filter`, { slotId, from: picks[slotId] && picks[slotId].name, to: swap.candidate.name, damage: swap.metrics.damage });
+    } else if (swap.gain > limits.gainWarn) {
+      add("warn", "NEAR_1OPT", `swap ${slotId} → ${swap.candidate.name} gives +${(swap.gain * 100).toFixed(3)} %`);
+    }
+  });
+
+  // 6. Pair swaps (2-opt, sampled): two slots at once, e.g. a stronger item plus the one that pays for its EHP.
+  if (pairs) {
+    const slots = Object.keys(pairCandidates);
+    let best = null;
+    for (let i = 0; i < slots.length; i += 1) {
+      for (let j = i + 1; j < slots.length; j += 1) {
+        await tick();
+        for (const a of pairCandidates[slots[i]]) {
+          for (const b of pairCandidates[slots[j]]) {
+            const trial = { ...picks, [slots[i]]: a, [slots[j]]: b };
+            const metrics = evaluate(trial);
+            if (!metrics.feasible) continue;
+            const gain = build.passed ? metrics.damage / Math.max(1e-9, base.damage) - 1 : Infinity;
+            if (!best || gain > best.gain) best = { gain, swap: { [slots[i]]: a.name, [slots[j]]: b.name }, metrics };
+          }
+        }
+      }
+    }
+    if (best && !build.passed) add("error", "FAILED_BUT_PAIR_PASSES", `build fails its filters, but the pair swap ${JSON.stringify(best.swap)} passes them`, best.swap);
+    else if (best && best.gain > limits.gainError) add("error", "NOT_2OPT", `pair swap ${JSON.stringify(best.swap)} gives +${(best.gain * 100).toFixed(2)} % and passes every filter`, { swap: best.swap, damage: best.metrics.damage });
+  }
+
+  // 7. Unspent skill points: the game lets you put the remaining points anywhere. If they would add damage, the
+  //    reported damage (and possibly the choice of items) leaves value on the table.
+  const free = sp.available - sp.required;
+  if (build.passed && free > 0) {
+    const extra = { str: 0, dex: 0, int: 0, def: 0, agi: 0 };
+    let left = free;
+    let current = base;
+    while (left > 0) {
+      const chunk = Math.max(1, Math.ceil(left / 4));
+      let bestStep = null;
+      E.SKILLS.forEach((skill) => {
+        const room = E.MAX_ASSIGNED_PER_SKILL - (sp.assigned[skill] || 0) - extra[skill];
+        const amount = Math.min(chunk, room, left);
+        if (amount <= 0) return;
+        const trial = { ...extra, [skill]: extra[skill] + amount };
+        const metrics = evaluate(picks, trial);
+        if (!metrics.feasible) return;
+        if (!bestStep || metrics.damage > bestStep.metrics.damage) bestStep = { skill, amount, metrics };
+      });
+      if (!bestStep || bestStep.metrics.damage <= current.damage + 1e-9) break;
+      extra[bestStep.skill] += bestStep.amount;
+      left -= bestStep.amount;
+      current = bestStep.metrics;
+    }
+    const gain = current.damage / Math.max(1e-9, base.damage) - 1;
+    if (gain > limits.unspentWarn) add("warn", "UNSPENT_SP", `${free} free skill points would add +${(gain * 100).toFixed(1)} % (${Object.entries(extra).filter(([, v]) => v).map(([k, v]) => `${v} ${k}`).join(", ")})`, { free, extra, gain });
+    else if (free > 0) add("info", "FREE_SP", `${free} skill points unused (no damage gain)`, { free });
+  }
+
+  // 8. Guide builds (level 100+): every complete guide build of the archetype that passes the filters is a
+  //    candidate the generator starts from, so the result can never be weaker than one of them.
+  if (build.passed && params.level >= 100) {
+    (E.GUIDE_DATA.builds || [])
+      .filter((entry) => entry.class === params.playerClass && entry.archetype === params.archetype)
+      .forEach((entry) => {
+        const guidePicks = {};
+        const complete = E.SLOTS.every((slot) => {
+          const item = E.ITEM_BY_NAME.get(entry.items[slot.id]);
+          if (!item || !isEligible(params, item, slot.id)) return false;
+          guidePicks[slot.id] = item;
+          return true;
+        });
+        if (!complete) return;
+        weaponVariants(guidePicks.weapon).forEach((weapon) => {
+          const metrics = evaluate({ ...guidePicks, weapon });
+          if (metrics.feasible && metrics.damage > base.damage * (1 + limits.gainError))
+            add("error", "BELOW_GUIDE", `guide build "${entry.name}" passes every filter and deals ${Math.round(metrics.damage)} vs ${Math.round(base.damage)}`, { guide: entry.name });
+        });
+      });
+  }
+
+  if (elapsedMs !== null && elapsedMs > limits.slowMs) add("warn", "SLOW", `generation took ${(elapsedMs / 1000).toFixed(1)} s`);
+  return { findings, base, picks: namesOf(picks) };
+}
+
+// Portfolio certificate: any build found by *any* run (another goal, another EHP threshold, another cycle…) is
+// re-evaluated exactly under this scenario's filters. If it passes them and deals more damage, this scenario's
+// result is provably suboptimal - no trust in the generator needed. Builds from the same class + level + tree are
+// the useful ones (the tree changes the spells).
+export function checkPortfolio(scenario, build, portfolio, limits = DEFAULT_LIMITS) {
+  const findings = [];
+  const { evaluate } = makeEvaluator(scenario.params);
+  const own = evaluate(picksOf(build));
+  let best = null;
+  portfolio.forEach((entry) => {
+    if (entry.build === build) return;
+    if (entry.scenario.params.playerClass !== scenario.params.playerClass) return;
+    const picks = picksOf(entry.build);
+    if (!E.SLOTS.every((slot) => !picks[slot.id] || isEligible(scenario.params, E.ITEM_BY_NAME.get(picks[slot.id].name) || picks[slot.id], slot.id))) return;
+    const metrics = evaluate(picks);
+    if (!metrics.feasible) return;
+    if (!best || metrics.damage > best.metrics.damage) best = { entry, metrics, picks };
+  });
+  if (!best) return findings;
+  if (!build.passed) {
+    findings.push({ severity: "error", code: "FAILED_BUT_KNOWN_PASS", message: `no passing build found, but the build from "${best.entry.scenario.label}" passes these filters`, data: { from: best.entry.scenario.label, picks: namesOf(best.picks) } });
+    return findings;
+  }
+  const gap = best.metrics.damage / Math.max(1e-9, own.damage) - 1;
+  if (gap > limits.gainError)
+    findings.push({
+      severity: "error",
+      code: "BETTER_BUILD_KNOWN",
+      message: `the build from "${best.entry.scenario.label}" also passes these filters and deals ${Math.round(best.metrics.damage)} vs ${Math.round(own.damage)} (+${(gap * 100).toFixed(2)} %)`,
+      data: { from: best.entry.scenario.label, picks: namesOf(best.picks), gain: gap },
+    });
+  return findings;
+}
+
+// Give the event loop a turn (vitest's worker RPC times out when a test blocks it for too long).
+export const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+export async function generate(scenario) {
+  const started = performance.now();
+  // a no-op onProgress makes the generator pause between stages, like in the browser
+  const build = await E.generateDamageBuild({ ...scenario.params, onProgress: () => {} });
+  return { build, ms: performance.now() - started };
+}
+
+export function summarize(findings) {
+  const counts = {};
+  findings.forEach((finding) => {
+    const key = `${finding.severity}:${finding.code}`;
+    counts[key] = (counts[key] || 0) + 1;
+  });
+  return counts;
+}

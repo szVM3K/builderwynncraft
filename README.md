@@ -20,6 +20,53 @@ npm run dev        # development server
 npm run build      # production build in dist/
 ```
 
+## Testing the generator (QA)
+
+`npm test` checks the generator the way a QA engineer would, without trusting its own search. Every check is a
+*certificate*: when it reports a problem it also carries the evidence (the better build, the broken requirement,
+the two numbers that disagree), written to `test-results/`.
+
+```bash
+npm install          # once (installs vitest)
+npm test             # matrix (5 classes × 3 archetypes × levels 30/50/70/90/100) + skill point solver, ~15-40 min
+npm run test:sp      # skill point solver only: 20,000 random item sets, a few seconds
+npm run test:matrix  # the matrix only
+npm run test:soak    # endless random scenarios in parallel shards until Ctrl+C
+```
+
+What is checked for each generated build (`tests/harness/checks.js`):
+
+- **Calculation errors** (error): damage, EHP and mana of the generator agree with the summary panel's
+  `computeBuildStats()`; `passed` means every hard filter really holds; the skill point assignment passes an
+  independent verifier and is never below the theoretical lower bound; totals add up; filters (level, class weapon,
+  events, tradeable, attack speed, negative defences, rarities, pinned items, illegal sets, single-copy rings).
+- **Suboptimal builds** (error): no single item swap (every allowed item, every powder element on the weapon) and
+  no sampled pair swap may give more than +0.5 % while passing every filter; no complete guide build (level 100+)
+  may beat the result; and the **portfolio** check re-evaluates every build found by any other run of the same class
+  (other goals, EHP thresholds, cycles, levels) under this run's filters - if one passes and deals more damage, the
+  result is provably not the best. A failed build that one swap would fix is an error too.
+- **Inefficiencies** (warn): free skill points that would add > 1 % damage, empty slots, searches over 15 s.
+
+Useful variables (PowerShell: `$env:NAME="value"; npm run …`, cmd: `set NAME=value && npm run …`, bash:
+`NAME=value npm run …`):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MATRIX_LEVELS` | `30,50,70,90,100` | levels of the matrix |
+| `MATRIX_VARIANTS` | `base,second,main,lowEhp,noCycle,pinned` | runs per archetype and level |
+| `MATRIX_AP_LOAN` | `0` | rank AP loan (2 = VIP+, 4 = HERO+) |
+| `SP_SETS` / `SP_SEED` | `20000` / fixed | random sets for the skill point test |
+| `SOAK_MINUTES` | `0` (forever) | stop the soak run after N minutes |
+| `SOAK_SHARDS` | CPU cores − 1 (max 4) | parallel soak processes |
+| `SOAK_LEVELS` | `30-100` | level range of random scenarios |
+| `SOAK_STOP_ON_ERROR` | off | `1` = stop at the first error |
+| `SOAK_SEED` | time | base seed (runs are reproducible from it) |
+| `SOAK_REPLAY` | – | re-run one iteration by the `seed` printed next to a finding |
+
+Findings are appended to `test-results/matrix-findings.jsonl` and `test-results/soak-findings.jsonl` (one JSON
+line each, with the scenario and the build); `test-results/matrix-<class>.json` has every run's damage, EHP and
+time. The tests import the generator through the `__engine` export at the end of `src/BuildRecommender.jsx`.
+
 ## Updating the item data after a Wynncraft patch
 
 ```bash
@@ -37,6 +84,7 @@ npm run update-tree-effects -- 2.2.4.0  # a specific version
 npm run update-guide-trees               # re-check the guide builds' trees against the new tree data
 npm run update-item-weights              # re-fetch the Wynnpool item weights
 npm run update-event-items               # re-fetch the list of limited-time event items (wiki + Wynncraft API)
+npm run update-tomes-aspects             # tomes, aspects and the guide builds' tomes/aspects for the tree data version
 ```
 
 ## Trade Market prices (budget)
@@ -263,6 +311,27 @@ of the site):
 - **Rank** at the top of the form (No rank, VIP, VIP+, HERO, HERO+, CHAMPION): VIP+ borrows 2 AP, HERO and above
   4 AP (Wynncraft wiki), 50 AP at most. The choice is remembered in the browser.
 
+### Aspects and Tomes
+
+Two tabs that pick aspects and Mastery Tomes for the build on screen (generated, guide or solver build). They are
+locked below level 60: both are raid rewards (The Worm Holes, a level 54 quest, opens the first raid) and the first
+tomes need level 60, so one threshold covers both tabs.
+
+- **Tomes**: 14 slots (Weapon 2, Armour 4, Mysticism 2, Expertise 2, Marathon 2, Lootrun 1, Guild 1), each opening
+  at its level (wynncraft.wiki.gg/wiki/Mastery_Tomes). A tome is an item with only identifications (50% rolls, like
+  the gear), so every slot gets the tome that adds most to the build together with the tomes already picked, in the
+  generator's own model (`evaluateGoal`: goal damage, effective HP, mana against the spell cycle, life sustain,
+  with the same EHP/sustain thresholds). The same tome twice is allowed, as in game. Stats the model doesn't count
+  (walk speed, thorns, loot bonus) break ties in Marathon, Expertise and Lootrun. Guild tomes add skill points.
+- **Aspects**: 4 slots from level 60, 5 from 80 (the 5th also needs Sentinel III, assumed). Each aspect's effects
+  are merged into the ability tree the way Wynnbuilder does (`mergeTreeAbilities`, only for active abilities with
+  their `deps` active) and the build is recalculated; aspects that only change area, range, cooldowns or durations
+  score by the active abilities they improve (counted per ability, more for the goal spell and the tree's main
+  archetype). At most one mythic; the max tier is shown.
+- Both tabs list the guide builds whose Wynnbuilder links save tomes or aspects, with ✓ on the ones we pick too.
+  Only 8 of the 127 links save any: aspect picks match 14 of 25 guide aspects (4 of 5 mythics), tome picks match
+  all 7 guide tomes by family (6 exactly; one guide uses tier II where III exists).
+
 ### Other tabs
 
 - **Build info**: the class's spells with click combos and the costs from your tree, the archetype's ultimate,
@@ -303,6 +372,9 @@ of the site):
 - `src/wynncraft-items.json`: 5,414 items (Wynnbuilder data 2.2.4.0) with `fixID`, the list of static IDs and the
   item's set, plus the 79 sets with their bonuses.
 - `src/guide-builds.json`: the guide builds (items, tomes, authors, Wynnbuilder links).
+- `src/tomes-aspects.json`: the tomes that still exist after 2.1 (88), every class's aspects with the tree nodes
+  they improve and their effects in the tree-node format, and the tomes/aspects decoded from the guide builds'
+  links (written by `scripts/update-tomes-aspects.mjs` from Wynnbuilder's tomes.json and aspects.json).
 - `src/guide-trees.json`: the ability trees decoded from those links that still match the current tree data
   (written by `scripts/update-guide-trees.mjs`; outdated ones are only counted).
 - `src/item-weights.json`: Wynnpool item weights (135 profiles for 84 items) written by

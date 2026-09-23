@@ -12,7 +12,12 @@
     "update-prices": "node scripts/update-prices.mjs",
     "update-guide-trees": "node scripts/update-guide-trees.mjs",
     "update-item-weights": "node scripts/update-item-weights.mjs",
-    "update-event-items": "node scripts/update-event-items.mjs"
+    "update-event-items": "node scripts/update-event-items.mjs",
+    "update-tomes-aspects": "node scripts/update-tomes-aspects.mjs",
+    "test": "vitest run",
+    "test:matrix": "vitest run tests/matrix",
+    "test:sp": "vitest run tests/skillpoints.test.js",
+    "test:soak": "vitest run --config vitest.soak.config.js"
   },
   "dependencies": {
     "@fontsource/pixelify-sans": "^5.3.0",
@@ -25,6 +30,7 @@
     "autoprefixer": "^10.4.20",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.17",
-    "vite": "^5.4.11"
+    "vite": "^5.4.11",
+    "vitest": "^3.2.7"
   }
 }
