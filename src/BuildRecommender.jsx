@@ -8329,7 +8329,7 @@ function WizardTile({ selected = false, onClick, children, className = "", title
   );
 }
 
-function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, level, levelInput, onLevelInput, treeIds, apCap, preset, onPreset, onEditTree, goals, goal, form, onForm, ehpMax, options, onOptions, onGenerate, running, progress, treeSettings }) {
+function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, level, levelInput, onLevelInput, treeIds, apCap, preset, onPreset, onEditTree, renderTree = null, goals, goal, form, onForm, ehpMax, options, onOptions, onGenerate, running, progress, treeSettings }) {
   const ts = useTs();
   const classConfig = CLASSES[playerClass];
   const firstOpen = !rankConfirmed ? "rank" : !level ? "level" : treeIds.length === 0 ? "tree" : null;
@@ -8337,6 +8337,13 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
   const active = view || firstOpen || "goal";
   const order = WIZARD_STEPS.map((entry) => entry.id);
   const next = (from) => setView(order[Math.min(order.length - 1, order.indexOf(from) + 1)]);
+  const previous = (from) => {
+    const index = order.indexOf(from);
+    if (index <= 1) onClassReset();
+    else setView(order[index - 1]);
+  };
+  const [treeShown, setTreeShown] = useState(true);
+  const treeResolved = useMemo(() => (treeIds.length > 0 && TREE_INDEX[playerClass] ? resolveTree(TREE_INDEX[playerClass], treeIds) : null), [playerClass, treeIds]);
   const set = (patch) => onForm((current) => ({ ...current, ...patch }));
   const step = ehpStep(ehpMax);
   const minEhp = form.minEhp === null || form.minEhp === undefined ? defaultMinEhp(ehpMax) : Math.min(form.minEhp, ehpMax);
@@ -8413,12 +8420,12 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
   const heading = {
     rank: ["Your rank", "Higher ranks lend ability points earlier (VIP+ 2 AP, HERO and above 4 AP)."],
     level: ["Your level", "Items above it are left out; skill points and ability points come from it."],
-    tree: ["Ability tree", `Pick an archetype - it loads a suggested tree for ${apCap} AP. You can edit it in the Ability tree tab.`],
+    tree: ["Ability tree", `Pick an archetype - its suggested tree for ${apCap} AP is shown below, where you can compare archetypes and click abilities to change it. "Use this tree" or Next goes on.`],
     goal: ["What to maximise", "One spell (one cast, crits included), the main attack (damage per second) - or click several to maximise their sum. Numbers: with the best weapon for your level alone."],
     ehp: ["How tanky", `Minimum effective HP, as a share of the most your level can reach (${formatNumber(ehpMax)}). Builds below it are thrown away.`],
     mana: ["Mana: spell cycle", "The spells you cast in a loop must pay for themselves (Mana Regen, Mana Steal, ability mana). Pick a preset or type your own."],
     extras: ["Extras", "Optional filters - click to toggle."],
-    generate: ["Ready", "The search takes about 5-13 s. You can change anything later in the panel on the left."],
+    generate: ["Ready", "The search runs until a pass finds nothing better: usually 5-30 s, up to ~1.5 min at level 100+ with a high EHP threshold and a mana cycle. You can change anything later in the panel on the left."],
   }[active] || ["", ""];
 
   return (
@@ -8519,8 +8526,10 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
               key={arch}
               selected={preset === arch && treeIds.length > 0}
               onClick={() => {
+                // zostajemy na kroku drzewka: pod kafelkami widać wczytane drzewko, dalej przyciskiem Next
+                setView("tree");
                 onPreset(arch);
-                next("tree");
+                setTreeShown(true);
               }}
               title={ARCHETYPES[arch] ? ARCHETYPES[arch].focus : undefined}
             >
@@ -8542,10 +8551,31 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
             <span className="text-xs text-zinc-400">Custom - pick abilities yourself</span>
             <span className="text-xs text-zinc-500">{treeIds.length > 0 && !preset ? `${treeIds.length} abilities chosen` : "Opens the Ability tree tab; your tree is used as soon as you come back"}</span>
           </WizardTile>
-          {treeIds.length > 0 && !preset && (
-            <button type="button" className="mc-btn mc-btn-primary self-center sm:col-span-2 xl:col-span-4" onClick={() => next("tree")}>
-              Continue with my tree ›
-            </button>
+          {treeIds.length > 0 && (
+            <div className="flex flex-col gap-2 sm:col-span-2 xl:col-span-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-sm text-zinc-300">
+                  <b className="mc-gold">{preset ? `${preset} tree` : "Your own tree"}</b> · {treeIds.length} abilities
+                  {treeResolved ? ` · ${treeResolved.points} / ${apCap} AP` : ""}
+                </span>
+                <div className="flex flex-wrap gap-2">
+                  {renderTree && (
+                    <button type="button" className="mc-btn mc-btn-sm" onClick={() => setTreeShown(!treeShown)} aria-expanded={treeShown}>
+                      {treeShown ? "▾ Hide the tree" : "▸ Show the tree"}
+                    </button>
+                  )}
+                  <button type="button" className="mc-btn mc-btn-primary mc-btn-sm" onClick={() => next("tree")}>
+                    Use this tree ›
+                  </button>
+                </div>
+              </div>
+              {renderTree && treeShown && (
+                <div className="wbr-fade">
+                  {renderTree()}
+                  <p className="mt-1 text-xs text-zinc-500">Click abilities to change the tree - it becomes your own tree. Pick another archetype above to compare.</p>
+                </div>
+              )}
+            </div>
           )}
         </div>
       )}
@@ -8587,9 +8617,6 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
                 "Click more spells to maximise several at once (their sum)."
               )}
             </span>
-            <button type="button" className="mc-btn mc-btn-primary" onClick={() => next("goal")}>
-              Next ›
-            </button>
           </div>
         </div>
       )}
@@ -8754,9 +8781,6 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
               ))}
             </div>
           </div>
-          <button type="button" className="mc-btn self-end" onClick={() => next("extras")}>
-            Next ›
-          </button>
         </div>
       )}
 
@@ -8776,14 +8800,26 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
         </div>
       )}
 
-      {active !== "rank" && active !== "generate" && firstOpen === null && (
-        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-700 pt-3">
-          <span className="text-xs text-zinc-500">Everything after the tree has a sensible default - you can generate right away.</span>
-          <button type="button" className="mc-btn mc-btn-primary" onClick={onGenerate} disabled={running}>
-            {running ? "Searching…" : "Generate now"}
+      <div className="flex flex-col gap-2 border-t border-zinc-700 pt-3">
+        {active !== "rank" && active !== "generate" && firstOpen === null && (
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="min-w-0 flex-1 text-xs text-zinc-500">Everything after the tree has a sensible default - you can generate right away.</span>
+            <button type="button" className="mc-btn" onClick={onGenerate} disabled={running}>
+              {running ? "Searching…" : "Generate now"}
+            </button>
+          </div>
+        )}
+        <div className="flex items-center justify-between gap-2">
+          <button type="button" className="mc-btn" onClick={() => previous(active)} title={active === "rank" ? "Back to the class choice" : `Back to: ${(WIZARD_STEPS[order.indexOf(active) - 1] || {}).label || ""}`}>
+            ‹ Previous
           </button>
+          {active !== "generate" && (
+            <button type="button" className="mc-btn mc-btn-primary" onClick={() => next(active)} disabled={!reachable(order.indexOf(active) + 1)}>
+              Next ›
+            </button>
+          )}
         </div>
-      )}
+      </div>
     </section>
   );
 }
@@ -13699,6 +13735,21 @@ export default function BuildRecommender() {
                 preset={damageForm.preset}
                 onPreset={applyTreePreset}
                 onEditTree={() => setTab("tree")}
+                renderTree={() => (
+                  <AbilityTree
+                    playerClass={playerClass}
+                    level={effectiveLevel}
+                    rank={rank}
+                    selected={treeIds}
+                    fullPoints={storedTreePoints}
+                    onChange={(ids) => {
+                      setTreeSelections((current) => ({ ...current, [playerClass]: ids }));
+                      setDamageForm((current) => (current.preset ? { ...current, preset: "" } : current));
+                    }}
+                    buildArchetype={archetype}
+                    onUseArchetype={(arch) => setArchetype(arch)}
+                  />
+                )}
                 goals={damageGoals}
                 goal={damageGoal}
                 form={damageForm}

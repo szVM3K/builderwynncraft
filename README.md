@@ -157,14 +157,17 @@ The generator asks *what is the strongest build that still survives and still pa
      rarities, and the emerald budget when prices are available.
 
 **Setup guide**: after picking a class the main panel walks through the rest the same way - big clickable tiles for
-the rank, the level, the ability tree (an archetype, or **Your own tree**: it opens the Ability tree tab, where a
-"Back to the setup guide" button returns with the tree you clicked together), what to maximise (one or several spells) (every spell of the tree and the main attack,
+the rank, the level, the ability tree (an archetype - the guide stays on this step and shows the loaded tree below
+the tiles, so you can compare archetypes and click abilities to adjust it, then **Use this tree ›**; or **Your own
+tree**: it opens the Ability tree tab, where a "Back to the setup guide" button returns with the tree you clicked
+together), what to maximise (one or several spells) (every spell of the tree and the main attack,
 with its damage using the best weapon for your level), how tanky (Glass cannon 0% … Wall 70% of the reachable EHP,
 with the numbers), the mana cycle (clicks per second 2-8 and Mana Steal / ability mana on or off; presets: no filter,
 the archetype's suggested cycles, a "spam" loop for every damage spell of the tree and - folded - the cycles of the
 class's other archetypes; or **Your own cycle**: type the spell numbers or click the spells to add them, with the
 steps and the Mana Regen / Mana Steal it needs shown live) and extras (life sustain, event items, tradeable only, negative defences, weapon attack speed), then a
-summary with Generate. A row of steps on top shows what is chosen and jumps back to any step; the left panel shows
+summary with Generate. **‹ Previous** and **Next ›** at the bottom of every step move one step back or on
+(Previous on the rank step returns to the class choice). A row of steps on top shows what is chosen and jumps back to any step; the left panel shows
 the same settings. On a phone the guide comes before the form.
 
 **List of builds** (under the Effective HP slider, after a build is generated): one build for every step of the
