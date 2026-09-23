@@ -31,24 +31,27 @@ export function treeSpells(playerClass, level, treeSettings) {
   return preview.stats.spells.filter((spell) => spell.id >= 1 && spell.id <= 4 && spell.cost !== null && spell.cost !== undefined);
 }
 
-// The archetype's suggested cycles (Build info / class panel), reduced to spells the tree has.
+// The archetype's suggested cycles (Build info / class panel), reduced to spells the tree has. M (main attack) is
+// kept as id 0, like the UI: Mana Steal only comes from those hits.
 export function archetypeCycles(playerClass, archetype, level, treeSettings) {
   const combo = E.ARCHETYPE_COMBOS[archetype];
   if (!combo) return [];
   const known = new Set(treeSpells(playerClass, level, treeSettings).map((spell) => spell.id));
   return combo.combos
-    .map((entry) => ({ name: entry.name, ids: [...entry.cycle].filter((char) => "1234".includes(char)).map(Number) }))
-    .filter((entry) => entry.ids.length > 0 && entry.ids.every((id) => known.has(id)));
+    .map((entry) => ({ name: entry.name, ids: E.parseCycle(entry.cycle) }))
+    .filter((entry) => entry.ids.some((id) => id !== 0) && entry.ids.every((id) => id === 0 || known.has(id)));
 }
 
 /**
  * Build a scenario.
  * @param {object} s
  *   playerClass, archetype, level          required
- *   goal       "first" (strongest spell, the UI default) | "main" | "random" | "multi" (two goals, their sum) | spell id
+ *   goal       "first" (strongest spell, the UI default) | "main" | "random" | "multi" (two goals, their sum) | "cycle"
+ *              (whole cycle DPS, needs a cycle) | spell id
  *   ehpPct     minimum EHP as % of the reachable maximum (the UI slider; 0 = off)
- *   cycle      "none" | "first" | "random" | array of spell ids
- *   cps, steal, gain, requireSustain, excludeEvents, tradeableOnly, options  as in the UI
+ *   cycle      "none" | "first" | "random" | array of spell ids (0 = main attack, "M")
+ *   cps, steal, gain, poison, drain, requireSustain, excludeEvents, tradeableOnly, options  as in the UI
+ *   rolls      100 (default, max rolls like Wynnbuilder) | 50 ("Realistic rolls")
  *   random     rng() for the "random" choices
  */
 export function makeScenario(s) {
@@ -72,7 +75,8 @@ export function makeScenario(s) {
   if (Array.isArray(s.cycle)) cycleIds = s.cycle;
   else if (s.cycle === "first" && cycles.length) cycleIds = cycles[0].ids;
   else if (s.cycle === "random" && cycles.length) cycleIds = r.pick(cycles).ids;
-  const cycle = { ids: cycleIds, cps: s.cps ?? 3, steal: s.steal ?? true, gain: s.gain ?? true };
+  const cycle = { ids: cycleIds, cps: s.cps ?? 3, steal: s.steal ?? true, gain: s.gain ?? true, poison: Boolean(s.poison), drain: s.drain ?? 0 };
+  if (s.goal === "cycle" && cycleIds.some((id) => id !== 0)) goal = E.DAMAGE_GOAL_CYCLE;
   const params = {
     playerClass,
     level,
@@ -82,13 +86,15 @@ export function makeScenario(s) {
     cycle,
     minEhp,
     requireSustain: Boolean(s.requireSustain),
+    minSustain: s.lr ?? 0,
     excludeEvents: s.excludeEvents ?? true,
     tradeableOnly: Boolean(s.tradeableOnly),
     options: E.normalizeOptions(s.options || {}),
     powders: "auto",
+    rollPercent: s.rolls ?? 100,
   };
   const goalName = (Array.isArray(goal) ? goal : [goal]).map((id) => (goals.find((entry) => entry.id === id) || { name: String(id) }).name).join(" + ");
-  const label = `${playerClass}/${archetype} L${level} ${goalName} EHP≥${ehpPct}%${cycleIds.length ? ` cycle ${cycleIds.join("")}@${cycle.cps}` : ""}${params.requireSustain ? " sustain" : ""}${params.tradeableOnly ? " tradeable" : ""}${params.excludeEvents ? "" : " +events"}${describeOptions(params.options)}`;
+  const label = `${playerClass}/${archetype} L${level} ${goalName} EHP≥${ehpPct}%${cycleIds.length ? ` cycle ${E.cycleText(cycleIds)}@${cycle.cps}${cycle.drain ? ` drain ${cycle.drain}` : ""}` : ""}${cycle.poison ? " +poison" : ""}${params.rollPercent !== 100 ? ` rolls ${params.rollPercent}%` : ""}${params.requireSustain ? " sustain" : ""}${params.minSustain ? ` life≥${params.minSustain}` : ""}${params.tradeableOnly ? " tradeable" : ""}${params.excludeEvents ? "" : " +events"}${describeOptions(params.options)}`;
   return { label, params, meta: { ehpMax, ehpPct, goals, cycles, treeIds: tree.ids } };
 }
 

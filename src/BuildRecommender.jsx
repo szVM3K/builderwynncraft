@@ -330,7 +330,8 @@ const DEFAULT_OPTIONS = {
   elements: [],
   attackSpeeds: [],
   boosts: [],
-  preferGuideItems: true,
+  // premia za przedmioty z poradnika domyślnie wyłączona (feedback: "trained on the build guide"); włącza się w opcjach
+  preferGuideItems: false,
   defences: [],
   avoidNegativeDefences: false,
   focus: {}, // { melee?, spell?, ehp? } 0-100; brak klucza = domyślna pozycja archetypu
@@ -512,7 +513,7 @@ function normalizeOptions(options = DEFAULT_OPTIONS) {
     elements: DAMAGE_FOCUS_OPTIONS.filter((element) => (options.elements || []).includes(element)),
     attackSpeeds: ATTACK_SPEEDS.filter((speed) => (options.attackSpeeds || []).includes(speed)),
     boosts: STAT_BOOSTS.map((boost) => boost.id).filter((id) => (options.boosts || []).includes(id)),
-    preferGuideItems: options.preferGuideItems !== false,
+    preferGuideItems: options.preferGuideItems === true,
     defences: ELEMENTS.filter((element) => (options.defences || []).includes(element)),
     avoidNegativeDefences: options.avoidNegativeDefences === true,
     levelWindow: LEVEL_WINDOWS.some((entry) => entry.id === options.levelWindow) ? options.levelWindow : "prefer10",
@@ -790,9 +791,11 @@ function itemCategory(type) {
 // dodatnia ID rolluje 30-130% wartości bazowej, ujemna 130-70%; koszty czarów są odwrócone (ujemny koszt = dobra ID,
 // więc rolluje jak dodatnia). Zaokrąglenie do całości, a 0 zamienia się w ±1. Nie rollują: Skill Pointy, bazowe HP
 // i obrony, ID oznaczone w danych jako statyczne (np. tier szybkości ataku) i całe przedmioty z fixID.
-// Aplikacja liczy i pokazuje wszystko przy rollu 50% (dodatnie ID = 80% bazy, ujemne = baza); gracz może zmienić
-// roll każdej ID albo całego przedmiotu (0-100%), tak jak widać [xx%] w grze.
-const DEFAULT_ROLL = 50;
+// Aplikacja liczy i pokazuje wszystko przy rollu 100% (maksymalne ID), tak jak Wynnbuilder, do którego eksportujemy
+// buildy (feedback z Discorda: przy 50% wygrywały przedmioty ze stałymi ID, np. nagrody z questów). "Realistic rolls"
+// w formularzu liczy generator przy 50% (dodatnie ID = 80% bazy, ujemne = baza); gracz może też zmienić roll każdej ID
+// albo całego przedmiotu (0-100%), tak jak widać [xx%] w grze.
+const DEFAULT_ROLL = 100;
 const REVERSED_IDS = new Set(SPELL_COST_KEYS);
 const NON_ROLLING_IDS = new Set(["str", "dex", "int", "def", "agi"]);
 const BASE_STAT_KEYS = new Set(["eDef", "tDef", "wDef", "fDef", "aDef"]);
@@ -826,7 +829,7 @@ function rolledValue(item, key, percent) {
   return Math.round(worst + ((best - worst) * percent) / 100);
 }
 
-// Przedmiot z identyfikacjami przy podanych rollach ({ all?: %, [id]: % }); brak = 50%.
+// Przedmiot z identyfikacjami przy podanych rollach ({ all?: %, [id]: % }); brak = DEFAULT_ROLL (100%).
 function withRolls(item, rolls = null) {
   const ids = {};
   Object.keys(item.baseIds).forEach((key) => {
@@ -1847,6 +1850,13 @@ function generateOptimizedBuild(level, playerClass, archetype, allItems = ITEM_D
 // (o ile rośnie trafienie celu, gdy dodać +100 raw / +10% / +5 do statystyki), osobno dla każdej broni.
 
 const DAMAGE_GOAL_MAIN = "main"; // cel: main attack (DPS) zamiast czaru
+// Cel "Whole cycle": obrażenia całego cyklu na sekundę - każdy czar cyklu raz na rzut plus każde trafienie main attackiem
+// (M), podzielone przez czas cyklu (czar = 3 kliknięcia, M = jedno uderzenie przy szybkości broni). Kompromis
+// zaproponowany przez graczy: maksymalizować całkowite obrażenia czarów w cyklu przy akceptowalnym drenie many.
+const DAMAGE_GOAL_CYCLE = "cycle";
+function isCycleGoal(goal) {
+  return goal === DAMAGE_GOAL_CYCLE;
+}
 const PROBE_STEPS = {
   sdRaw: 100, sdPct: 10, mdRaw: 100, mdPct: 10, damRaw: 100, damPct: 10, critDamPct: 10, atkTier: 1,
   eDamPct: 10, tDamPct: 10, wDamPct: 10, fDamPct: 10, aDamPct: 10, rDamPct: 10, nDamPct: 10,
@@ -1903,6 +1913,53 @@ function goalStats(ctx, items, weapon, skillTotals) {
 }
 
 // Obrażenia celu, EHP i bilans many dla jednego zestawu przedmiotów.
+// Cykl z formularza: cyfry 1-4 = czary, M = main attack (w liście id 0, jak main attack w drzewku); resztę pomijamy.
+function parseCycle(text) {
+  return [...String(text || "").toUpperCase()].filter((char) => "1234M".includes(char)).map((char) => (char === "M" ? 0 : Number(char)));
+}
+function cycleText(ids) {
+  return (ids || []).map((id) => (id === 0 ? "M" : String(id))).join("");
+}
+// Czas cyklu i kradzież many / życia z trafień. W 2.x Mana Steal i Life Steal działają przy trafieniu main attackiem,
+// a ilość na trafienie to (wartość ÷ 3) ÷ trafienia na sekundę broni (jak "Mana per hit" w Wynnbuilderze) - przy
+// ciągłym biciu daje to wartość ÷ 3 na sekundę. Czar to 3 kliknięcia; main attack to 1 kliknięcie, ale nie szybciej
+// niż pozwala szybkość ataku. Cykl bez M nie kradnie nic (feedback: "zakłada, że między czarami bijesz melee").
+// Ustawienia cyklu w jednym miejscu: czary + M, kliknięcia/s, kradzież many, mana z umiejętności, poison w celu,
+// dopuszczalny dren many (mana/s).
+function normalizeCycle(cycle) {
+  return {
+    ids: (cycle && cycle.ids) || [],
+    cps: (cycle && cycle.cps) || SPELL_CLICKS_PER_SECOND,
+    steal: cycle ? cycle.steal !== false : true,
+    gain: cycle ? cycle.gain !== false : true,
+    poison: Boolean(cycle && cycle.poison),
+    drain: Math.max(0, Number(cycle && cycle.drain) || 0),
+  };
+}
+// Mana wystarcza, gdy bilans nie spada poniżej dopuszczalnego drenu.
+function manaOk(metrics, cycle) {
+  return !cycle || !cycle.ids || cycle.ids.length === 0 || (metrics.cycleOk && metrics.manaNet >= -((cycle && cycle.drain) || 0) - 1e-9);
+}
+// Filtr życia builda: "> 0" (Life sustain) i/lub minimalne odnawianie życia (suwak Life recovery, HP/s).
+function sustainPasses(metrics) {
+  if (!metrics) return true;
+  if (metrics.requireSustain && !(metrics.sustain > 0)) return false;
+  return !(metrics.minSustain > 0) || metrics.sustain >= metrics.minSustain - 1e-9;
+}
+function cycleTiming(ids, cps, hps) {
+  const clicks = Math.max(0.1, cps || SPELL_CLICKS_PER_SECOND);
+  const casts = ids.filter((id) => id !== 0).length;
+  const melee = ids.length - casts;
+  const perHit = Math.max(1 / clicks, 1 / Math.max(0.1, hps || HITS_PER_SECOND.NORMAL));
+  const seconds = (3 * casts) / clicks + melee * perHit;
+  return { casts, melee, seconds, hitsPerSecond: seconds > 0 ? melee / seconds : 0 };
+}
+// Na sekundę z kradzieży (steal = Mana Steal albo Life Steal "na 3 s"): trafienia/s w cyklu × (steal ÷ 3 ÷ hps).
+function stealPerSecond(steal, timing, hps) {
+  if (!steal || !timing || timing.hitsPerSecond <= 0) return 0;
+  return (timing.hitsPerSecond * (steal / 3)) / Math.max(0.1, hps || HITS_PER_SECOND.NORMAL);
+}
+
 function evaluateGoal(ctx, items, weapon, skillTotals, goal, cycle, altGoals = null) {
   const { stats, scaled, spellKey } = goalStats(ctx, items, weapon, skillTotals);
   const hp = Math.max(5, statValue(stats, "hp") + statValue(stats, "hpBonus"));
@@ -1916,29 +1973,54 @@ function evaluateGoal(ctx, items, weapon, skillTotals, goal, cycle, altGoals = n
   const hprPct = statValue(stats, "hprPct") / 100;
   const hpr = hprRaw < 0 ? Math.min(0, hprRaw - hprRaw * hprPct) : hprRaw + hprRaw * hprPct;
   const lifeSteal = statValue(stats, "ls");
-  const result = { damage: 0, ehp, hp, hpr, lifeSteal, sustain: hpr / 4 + lifeSteal / 3, manaIncome: 0, manaUsed: 0, manaGain: 0, manaNet: 0, cycleOk: true, goalName: "", stats };
+  const cycleIds = cycle && cycle.ids && cycle.ids.length > 0 ? cycle.ids : [];
+  const hps = weapon ? HITS_PER_SECOND[attackSpeedAfterTier(weapon, statValue(stats, "atkTier"))] : HITS_PER_SECOND.NORMAL;
+  const timing = cycleIds.length > 0 ? cycleTiming(cycleIds, cycle.cps, hps) : null;
+  // Life Steal: z cyklem tylko z jego trafień main attackiem; bez cyklu zakładamy ciągłe bicie (jak dawniej)
+  const lifeStealPerSecond = timing ? stealPerSecond(lifeSteal, timing, hps) : lifeSteal / 3;
+  const sustain = hpr / 4 + lifeStealPerSecond;
+  const result = { damage: 0, ehp, hp, hpr, lifeSteal, sustain, healthGain: (sustain * ehp) / hp, manaIncome: 0, manaUsed: 0, manaGain: 0, manaSteal: 0, manaNet: 0, cycleOk: true, goalName: "", stats };
   if (!weapon) return result;
   let spells = ctx.spellCache ? ctx.spellCache.get(spellKey) : null;
   if (!spells) {
     spells = collectTreeSpells(scaled.edited, scaled.translate);
     if (ctx.spellCache && ctx.spellCache.size < 4096) ctx.spellCache.set(spellKey, spells);
   }
-  // Poison dochodzi do celu obrażeń (nie leczenia): main attack to DPS, więc + poison na sekundę; czar to obrażenia
-  // jednego rzutu, więc + poison na sekundę rozłożony na rzuty (kliknięcia/s ÷ 3, jak "spam" w Spell DPS).
+  // Poison dochodzi do celu obrażeń tylko na życzenie ("Count poison in the goal"): main attack to DPS, więc + poison
+  // na sekundę; czar to obrażenia jednego rzutu, więc + poison na sekundę rozłożony na rzuty (kliknięcia/s ÷ 3).
+  // Domyślnie wyłączone - nie wiadomo, czy poison się kumuluje i jak działa na bossach, a model zbierał przez to
+  // przedmioty z samym poisonem (Tarred Gem, Nightlock...). Wiersz "Poison DPS" w panelu zostaje zawsze.
   result.poisonDps = poisonDpsOf(statValue(stats, "poison"));
+  const poisonCounts = Boolean(cycle && cycle.poison);
+  const spellCache = new Map();
+  const perCast = (id) => {
+    if (spellCache.has(id)) return spellCache.get(id);
+    const spell = spells.get(id);
+    const evaluated = spell ? evaluateSpell(spell, stats, weapon, hp) : null;
+    const value = evaluated && evaluated.main && evaluated.main.type === "damage" ? evaluated.main.amount : 0;
+    spellCache.set(id, value);
+    return value;
+  };
   const goalDamage = (goalId) => {
+    if (goalId === DAMAGE_GOAL_CYCLE) {
+      if (!timing || timing.seconds <= 0) return { damage: 0, name: "Whole cycle", hit: 0 };
+      // jeden przebieg cyklu: czar = obrażenia jednego rzutu, M = jedno trafienie main attackiem
+      const total = cycleIds.reduce((sum, id) => sum + perCast(id), 0);
+      const perSecond = total / timing.seconds;
+      return { damage: perSecond + (poisonCounts && total > 0 ? result.poisonDps : 0), name: `Cycle ${cycleText(cycleIds)}`, hit: total };
+    }
     if (goalId === DAMAGE_GOAL_MAIN) {
       const melee = spells.has(0) ? evaluateSpell(spells.get(0), stats, weapon, hp) : null;
       const hit = melee && melee.main && melee.main.type === "damage" ? melee.main.amount : 0;
       const damage = hit * HITS_PER_SECOND[attackSpeedAfterTier(weapon, statValue(stats, "atkTier"))];
-      return { damage: hit > 0 ? damage + result.poisonDps : damage, name: melee ? melee.name : "Main attack", hit };
+      return { damage: hit > 0 && poisonCounts ? damage + result.poisonDps : damage, name: melee ? melee.name : "Main attack", hit };
     }
     const spell = spells.get(goalId);
     if (!spell) return { damage: 0, name: "", hit: 0 };
     const evaluated = evaluateSpell(spell, stats, weapon, hp);
     let damage = evaluated.main && evaluated.main.type === "damage" ? evaluated.main.amount : evaluated.main && evaluated.main.type === "heal" ? evaluated.main.amount : 0;
     const hit = damage;
-    if (evaluated.main && evaluated.main.type === "damage" && damage > 0) damage += result.poisonDps / (Math.max(0.1, (cycle && cycle.cps) || SPELL_CLICKS_PER_SECOND) / 3);
+    if (poisonCounts && evaluated.main && evaluated.main.type === "damage" && damage > 0) damage += result.poisonDps / (Math.max(0.1, (cycle && cycle.cps) || SPELL_CLICKS_PER_SECOND) / 3);
     return { damage, name: evaluated.name, hit };
   };
   // kilka celów naraz (np. Uproot + Blood Sorrow): suma obrażeń jednego rzutu każdego z nich
@@ -1951,13 +2033,15 @@ function evaluateGoal(ctx, items, weapon, skillTotals, goal, cycle, altGoals = n
   // obrażenia pozostałych celów tego samego zestawu (generator trzyma w wiązce linie dobre pod inne czary)
   if (altGoals && altGoals.length > 0) result.alt = altGoals.map((id) => goalDamage(id).damage);
   // Mana: ten sam rachunek co Spell cycle calculator (koszt cyklu na sekundę vs regen + steal + mana z umiejętności).
-  const ids = cycle && cycle.ids && cycle.ids.length > 0 ? cycle.ids : [];
-  result.manaIncome = (statValue(stats, "mr") + BASE_MANA_REGEN) / 5 + (cycle && cycle.steal ? statValue(stats, "ms") / 3 : 0);
+  const ids = cycleIds;
+  result.manaSteal = timing && cycle.steal ? stealPerSecond(statValue(stats, "ms"), timing, hps) : 0;
+  result.manaIncome = (statValue(stats, "mr") + BASE_MANA_REGEN) / 5 + result.manaSteal;
   if (ids.length > 0) {
-    const seconds = (3 * ids.length) / Math.max(0.1, cycle.cps || SPELL_CLICKS_PER_SECOND);
+    const seconds = Math.max(0.01, timing.seconds);
     let used = 0;
     let gained = 0;
     ids.forEach((id) => {
+      if (id === 0) return;
       const spell = spells.get(id);
       const cost = spell ? spellCost(stats, spell) : null;
       if (cost === null) {
@@ -1971,6 +2055,8 @@ function evaluateGoal(ctx, items, weapon, skillTotals, goal, cycle, altGoals = n
     result.manaGain = gained / seconds;
   }
   result.manaNet = result.manaIncome + result.manaGain - result.manaUsed;
+  // dopuszczalny dren many (mana/s, suwak "Allowed mana drain"): zestaw przechodzi, gdy manaNet >= -drain
+  result.manaDrain = Math.max(0, (cycle && cycle.drain) || 0);
   return result;
 }
 
@@ -2014,7 +2100,7 @@ function proxyScore(item, weights) {
   return value;
 }
 
-const DAMAGE_BEAM = { altGoals: 2, altWeapons: 2, weaponsTried: 14, weapons: 5, perSlot: 18, cheapPerSlot: 10, extraPerSlot: 6, beam: 22, exactPerState: 6, polishPool: 24, pureDamage: 6, pureEhp: 5, pureMana: 3, finalists: 6, ladder: [1.2], pairPool: 8, weaponSwap: 16, quick: 24 };
+const DAMAGE_BEAM = { altGoals: 2, altWeapons: 2, weaponsTried: 14, weapons: 5, potentialPool: 80, potentialWeapons: 2, screenWeapons: 8, screenWidth: 3, screenExact: 3, screenKeep: 2, screenFull: 2, screenStarts: 2, perSlot: 18, cheapPerSlot: 10, extraPerSlot: 6, beam: 22, exactPerState: 6, polishPool: 24, pureDamage: 6, pureEhp: 5, pureMana: 3, finalists: 6, ladder: [1.2], pairPool: 8, weaponSwap: 16, quick: 24 };
 
 // Najlepsze `count` elementów według `score` (każdy element oceniany raz, nie przy każdym porównaniu sortowania).
 function topBy(list, score, count) {
@@ -2084,7 +2170,9 @@ function yieldToBrowser() {
   });
 }
 
-async function generateDamageBuild({ playerClass, level, archetype = null, treeSettings, goal, cycle, minEhp = 0, requireSustain = false, options = DEFAULT_OPTIONS, items = ITEM_DB, powders = "auto", objective = "damage", onProgress = null, seeds = [], excludeEvents = true, tradeableOnly = false, effort = "full", spendFreeSkillPoints = true, task = null, parallel = null, caches = null }) {
+async function generateDamageBuild({ playerClass, level, archetype = null, treeSettings, goal, cycle, minEhp = 0, requireSustain = false, minSustain = 0, options = DEFAULT_OPTIONS, items = ITEM_DB, powders = "auto", objective = "damage", onProgress = null, seeds = [], excludeEvents = true, tradeableOnly = false, effort = "full", spendFreeSkillPoints = true, task = null, parallel = null, caches = null, rollPercent = 100 }) {
+  // "Realistic rolls": wszystkie losowane ID przy podanym rollu (np. 50%) zamiast maksymalnych
+  if (rollPercent < 100) items = rolledItems(items, rollPercent);
   // effort "quick" (lista buildów dla każdego progu EHP): bez wiązki z zapasem EHP i wiązek pod inne czary,
   // mniej kandydatów do dopieszczania - ok. 2-3 razy szybciej, wynik zwykle o kilka procent słabszy.
   const quickEffort = effort === "quick";
@@ -2131,6 +2219,7 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
   // OD POZIOMU 100: buildy z poradnika (The Ultimate Build Guide, linki Wynnbuildera) to w praktyce best in slot,
   // więc ich przedmioty zawsze wchodzą do puli kandydatów, a całe zestawy są sprawdzane jako gotowe rozwiązania.
   const GUIDE_LEVEL = 100;
+  const itemByName = items === ITEM_DB ? ITEM_BY_NAME : new Map(items.map((item) => [item.name, item]));
   const guideItemsBySlot = {};
   const guideSets = [];
   if (level >= GUIDE_LEVEL) {
@@ -2154,7 +2243,7 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
         let complete = true;
         SLOTS.forEach((slot) => {
           const name = entry.items[slot.id];
-          const item = name ? ITEM_BY_NAME.get(name) : null;
+          const item = name ? itemByName.get(name) : null;
           if (!item || !allowed(item, slot.id) || (slot.id === "weapon" && item.type !== classConfig.weapon)) {
             complete = false;
             return;
@@ -2169,7 +2258,7 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
   const guideNames = new Set(Object.values(guideItemsBySlot).flatMap((set) => [...set].map((item) => item.name)));
 
   const powderElements = powders === "none" ? [null] : ELEMENTS.includes(powders) || isPowderMix(powders) ? [powders] : [null, ...ELEMENTS];
-  const cycleCfg = { ids: (cycle && cycle.ids) || [], cps: (cycle && cycle.cps) || SPELL_CLICKS_PER_SECOND, steal: cycle ? cycle.steal !== false : true, gain: cycle ? cycle.gain !== false : true };
+  const cycleCfg = normalizeCycle(cycle);
   const gearSlots = SEARCH_ORDER.filter((id) => id !== "weapon");
   // Pozostałe cele drzewka (inne czary, main attack). Ich liniowe wagi dokładają kandydatów do wiązki i do
   // dopieszczania: zestaw zbudowany "pod Uproot" bywał mocniejszy w Blood Sorrow niż zestaw zbudowany pod sam
@@ -2226,13 +2315,17 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
   // Jak daleko zestawowi do progów (0 = przechodzi): używane przy naprawie, gdy nic nie przechodzi od razu.
   // Próg EHP, na który aktualnie szukamy: zwykle minEhp, na czas przebiegu "z zapasem" wyższy (krok 2b).
   let ehpTarget = minEhp;
-  const sustainOk = (metrics) => !requireSustain || metrics.sustain > 0;
+  // Życie: "> 0" (requireSustain) i/lub minimalne odnawianie życia w HP/s (suwak "Life recovery", minSustain):
+  // Health Regen / 4 s + Life Steal z trafień main attacku w cyklu.
+  const lifeFloor = Math.max(0, Number(minSustain) || 0);
+  const needSustain = requireSustain || lifeFloor > 0;
+  const sustainOk = (metrics) => (!requireSustain || metrics.sustain > 0) && (lifeFloor <= 0 || metrics.sustain >= lifeFloor - 1e-9);
   const shortfall = (metrics) => {
     let miss = metrics.spOver / 10;
     if (ehpTarget > 0 && metrics.ehp < ehpTarget) miss += 1 - metrics.ehp / ehpTarget;
-    if (!sustainOk(metrics)) miss += 0.5 + Math.min(1, -metrics.sustain / 100);
+    if (!sustainOk(metrics)) miss += 0.5 + Math.min(1, Math.max(0, lifeFloor - metrics.sustain) / Math.max(100, lifeFloor));
     if (cycleCfg.ids.length > 0 && metrics.manaUsed > 0) {
-      const share = (metrics.manaIncome + metrics.manaGain) / metrics.manaUsed;
+      const share = (metrics.manaIncome + metrics.manaGain + cycleCfg.drain) / metrics.manaUsed;
       if (share < 1) miss += 1 - share;
       if (!metrics.cycleOk) miss += 1;
     }
@@ -2243,7 +2336,7 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
     metrics.spOver === 0 &&
     (ehpTarget <= 0 || metrics.ehp >= ehpTarget) &&
     sustainOk(metrics) &&
-    (cycleCfg.ids.length === 0 || (metrics.cycleOk && metrics.manaNet >= 0)) &&
+    manaOk(metrics, cycleCfg) &&
     (!budget || metrics.cost <= budget);
   // Wartość w wiązce: obrażenia × kary za niespełnione progi (twarde odcięcie dopiero na końcu, żeby wiązka
   // nie zgubiła zestawów, które dopiero z kolejnym slotem wchodzą w próg).
@@ -2263,7 +2356,7 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
     // ujemne życie da się naprawić jednym przedmiotem pod koniec, więc na początku wiązki kara jest łagodna
     if (!sustainOk(metrics)) factor *= 1 - 0.7 * progress;
     if (cycleCfg.ids.length > 0 && metrics.manaUsed > 0) {
-      const share = (metrics.manaIncome + metrics.manaGain) / metrics.manaUsed;
+      const share = (metrics.manaIncome + metrics.manaGain + cycleCfg.drain) / metrics.manaUsed;
       if (share < progress) factor *= Math.pow(Math.max(0.02, share / progress), power);
     }
     if (budget && metrics.cost > budget) factor *= Math.pow(budget / metrics.cost, 2);
@@ -2271,6 +2364,27 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
   }
 
   // Krok 1: broń. Dokładne obrażenia celu z pustym zestawem; najlepsze dostają jeszcze próbę powderów.
+  // "Potencjał" broni: cel z pustym zestawem, ale z wolnymi skill pointami poziomu wydanymi pod cel (zgrubnie, jak
+  // w dokładnym etapie) i z najlepszym żywiołem powderów. Same obrażenia broni źle przewidują wynik: np. Battle Monk
+  // L100 z cyklem 2431 - Infused Hive Spear jest 44. "gołymi" obrażeniami, 4. potencjałem, a cały zestaw z nią bije
+  // zestaw z Thrundacrack o 7% (znalazł to test macierzy przez zestaw z innego archetypu).
+  const weaponPotentials = new Map();
+  let screenedWeapons = null;
+  const potentialOf = (item) => {
+    const key = `${typeof phase === "number" ? `alt${phase}` : phase}|${item.name}`;
+    if (weaponPotentials.has(key)) return weaponPotentials.get(key);
+    let best = null;
+    powderElements.forEach((element) => {
+      const powdered = element ? powderedWeapon(item, element) : item;
+      const sp = computeSkillPoints([powdered], true);
+      if (sp.total > ctx.available || sp.capOverflow > 0) return;
+      const allocated = allocateFreeSkillPoints(ctx, [powdered], powdered, sp, phaseGoal(), cycleCfg, objectiveOf, typeof phase === "number" ? altGoals : null, true);
+      const score = objectiveOf(allocated.metrics);
+      if (!best || score > best.score) best = { item: powdered, score };
+    });
+    weaponPotentials.set(key, best);
+    return best;
+  };
   const runPhase = async (label = "Searching", from = 0, to = 1) => {
   const weaponScores = bySlot.weapon.map((item) => ({ item, metrics: evaluate([], item) }));
   weaponScores.sort((a, b) => objectiveOf(b.metrics) - objectiveOf(a.metrics));
@@ -2287,6 +2401,15 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
   weapons.sort((a, b) => objectiveOf(b.metrics) - objectiveOf(a.metrics));
   const altPhase = typeof phase === "number";
   const weaponList = weapons.slice(0, altPhase ? DAMAGE_BEAM.altWeapons : DAMAGE_BEAM.weapons).map((entry) => entry.item);
+  // plus najlepsze potencjałem (spośród DAMAGE_BEAM.potentialPool najmocniejszych "gołych"), których jeszcze nie ma
+  weaponScores
+    .slice(0, DAMAGE_BEAM.potentialPool)
+    .map(({ item }) => potentialOf(item))
+    .filter(Boolean)
+    .sort((a, b) => b.score - a.score)
+    .filter((entry) => !weaponList.some((item) => item.name === entry.item.name))
+    .slice(0, altPhase ? 1 : DAMAGE_BEAM.potentialWeapons)
+    .forEach((entry) => weaponList.push(entry.item));
   // bronie z poradnika dochodzą zawsze (z najlepszym dla celu żywiołem powderów)
   [...(altPhase ? [] : guideItemsBySlot.weapon || [])].forEach((item) => {
     let bestWeapon = null;
@@ -2305,19 +2428,27 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
   let byValue = null;
   let byDamage = null;
   let byFeasible = null;
+  let extraByValue = null;
+  let extraByDamage = null;
   // najlepszy zestaw każdej broni (przechodzący progi, a jak takiego nie ma - z karami): linia z bronią, która
   // wypadła z trójki globalnie, po dopieszczeniu często okazuje się najmocniejsza
   const perWeapon = new Map();
   const consider = (candidate) => {
     const own = perWeapon.get(candidate.weapon);
     if (!own || (candidate.ok && !own.ok) || (candidate.ok === own.ok && (candidate.ok ? objectiveOf(candidate.metrics) > objectiveOf(own.metrics) : value(candidate.metrics) > value(own.metrics)))) perWeapon.set(candidate.weapon, candidate);
+    // broń z przesiewu: własne "najlepsze" (globalne zostają dla dotychczasowych broni)
+    if (candidate.extra) {
+      if (!extraByValue || value(candidate.metrics) > value(extraByValue.metrics)) extraByValue = candidate;
+      if (!extraByDamage || objectiveOf(candidate.metrics) * Math.exp(-candidate.metrics.spOver / 6) > objectiveOf(extraByDamage.metrics) * Math.exp(-extraByDamage.metrics.spOver / 6)) extraByDamage = candidate;
+      return;
+    }
     if (!byValue || value(candidate.metrics) > value(byValue.metrics)) byValue = candidate;
     if (!byDamage || objectiveOf(candidate.metrics) * Math.exp(-candidate.metrics.spOver / 6) > objectiveOf(byDamage.metrics) * Math.exp(-byDamage.metrics.spOver / 6)) byDamage = candidate;
     if (candidate.ok && (!byFeasible || objectiveOf(candidate.metrics) > objectiveOf(byFeasible.metrics))) byFeasible = candidate;
   };
 
-  for (const [weaponIndex, weapon] of weaponList.entries()) {
-    await pause(`${label}: ${weapon.name}`, from + ((to - from) * weaponIndex) / weaponList.length);
+  // Wiązka dla jednej broni (z jej powderami): sloty po kolei, szerokość width, dokładnie ocenianych exactPer na stan.
+  const beamFor = (weapon, width = DAMAGE_BEAM.beam, exactPer = DAMAGE_BEAM.exactPerState, reserves = true) => {
     const weaponSp = computeSkillPoints([weapon]);
     const weights = goalStatWeights(ctx, [], weapon, weaponSp.totals, phaseGoal(), cycleCfg);
     // Kandydaci na slot: najlepsi liniowo, najlepsi "obrażenia na punkt umiejętności" oraz - gdy są progi -
@@ -2335,7 +2466,7 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
       take("perSp", DAMAGE_BEAM.cheapPerSlot);
       if (minEhp > 0) take("ehp", DAMAGE_BEAM.extraPerSlot);
       if (cycleCfg.ids.length > 0) take("mana", DAMAGE_BEAM.extraPerSlot);
-      if (requireSustain) take("sustain", DAMAGE_BEAM.extraPerSlot);
+      if (needSustain) take("sustain", DAMAGE_BEAM.extraPerSlot);
       candidates[slotId] = [...pool].map((item) => ({ item, damage: phase === "ehp" ? proxyScore(item, weights.ehp) : proxyScore(item, weights.damage), ehp: proxyScore(item, weights.ehp), mana: proxyScore(item, weights.mana) }));
     });
     let beam = [{ items: [], picks: {}, metrics: evaluate([], weapon) }];
@@ -2357,7 +2488,7 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
           rough.push({ entry, approx, spOver });
         });
         rough.sort((a, b) => b.approx - a.approx);
-        const tried = [...emptyOption(slotId), ...rough.slice(0, DAMAGE_BEAM.exactPerState).map((row) => row.entry)];
+        const tried = [...emptyOption(slotId), ...rough.slice(0, exactPer).map((row) => row.entry)];
         tried.forEach((entry) => {
           const items2 = entry ? [...state.items, entry.item] : state.items;
           const picks = entry ? { ...state.picks, [slotId]: entry.item } : state.picks;
@@ -2373,7 +2504,7 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
         });
       });
       next.sort((a, b) => value(b.metrics) - value(a.metrics));
-      const chosen = new Set(next.slice(0, DAMAGE_BEAM.beam));
+      const chosen = new Set(next.slice(0, width));
       // Osobne miejsca dla skrajności: najmocniejszych obrażeń (bez kary za progi) i najwyższego EHP. Dzięki temu
       // w wiązce zawsze zostaje i linia "szkło", i linia "czołg", a o wyniku decyduje dopiero krok 3.
       const reserve = (key, count) => {
@@ -2385,19 +2516,66 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
           .forEach((state) => chosen.add(state));
       };
       const spFactor = (metrics) => Math.exp(-metrics.spOver / 6);
-      reserve((metrics) => metrics.damage * spFactor(metrics), DAMAGE_BEAM.pureDamage);
-      if (minEhp > 0) reserve((metrics) => metrics.ehp * spFactor(metrics), DAMAGE_BEAM.pureEhp);
-      if (cycleCfg.ids.length > 0) reserve((metrics) => metrics.manaNet, DAMAGE_BEAM.pureMana);
+      if (reserves) {
+        reserve((metrics) => metrics.damage * spFactor(metrics), DAMAGE_BEAM.pureDamage);
+        if (minEhp > 0) reserve((metrics) => metrics.ehp * spFactor(metrics), DAMAGE_BEAM.pureEhp);
+        if (cycleCfg.ids.length > 0) reserve((metrics) => metrics.manaNet, DAMAGE_BEAM.pureMana);
+      }
       next
         .filter((state) => feasible(state.metrics) && !chosen.has(state))
-        .slice(0, Math.ceil(DAMAGE_BEAM.beam / 2))
+        .slice(0, Math.ceil(width / 2))
         .forEach((state) => chosen.add(state));
       beam = [...chosen];
     });
-    beam.forEach((state) => consider({ picks: state.picks, items: state.items, weapon, metrics: state.metrics, ok: feasible(state.metrics) }));
+
+    return beam;
+  };
+  // Przesiew par broń + żywioł powderów: najlepszy żywioł broni "na pusto" bywa zły dla całego zestawu (np. Infused
+  // Hive Spear: ogień jest na pusto najsłabszy, a z przedmiotami pod ogień i Defence daje najlepszy build Battle Monka
+  // L100, +16%). Najlepsze potencjałem bronie z każdym żywiołem przechodzą wąską wiązkę; najlepsze pary dołączają do
+  // pełnej wiązki.
+  if (!altPhase && powderElements.length > 1 && DAMAGE_BEAM.screenWeapons > 0 && screenedWeapons) {
+    screenedWeapons.forEach((entry) => {
+      if (!weaponList.some((item) => item === entry)) weaponList.push(entry);
+    });
+  } else if (!altPhase && powderElements.length > 1 && DAMAGE_BEAM.screenWeapons > 0) {
+    const screened = [];
+    const pool = weaponScores
+      .slice(0, DAMAGE_BEAM.potentialPool)
+      .map(({ item }) => potentialOf(item))
+      .filter((entry) => entry && entry.item.slots > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, quickEffort ? Math.ceil(DAMAGE_BEAM.screenWeapons / 2) : DAMAGE_BEAM.screenWeapons);
+    await pause(`${label}: weapons and powders`, from);
+    for (const { item } of pool) {
+      const base = bySlot.weapon.find((entry) => entry.name === item.name) || item;
+      for (const element of powderElements) {
+        if (!element) continue;
+        const powdered = powderedWeapon(base, element);
+        if (weaponList.some((entry) => entry.name === powdered.name && entry.powders && powdered.powders && entry.powders.element === powdered.powders.element)) continue;
+        const states = beamFor(powdered, DAMAGE_BEAM.screenWidth, DAMAGE_BEAM.screenExact, false);
+        const top = states.reduce((bestState, state) => (!bestState || value(state.metrics) > value(bestState.metrics) ? state : bestState), null);
+        if (top) screened.push({ weapon: powdered, score: value(top.metrics) });
+      }
+    }
+    progress = 1;
+    // przesiew raz na szukanie (przebieg z zapasem EHP bierze te same pary)
+    screenedWeapons = screened
+      .sort((a, b) => b.score - a.score)
+      .slice(0, quickEffort ? 1 : DAMAGE_BEAM.screenKeep)
+      .map((entry) => entry.weapon);
+    screenedWeapons.forEach((entry) => weaponList.push(entry));
+  }
+
+  for (const [weaponIndex, weapon] of weaponList.entries()) {
+    await pause(`${label}: ${weapon.name}`, from + ((to - from) * weaponIndex) / weaponList.length);
+    const beam = beamFor(weapon);
+    // zestawy z broni z przesiewu (extra) dopieszczamy w osobnej puli, żeby nie wypchnęły dotychczasowych kandydatów
+    const extra = Boolean(screenedWeapons && screenedWeapons.includes(weapon));
+    beam.forEach((state) => consider({ picks: state.picks, items: state.items, weapon, metrics: state.metrics, ok: feasible(state.metrics), extra }));
   }
   progress = 1;
-  return [byFeasible, byValue, byDamage, ...perWeapon.values()].filter(Boolean);
+  return [byFeasible, byValue, byDamage, ...perWeapon.values(), extraByValue, extraByDamage].filter(Boolean);
   };
 
   // tryb zadania (wątek pomocniczy) pomija wiązkę: dostaje gotowy start
@@ -2462,10 +2640,13 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
     });
     let seedWeapon = base;
     let seedMetrics = null;
+    // powder: najpierw taki, z którym zestaw przechodzi progi, potem najwięcej obrażeń (sam cel wybierał czasem
+    // żywioł, z którym zestaw z sesji nie przechodził many, i gubił zestaw, który ją przechodził)
     powderElements.forEach((element) => {
       const powdered = element ? powderedWeapon(base, element) : base;
       const metrics = evaluate(Object.values(picks), powdered);
-      if (!seedMetrics || objectiveOf(metrics) > objectiveOf(seedMetrics)) {
+      const better = !seedMetrics || (feasible(metrics) !== feasible(seedMetrics) ? feasible(metrics) : objectiveOf(metrics) > objectiveOf(seedMetrics));
+      if (better) {
         seedMetrics = metrics;
         seedWeapon = powdered;
       }
@@ -2511,7 +2692,7 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
       take("damage", weights.damage, DAMAGE_BEAM.polishPool);
       if (minEhp > 0) take("ehp", weights.ehp, Math.ceil((DAMAGE_BEAM.polishPool * repairing) / 2));
       if (cycleCfg.ids.length > 0) take("mana", weights.mana, Math.ceil((DAMAGE_BEAM.polishPool * repairing) / 2));
-      if (requireSustain) topBy(bySlot[slotId], sustainProxy, Math.ceil(DAMAGE_BEAM.polishPool / 2)).forEach((item) => pool.add(item));
+      if (needSustain) topBy(bySlot[slotId], sustainProxy, Math.ceil(DAMAGE_BEAM.polishPool / 2)).forEach((item) => pool.add(item));
       if (candidate.picks[slotId]) pool.add(candidate.picks[slotId]);
       pools[slotId] = [...pool];
     });
@@ -2588,7 +2769,7 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
       take((item) => proxyScore(item, weights.damage), DAMAGE_BEAM.pairPool);
       if (minEhp > 0) take((item) => proxyScore(item, weights.ehp), Math.ceil(DAMAGE_BEAM.pairPool / 2));
       if (cycleCfg.ids.length > 0) take((item) => proxyScore(item, weights.mana), Math.ceil(DAMAGE_BEAM.pairPool / 2));
-      if (requireSustain) take(sustainProxy, Math.ceil(DAMAGE_BEAM.pairPool / 2));
+      if (needSustain) take(sustainProxy, Math.ceil(DAMAGE_BEAM.pairPool / 2));
       pools[slotId] = [...pool];
     });
     let best = start;
@@ -2626,7 +2807,7 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
     metrics.spOver === 0 &&
     (minEhp <= 0 || metrics.ehp >= minEhp) &&
     sustainOk(metrics) &&
-    (cycleCfg.ids.length === 0 || (metrics.cycleOk && metrics.manaNet >= 0)) &&
+    manaOk(metrics, cycleCfg) &&
     (!budget || metrics.cost <= budget);
   const exactRank = (metrics) => (exactOk(metrics) ? 1e15 + metrics.damage : -shortfall(metrics));
   // bar: obecnie najlepszy wynik; wolne punkty rozdzielamy tylko kandydatom, którzy mają szansę go pobić
@@ -2738,8 +2919,8 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
       sp.total <= ctx.available &&
       sp.capOverflow === 0 &&
       (minEhp <= 0 || metrics.ehp >= minEhp) &&
-      (cycleCfg.ids.length === 0 || (metrics.cycleOk && metrics.manaNet >= 0)) &&
-      (!requireSustain || metrics.sustain > 0)
+      manaOk(metrics, cycleCfg) &&
+      sustainOk(metrics)
     );
   };
   // względny zysk celu z jednego wolnego punktu (pierwsze 5 punktów najlepszej umiejętności zestawu startowego)
@@ -3006,22 +3187,34 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
     seen.add(key);
     return true;
   });
-  // na krótkie dopieszczanie idzie najwyżej DAMAGE_BEAM.quick kandydatur (przechodzące progi pierwsze, potem wartość)
-  const shortlist = [...unique].sort((a, b) => (a.ok !== b.ok ? (a.ok ? -1 : 1) : value(b.metrics) - value(a.metrics))).slice(0, quickEffort ? 12 : DAMAGE_BEAM.quick);
+  // na krótkie dopieszczanie idzie najwyżej DAMAGE_BEAM.quick kandydatur (przechodzące progi pierwsze, potem wartość);
+  // kandydaci z broni z przesiewu (extra) mają własne miejsca na każdym etapie - dodatkowa broń nie wypycha
+  // dotychczasowych kandydatów (inaczej wynik mógł wyjść gorszy niż bez niej)
+  const byOkValue = (a, b) => (a.ok !== b.ok ? (a.ok ? -1 : 1) : value(b.metrics) - value(a.metrics));
+  const shortlist = [
+    ...unique.filter((candidate) => !candidate.extra).sort(byOkValue).slice(0, quickEffort ? 12 : DAMAGE_BEAM.quick),
+    ...unique.filter((candidate) => candidate.extra).sort(byOkValue).slice(0, quickEffort ? 1 : DAMAGE_BEAM.screenKeep * 2),
+  ];
   const quick = [];
+  const extraPolished = new Set();
   for (const [index, candidate] of shortlist.entries()) {
     await pause(passLabel("Polishing candidates"), 0.7 + (0.15 * index) / shortlist.length);
     const quickKey = `q|${keyOf(candidate)}|${candidate.ok}`;
     if (!polishMemo.has(quickKey)) polishMemo.set(quickKey, polish(candidate, shortPools(candidate), 2));
-    quick.push(polishMemo.get(quickKey));
+    const polished = polishMemo.get(quickKey);
+    quick.push(polished);
+    if (candidate.extra) extraPolished.add(polished);
   }
-  const ranked = [...quick].sort((a, b) => (better(a, b) ? -1 : better(b, a) ? 1 : 0));
+  const byBetter = (a, b) => (better(a, b) ? -1 : better(b, a) ? 1 : 0);
+  const ranked = [...quick].sort(byBetter);
   const runnersUp = [...quick];
-  for (const candidate of ranked.slice(0, quickEffort ? 2 : DAMAGE_BEAM.finalists)) {
+  const fullList = [...ranked.filter((candidate) => !extraPolished.has(candidate)).slice(0, quickEffort ? 2 : DAMAGE_BEAM.finalists), ...ranked.filter((candidate) => extraPolished.has(candidate)).slice(0, quickEffort ? 0 : DAMAGE_BEAM.screenFull)];
+  for (const candidate of fullList) {
     await pause(passLabel("Polishing the best candidates"), 0.86);
     const fullKey = `f|${keyOf(candidate)}|${candidate.ok}`;
     if (!polishMemo.has(fullKey)) polishMemo.set(fullKey, polish(candidate, shortPools(candidate), 4));
     const polished = polishMemo.get(fullKey);
+    if (extraPolished.has(candidate)) extraPolished.add(polished);
     runnersUp.push(polished);
     if (better(polished, best)) best = polished;
   }
@@ -3038,15 +3231,14 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
     // Start od zwycięzcy dopieszczania i od trzech kolejnych mocnych kandydatów (inna broń, inny zestaw): lokalne
     // szczyty bywają różne, wygrywa najwyższy po dokładnym rachunku. Zadania 2-4 mogą liczyć się równolegle.
     const tried = new Set([keyOf(best)]);
-    const others = [...runnersUp]
-      .sort((a, b) => (better(a, b) ? -1 : better(b, a) ? 1 : 0))
-      .filter((candidate) => {
-        const key = keyOf(candidate);
-        if (tried.has(key)) return false;
-        tried.add(key);
-        return true;
-      })
-      .slice(0, quickEffort ? 0 : 3);
+    const distinct = [...runnersUp].sort(byBetter).filter((candidate) => {
+      const key = keyOf(candidate);
+      if (tried.has(key)) return false;
+      tried.add(key);
+      return true;
+    });
+    // trzy najlepsze zwykłe starty + najlepszy start z broni z przesiewu (osobne miejsce)
+    const others = quickEffort ? [] : [...distinct.filter((candidate) => !extraPolished.has(candidate)).slice(0, 3), ...distinct.filter((candidate) => extraPolished.has(candidate)).slice(0, DAMAGE_BEAM.screenStarts)];
     const jobs = [{ candidate: best, refine: false }, ...others.map((candidate) => ({ candidate, refine: true }))].map((job) => ({ ...job, memoKey: `${job.refine ? "r" : "c"}|${keyOf(job.candidate)}` }));
     const results = jobs.map((job) => taskMemo.get(job.memoKey) || null);
     const remote = parallel ? jobs.map((job, index) => ({ job, index })).filter(({ index }) => index > 0 && !results[index]) : [];
@@ -3096,10 +3288,15 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
   }
   let best = overall;
   // zestawy z sesji "jak są" (dokładnie, z wolnymi punktami): ponowne kliknięcie nigdy nie da gorszego wyniku
+  // (każdy żywioł powderów broni zestawu - dokładna ocena decyduje, z którym zestaw jest najlepszy)
   if (best)
     seedCandidates.forEach((candidate) => {
-      const metrics = evaluateExact(candidate.items, candidate.weapon);
-      if (exactBetter(metrics, best.metrics)) best = { ...candidate, metrics, ok: exactOk(metrics) };
+      const base = bySlot.weapon.find((item) => item.name === candidate.weapon.name) || candidate.weapon;
+      powderElements.forEach((element) => {
+        const weapon = element ? powderedWeapon(base, element) : base;
+        const metrics = evaluateExact(candidate.items, weapon);
+        if (exactBetter(metrics, best.metrics)) best = { ...candidate, weapon, metrics, ok: exactOk(metrics) };
+      });
     });
   const picks = { ...best.picks, weapon: best.weapon };
   const allItems = Object.values(picks).filter(Boolean);
@@ -3118,8 +3315,8 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
   const passed =
     spValid &&
     (minEhp <= 0 || finalMetrics.ehp >= minEhp) &&
-    (cycleCfg.ids.length === 0 || (finalMetrics.cycleOk && finalMetrics.manaNet >= 0)) &&
-    (!requireSustain || finalMetrics.sustain > 0);
+    manaOk(finalMetrics, cycleCfg) &&
+    sustainOk(finalMetrics);
   const warnings = [];
   if (!spValid) warnings.push(`This set needs ${exactSp.total} skill points, but level ${level} gives ${ctx.available}.`);
   if (minEhp > 0 && finalMetrics.ehp < minEhp)
@@ -3128,10 +3325,12 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
     );
   if (requireSustain && finalMetrics.sustain <= 0)
     warnings.push(`Nothing with these settings keeps life sustain above zero; the closest build loses ${Math.abs(finalMetrics.sustain).toFixed(1)} health per second. Turn off the life sustain filter or lower the other thresholds.`);
+  else if (lifeFloor > 0 && finalMetrics.sustain < lifeFloor)
+    warnings.push(`Nothing with these settings reaches ${formatNumber(lifeFloor)} HP/s life recovery; the closest build has ${finalMetrics.sustain.toFixed(1)} HP/s. Lower the Life recovery slider or the other thresholds.`);
   const pinnedNames = Object.values(normalized.locked || {});
   if (!passed && pinnedNames.length > 0) warnings.push(`Pinned item${pinnedNames.length === 1 ? "" : "s"} (${pinnedNames.join(", ")}) stay in the build even when they keep it from passing the filters; unpin to compare.`);
   if (cycleCfg.ids.length > 0 && !finalMetrics.cycleOk) warnings.push("Some spells in the cycle aren't unlocked in your ability tree, so their mana cost is unknown.");
-  else if (cycleCfg.ids.length > 0 && finalMetrics.manaNet < 0)
+  else if (cycleCfg.ids.length > 0 && !manaOk(finalMetrics, cycleCfg))
     warnings.push(
       `Nothing with these settings sustains that cycle; the closest build is ${Math.abs(finalMetrics.manaNet).toFixed(1)} mana/s short. Lower the clicks per second, drop a spell from the cycle or ask for less effective HP.`
     );
@@ -3167,9 +3366,15 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
       lifeSteal: finalMetrics.lifeSteal,
       sustain: finalMetrics.sustain,
       requireSustain,
+      minSustain: lifeFloor,
       excludeEvents,
       tradeableOnly,
       spendFreeSkillPoints,
+      rollPercent,
+      manaSteal: finalMetrics.manaSteal || 0,
+      manaDrain: finalMetrics.manaDrain || 0,
+      healthGain: finalMetrics.healthGain || 0,
+      poisonDps: finalMetrics.poisonDps || 0,
       minEhp,
       cycle: cycleCfg,
     },
@@ -3188,8 +3393,15 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
   };
 }
 
-// Cała baza Wynnbuildera znormalizowana raz, przy załadowaniu modułu.
+// Cała baza Wynnbuildera znormalizowana raz, przy załadowaniu modułu (ID przy maksymalnym rollu, jak Wynnbuilder).
 const ITEM_DB = WYNNBUILDER_DATA.items.map(normalizeWynnbuilderItem).filter(Boolean);
+// Ta sama baza przy innym rollu (np. "Realistic rolls" = 50%), liczona raz na roll.
+const ROLLED_DB = new Map();
+function rolledItems(items, percent) {
+  if (items !== ITEM_DB) return items.map((item) => withRolls(item, { all: percent }));
+  if (!ROLLED_DB.has(percent)) ROLLED_DB.set(percent, ITEM_DB.map((item) => withRolls(item, { all: percent })));
+  return ROLLED_DB.get(percent);
+}
 const DB_COUNTS = ITEM_DB.reduce(
   (counts, item) => ({ ...counts, [item.category]: (counts[item.category] || 0) + 1 }),
   { armor: 0, accessory: 0, weapon: 0 }
@@ -3287,7 +3499,7 @@ function extrasGain(before, after, env) {
     mana = ((after.manaIncome - before.manaIncome) / 5) * 0.05;
   }
   const sustainScale = Math.max(1, before.hp / 100);
-  const sustainWeight = env.requireSustain && before.sustain <= 0 ? 0.6 : 0.15;
+  const sustainWeight = (env.requireSustain && before.sustain <= 0) || (env.minSustain > 0 && before.sustain < env.minSustain) ? 0.6 : 0.15;
   const sustain = ((after.sustain - before.sustain) / sustainScale) * sustainWeight;
   return damage + ehp + mana + sustain;
 }
@@ -3308,7 +3520,7 @@ function extrasBase(build, env) {
   const items = build.slots.filter((slot) => slot.item).map((slot) => slot.item);
   const weapon = (build.slots.find((slot) => slot.id === "weapon") || {}).item || null;
   const totals = { ...build.skillPoints.totals };
-  const cycle = { ids: (env.cycle && env.cycle.ids) || [], cps: (env.cycle && env.cycle.cps) || SPELL_CLICKS_PER_SECOND, steal: env.cycle ? env.cycle.steal !== false : true, gain: env.cycle ? env.cycle.gain !== false : true };
+  const cycle = normalizeCycle(env.cycle);
   return { items, weapon, totals, cycle };
 }
 
@@ -5107,7 +5319,7 @@ function ItemCardInner({ slot, build, actions, powder = null, open = true, onTog
             <h3 className="text-lg leading-tight" style={ts({ color })}>
               <span style={ts({ overflowWrap: "anywhere" })}>{item.name}</span>
               {overall !== null && (
-                <span className="ml-1 whitespace-nowrap text-base" style={ts({ color: rollColor(overall) })} title={item.rolls ? "Average of your identification rolls" : "All identifications at their 50% roll"}>
+                <span className="ml-1 whitespace-nowrap text-base" style={ts({ color: rollColor(overall) })} title={item.rolls ? "Average of your identification rolls" : "All identifications at their max roll (100%), like Wynnbuilder"}>
                   [{overall.toFixed(1)}%]
                 </span>
               )}
@@ -5373,7 +5585,11 @@ function damageAlternatives(build, slotId, limit, pool) {
   const others = build.slots.filter((entry) => entry.item && entry.id !== slotId).map((entry) => entry.item);
   const weapon = slotId === "weapon" ? null : (build.slots.find((entry) => entry.id === "weapon") || {}).item;
   const picks = Object.fromEntries(build.slots.map((entry) => [entry.id, entry.item ? { item: entry.item } : null]));
-  const measure = (item) => {
+  // build z "Realistic rolls": kandydaci przy tym samym rollu co reszta zestawu
+  const rollPercentOfBuild = build.metrics.rollPercent || 100;
+  const atBuildRoll = (item) => (item && rollPercentOfBuild < 100 && !item.rolls && ITEM_BY_NAME.get(item.name) === item ? withRolls(item, { all: rollPercentOfBuild }) : item);
+  const measure = (raw) => {
+    const item = atBuildRoll(raw);
     const weaponNow = slotId === "weapon" ? item : weapon;
     const items = item ? [...others, item] : others;
     const sp = computeSkillPoints(items);
@@ -5387,7 +5603,7 @@ function damageAlternatives(build, slotId, limit, pool) {
     .map((item) => (slotId === "weapon" ? powderForProfile(item, build.profile) : item))
     .map((item) => {
       const { metrics, spOver } = measure(item);
-      const passes = spOver === 0 && (minEhp <= 0 || metrics.ehp >= minEhp) && (cycle.ids.length === 0 || (metrics.cycleOk && metrics.manaNet >= 0));
+      const passes = spOver === 0 && (minEhp <= 0 || metrics.ehp >= minEhp) && manaOk(metrics, cycle) && sustainPasses({ ...metrics, requireSustain: build.metrics.requireSustain, minSustain: build.metrics.minSustain });
       return {
         item,
         score: metrics.damage,
@@ -5928,7 +6144,7 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
                     <span className="text-base" style={ts({ color: RARITY_COLORS[item.tier] || RARITY_COLORS.Normal })}>
                       {item.name}
                       {rated ? (
-                        <span className="ml-2 text-xs" style={ts({ color: "#55FFFF" })} title={`Wynnpool "${rated.profile.name}" weights: ${wynnpoolSummary(rated.profile)}. The score is for 50% rolls; set your own in Rolls.`}>
+                        <span className="ml-2 text-xs" style={ts({ color: "#55FFFF" })} title={`Wynnpool "${rated.profile.name}" weights: ${wynnpoolSummary(rated.profile)}. The score is for max rolls; set your own in Rolls.`}>
                           WP {rated.score.toFixed(0)}
                         </span>
                       ) : null}
@@ -6227,7 +6443,7 @@ function ScoreGuide({ build }) {
             <li>
               The score on a card is the item's value in this build: its identification points{build.mainAttack ? " and its share of the real main attack DPS" : ""}, minus {formatNumber(Math.round(profile.tuning.leftoverSp * SCORE_SCALE * 10) / 10)} for
               every skill point the build has to spend because of it. "Other picks" ranks items the same way, so the list matches what the
-              optimizer prefers. Identifications count at their 50% roll unless you set rolls.
+              optimizer prefers. Identifications count at their max roll (100%, like Wynnbuilder) unless you set rolls.
             </li>
             <li>Every weight and constant above can be changed in the "Score calculation" tab{profile.overriddenKeys && profile.overriddenKeys.size > 0 ? ` (${profile.overriddenKeys.size} stat weights are overridden right now)` : ""}.</li>
           </ul>
@@ -7020,6 +7236,39 @@ function buildStatMap(build, items, weapon) {
   return stats;
 }
 
+// POWDER SPECIAL BRONI (wiki.gg/wiki/Powders, wartości jak w Wynnbuilderze js/powders.js): dwa powdery tier IV+
+// tego samego żywiołu odblokowują special; decyduje żywioł pierwszego powdera, poziom (4, 4.5 ... 7) = średni tier
+// powderów tego żywiołu. Ładuje się main attackami (ok. 5 s ciągłego bicia), odpala Shift-klikiem. Na razie tylko
+// pokazujemy obrażenia/efekt w panelu Damage - generator go nie liczy (nie wiadomo, jak często się odpala).
+const POWDER_SPECIALS = {
+  earth: { name: "Quake", damage: [240, 280, 320, 360, 400, 440, 480], extra: ["radius", [4.5, 5, 5.5, 6, 6.5, 7, 7.5], " blocks"], effect: "stuns enemies around you" },
+  thunder: { name: "Chain Lightning", damage: [200, 225, 250, 275, 300, 325, 350], extra: ["chains", [5, 6, 7, 8, 9, 10, 11], " times"], effect: "jumps between enemies" },
+  water: { name: "Curse", boost: [10, 12.5, 15, 17.5, 20, 22.5, 25], duration: 4, effect: "enemies take more damage" },
+  fire: { name: "Courage", damage: [110, 125, 140, 155, 170, 185, 200], boost: [10, 12.5, 15, 17.5, 20, 22.5, 25], duration: 4, effect: "damage boost for you and allies" },
+  air: { name: "Wind Prison", nextHit: [100, 125, 150, 175, 200, 225, 250], duration: 5, effect: "holds enemies; the next hit deals more" },
+};
+function weaponPowderSpecial(weapon, stats, critChance) {
+  if (!weapon || !weapon.powders || !Array.isArray(weapon.powders.list) || weapon.powders.list.length < 2) return null;
+  const element = weapon.powders.list[0].element;
+  const strong = weapon.powders.list.filter((powder) => powder.element === element && powder.tier >= 4);
+  if (strong.length < 2 || !POWDER_SPECIALS[element]) return null;
+  const average = strong.reduce((sum, powder) => sum + powder.tier, 0) / strong.length;
+  const index = Math.max(0, Math.min(6, Math.round((average - 4) * 2)));
+  const spec = POWDER_SPECIALS[element];
+  const out = { element, name: spec.name, level: 4 + index / 2, index, effect: spec.effect, duration: spec.duration || null };
+  if (spec.damage) {
+    const conversions = [0, 0, 0, 0, 0, 0];
+    conversions[1 + ELEMENTS.indexOf(element)] = spec.damage[index];
+    const damage = spellPartDamage(stats, weapon, conversions, { useSpell: false, ignoreSpeed: true, partId: "0.Powder Special" });
+    out.percent = spec.damage[index];
+    out.damage = (1 - critChance) * damage.normal + critChance * damage.crit;
+  }
+  if (spec.extra) out.extra = { name: spec.extra[0], value: spec.extra[1][index], unit: spec.extra[2] };
+  if (spec.boost) out.boost = spec.boost[index];
+  if (spec.nextHit) out.nextHit = spec.nextHit[index];
+  return out;
+}
+
 function computeBuildStats(build, treeSettings = null) {
   const items = build.slots.filter((slot) => slot.item).map((slot) => slot.item);
   const weapon = (build.slots.find((slot) => slot.id === "weapon") || {}).item;
@@ -7061,6 +7310,7 @@ function computeBuildStats(build, treeSettings = null) {
     };
     result.critMult = 1 + statValue(stats, "critDamPct") / 100;
     result.strBoost = 1 + skillPercent(statValue(stats, "str")) * SKILL_DAMAGE_MULT.str;
+    result.powderSpecial = weaponPowderSpecial(weapon, stats, result.critChance);
   }
   result.spells.forEach((spell) => {
     spell.dps = spellDpsOf(spell, statValue(stats, "mr"));
@@ -7244,21 +7494,91 @@ function SpellCard({ spell, critChance, mainAttack, open, onToggle }) {
   );
 }
 
-// Kalkulator cyklu czarów: np. "1213" przy 9 kliknięciach/s (3 kliknięcia na czar).
-function SpellCyclePanel({ stats }) {
-  const [cycle, setCycle] = useState("");
-  const [clicks, setClicks] = useState("9");
-  const [withSteal, setWithSteal] = useState(false);
+// Kalkulator cyklu czarów: np. "1213" albo "4MMM" przy 9 kliknięciach/s (czar = 3 kliknięcia, M = main attack, nie
+// szybciej niż pozwala broń). Mana Steal tylko z trafień M - ten sam model co generator (cycleTiming, stealPerSecond).
+// CZASY CZARÓW (feedback: "Multihit says total damage but it's dealt over a duration"). Z danych drzewka (props węzła,
+// który daje czar - wartości bazowe, przed ulepszeniami): ile trwa zadawanie obrażeń. Przerywanie przy ponownym rzucie
+// znamy tylko z relacji graczy, bez czasów - dlatego generator liczy obrażenia rzutu, a cel "Whole cycle" sumuje cały
+// cykl na sekundę (kompromis zaproponowany przez graczy).
+const RECAST_NOTES = {
+  Multihit: "players report that recasting before the last hit cuts it short for Acrobat (not for Trickster)",
+  Uppercut: "players report that with Fireworks, recasting Uppercut early cuts the fireworks short",
+};
+function spellTimings(playerClass, active) {
+  const tree = TREE_INDEX[playerClass];
+  const out = new Map();
+  if (!tree || !active) return out;
+  tree.nodes.forEach((node) => {
+    if (!active.has(node.id)) return;
+    (node.effects || []).forEach((effect) => {
+      if (effect.type !== "replace_spell" || effect.base_spell === undefined) return;
+      const props = node.props || {};
+      let timing = null;
+      if (props.arrows_per_stream && props.attack_frequency) timing = { over: props.arrows_per_stream / props.attack_frequency, text: `${props.arrows_per_stream} arrows over ${(props.arrows_per_stream / props.attack_frequency).toFixed(1)} s` };
+      else if (props.ray_duration) timing = { over: props.ray_duration, text: `beam for ${props.ray_duration} s` };
+      else if (props.duration && (props.rate || props.ticksPerSecond || props.hitsPerSecond || props.attack_frequency)) {
+        const perSecond = props.ticksPerSecond || props.hitsPerSecond || props.attack_frequency || 1 / props.rate;
+        timing = { over: props.duration, text: `${props.duration} s, ${perSecond.toFixed(1)} hits/s` };
+      } else if (props.hit_count) timing = { over: null, text: `${props.hit_count} quick hits` };
+      else if (props.duration) timing = { over: null, text: `effect lasts ${props.duration} s` };
+      out.set(effect.base_spell, { ...(timing || { over: 0, text: "instant" }), note: RECAST_NOTES[node.name] || RECAST_NOTES[effect.name] || null, node: node.name });
+    });
+  });
+  return out;
+}
+
+function SpellTimingTable({ stats, playerClass }) {
+  const timings = spellTimings(playerClass, stats.tree && stats.tree.active);
+  const rows = stats.spells.filter((spell) => spell.main && (spell.main.type === "damage" || spell.main.type === "heal"));
+  if (rows.length === 0) return null;
+  return (
+    <details className="text-xs">
+      <summary className="mc-link cursor-pointer">Spell timing</summary>
+      <p className="mt-1 text-zinc-500">Damage per cast is the total of all its hits; spells below deal it over time. Base values from the ability tree data (before upgrades).</p>
+      <div className="mt-1 grid gap-x-2 gap-y-0.5" style={{ gridTemplateColumns: "minmax(0,1fr) auto auto" }}>
+        <span className="text-zinc-500">spell</span>
+        <span className="text-right text-zinc-500">per cast</span>
+        <span className="text-right text-zinc-500">dealt over</span>
+        {rows.map((spell) => {
+          const timing = timings.get(spell.id) || null;
+          return (
+            <React.Fragment key={spell.id}>
+              <span className="truncate text-zinc-200" title={timing && timing.note ? `${spell.name}: ${timing.note}` : spell.name}>
+                {spell.name}
+                {timing && timing.note ? " *" : ""}
+              </span>
+              <span className="text-right tabular-nums">{formatAmount(spell.main.amount)}</span>
+              <span className="text-right text-zinc-400">{timing ? timing.text : "instant"}</span>
+            </React.Fragment>
+          );
+        })}
+      </div>
+      {rows.some((spell) => (timings.get(spell.id) || {}).note) && <p className="mt-1 text-zinc-500">* {rows.map((spell) => (timings.get(spell.id) || {}).note && `${spell.name}: ${timings.get(spell.id).note}`).filter(Boolean).join("; ")}.</p>}
+    </details>
+  );
+}
+
+function SpellCyclePanel({ stats, build = null }) {
+  const initialCycle = build && build.metrics && build.metrics.cycle && build.metrics.cycle.ids ? cycleText(build.metrics.cycle.ids) : "";
+  const [cycle, setCycle] = useState(initialCycle);
+  const [clicks, setClicks] = useState(build && build.metrics && build.metrics.cycle && initialCycle ? String(build.metrics.cycle.cps) : "9");
+  const [withSteal, setWithSteal] = useState(true);
   const [withGain, setWithGain] = useState(true);
-  const spells = [...cycle].map((digit) => stats.spells.find((spell) => spell.id === Number(digit))).filter((spell) => spell && spell.cost !== null);
-  const valid = cycle.length > 0 && spells.length === cycle.length && [...cycle].every((digit) => "1234".includes(digit));
+  const ids = parseCycle(cycle);
+  const spellIds = ids.filter((id) => id !== 0);
+  const spells = spellIds.map((id) => stats.spells.find((spell) => spell.id === id)).filter((spell) => spell && spell.cost !== null);
+  const valid = ids.length > 0 && spells.length === spellIds.length;
   const cps = Math.max(0.1, Number(clicks) || 9);
-  const seconds = (3 * cycle.length) / cps;
+  const hps = stats.mainAttack ? stats.mainAttack.hps : HITS_PER_SECOND.NORMAL;
+  const timing = cycleTiming(ids, cps, hps);
+  const seconds = Math.max(0.01, timing.seconds);
   const used = valid ? spells.reduce((sum, spell) => sum + spell.cost, 0) / seconds : null;
-  const fromStats = (stats.manaRegen + 25) / 5 + (withSteal ? stats.manaSteal / 3 : 0);
+  const steal = withSteal ? stealPerSecond(stats.manaSteal, timing, hps) : 0;
+  const fromStats = (stats.manaRegen + 25) / 5 + steal;
   const fromAbilities = valid && withGain ? spells.reduce((sum, spell) => sum + (spell.manaGained || 0), 0) / seconds : 0;
   const net = used === null ? null : fromStats + fromAbilities - used;
-  const cycleDamage = valid ? spells.reduce((sum, spell) => sum + (spell.main && spell.main.type === "damage" ? spell.main.amount : 0), 0) : 0;
+  const meleeDamage = timing.melee * (stats.mainAttack ? stats.mainAttack.hit : 0);
+  const cycleDamage = valid ? spells.reduce((sum, spell) => sum + (spell.main && spell.main.type === "damage" ? spell.main.amount : 0), 0) + meleeDamage : 0;
   const cycleDps = valid ? cycleDamage / seconds : null;
   const sustainedDps = cycleDps === null ? null : used > 0 ? cycleDps * Math.min(1, (fromStats + fromAbilities) / used) : cycleDps;
   const format = (value) => (value === null ? "–" : `${value >= 0 ? "" : "−"}${Math.abs(value).toFixed(1)}`);
@@ -7267,31 +7587,57 @@ function SpellCyclePanel({ stats }) {
       <span className="mc-title text-xs uppercase">Spell cycle</span>
       <div className="grid grid-cols-2 gap-2">
         <label className="flex flex-col gap-1 text-xs text-zinc-300">
-          Cycle (spell numbers)
-          <input value={cycle} onChange={(event) => setCycle(event.target.value.replace(/[^1-4]/g, "").slice(0, 16))} placeholder="e.g. 1213" className="mc-input w-full" inputMode="numeric" />
+          Cycle (1-4 = spells, M = main attack)
+          <input value={cycle} onChange={(event) => setCycle(event.target.value.toUpperCase().replace(/[^1-4M]/g, "").slice(0, 16))} placeholder="e.g. 1213 or 4MMM" className="mc-input w-full" />
         </label>
         <label className="flex flex-col gap-1 text-xs text-zinc-300">
           Clicks per second
           <input value={clicks} onChange={(event) => setClicks(event.target.value)} type="number" min={1} max={20} step={0.5} className="mc-input w-full" />
         </label>
       </div>
-      <label className="flex items-center gap-2 text-xs text-zinc-200">
-        <input type="checkbox" className="mc-check" checked={withSteal} onChange={() => setWithSteal(!withSteal)} /> Include Mana Steal ({formatNumber(stats.manaSteal)}/3s)
+      <label className="flex items-center gap-2 text-xs text-zinc-200" title="Mana Steal works on main attack hits: Mana per hit = Mana Steal ÷ 3 ÷ hits per second">
+        <input type="checkbox" className="mc-check" checked={withSteal} onChange={() => setWithSteal(!withSteal)} /> Include Mana Steal ({formatNumber(stats.manaSteal)}/3s, {(stats.manaSteal / 3 / hps).toFixed(1)} per hit)
       </label>
       <label className="flex items-center gap-2 text-xs text-zinc-200">
         <input type="checkbox" className="mc-check" checked={withGain} onChange={() => setWithGain(!withGain)} /> Include ability mana gain
       </label>
       <ul className="flex flex-col gap-0.5 text-sm">
         <SummaryRow label="Mana used/s" value={format(used)} color="#FF5555" hint={valid ? `${spells.map((spell) => `${spell.name} ${spell.cost.toFixed(1)}`).join(" + ")} over ${seconds.toFixed(2)} s` : "Type a cycle of spells you have in the ability tree"} />
-        <SummaryRow label="Mana/s from stats" value={format(fromStats)} color="#55FFFF" hint="(Mana Regen + 25 base) ÷ 5 s, plus Mana Steal ÷ 3 s if included" />
+        <SummaryRow label="Mana/s from stats" value={format(fromStats)} color="#55FFFF" hint={`(Mana Regen + 25 base) ÷ 5 s${withSteal ? `, plus Mana Steal ${steal.toFixed(1)}/s from ${timing.melee} main attack hit${timing.melee === 1 ? "" : "s"} per cycle` : ""}`} />
         <SummaryRow label="Mana/s from abilities" value={format(fromAbilities)} color="#55FFFF" />
-        <SummaryRow label="Net mana/s" value={format(net)} color={net === null ? "#F4F4F5" : net >= 0 ? "#55FF55" : "#FF5555"} />
-        <SummaryRow label="Cycle damage" value={valid ? formatNumber(Math.round(cycleDamage)) : "–"} hint="Sum of every spell's damage in one cycle" />
-        <SummaryRow label="Cycle Spell DPS" value={cycleDps === null ? "–" : formatNumber(Math.round(cycleDps))} color="#55FFFF" hint={valid ? `${formatNumber(Math.round(cycleDamage))} damage over ${seconds.toFixed(2)} s` : ""} />
+        <SummaryRow label="Net mana/s" value={format(net)} color={net === null ? "#F4F4F5" : net >= 0 ? "#55FF55" : "#FF5555"} hint={net !== null && net < 0 ? `A 100-mana pool lasts about ${Math.round(100 / -net)} s` : undefined} />
+        <SummaryRow label="Cycle damage" value={valid ? formatNumber(Math.round(cycleDamage)) : "–"} hint="Sum of every spell's damage (and main attack hits) in one cycle" />
+        <SummaryRow label="Cycle DPS" value={cycleDps === null ? "–" : formatNumber(Math.round(cycleDps))} color="#55FFFF" hint={valid ? `${formatNumber(Math.round(cycleDamage))} damage over ${seconds.toFixed(2)} s` : ""} />
         <SummaryRow label="➜ Sustained by mana" value={sustainedDps === null ? "–" : formatNumber(Math.round(sustainedDps))} color="#55FFFF" hint="Cycle DPS scaled down when mana income can't keep up with mana used" />
       </ul>
-      {cycle.length > 0 && !valid && <p className="text-xs text-amber-300">Every spell in the cycle needs a cost: pick its abilities in the Ability tree tab.</p>}
+      {ids.length > 0 && !valid && <p className="text-xs text-amber-300">Every spell in the cycle needs a cost: pick its abilities in the Ability tree tab.</p>}
+      {ids.length > 0 && timing.melee === 0 && withSteal && stats.manaSteal > 0 && <p className="text-xs text-zinc-500">No M in the cycle, so Mana Steal adds nothing.</p>}
+      {build && <SpellTimingTable stats={stats} playerClass={build.playerClass} />}
     </div>
+  );
+}
+
+function PowderSpecialRow({ special }) {
+  const color = ELEMENT_STYLE[special.element].color;
+  const label = `${special.name} ${special.level % 1 ? special.level.toFixed(1) : special.level}`;
+  let value = "";
+  if (special.damage) value = formatAmount(special.damage);
+  else if (special.nextHit) value = `+${special.nextHit}% next hit`;
+  else if (special.boost) value = `+${special.boost}% taken`;
+  const parts = [
+    special.damage ? `${special.percent}% of your weapon's damage as ${ELEMENT_STYLE[special.element].label} (main attack scaling, crits included): ${formatAmount(special.damage)} per enemy hit` : null,
+    special.extra ? `${special.extra.name} ${special.extra.value}${special.extra.unit}` : null,
+    special.boost && special.element === "fire" ? `+${special.boost}% damage for you and allies for ${special.duration} s` : null,
+    special.boost && special.element === "water" ? `enemies take ${special.boost}% more damage for ${special.duration} s` : null,
+    special.nextHit ? `holds enemies for ${special.duration} s; the next hit deals ${special.nextHit}% more` : null,
+  ].filter(Boolean);
+  return (
+    <SummaryRow
+      label={`Powder special: ${label}`}
+      value={value}
+      color={color}
+      hint={`${parts.join("; ")}. Two tier IV+ ${ELEMENT_STYLE[special.element].label} powders unlock it (the first powder decides; level = their average tier). Charged by main attacks (about 5 s of hitting), used with Shift + click. Shown for reference - the generator does not count it.`}
+    />
   );
 }
 
@@ -7335,9 +7681,10 @@ function DamagePanel({ build, stats, onOpenTree }) {
                 label="Poison DPS"
                 value={formatAmount(stats.poison.dps)}
                 color="#AA00AA"
-                hint={`Poison ${formatNumber(stats.poison.total)} per 3 s = one tick of ${formatNumber(stats.poison.dps)} every second after you hit (floor(poison ÷ 3), as in Wynnbuilder). Not affected by Strength, crits or damage bonuses. Counted in the damage goal: added to main attack DPS, or spread over casts for a spell.`}
+                hint={`Poison ${formatNumber(stats.poison.total)} per 3 s = one tick of ${formatNumber(stats.poison.dps)} every second after you hit (floor(poison ÷ 3), as in Wynnbuilder). Not affected by Strength, crits or damage bonuses. Counted in the damage goal only with "Count poison in the goal" (added to main attack DPS, or spread over casts for a spell).`}
               />
             )}
+            {stats.powderSpecial && <PowderSpecialRow special={stats.powderSpecial} />}
           </ul>
           {stats.hundred && (
             <div className="grid grid-cols-1 gap-2">
@@ -7403,7 +7750,7 @@ function DamagePanel({ build, stats, onOpenTree }) {
           </button>
           {cycleOpen && (
             <div className="wbr-drop">
-              <SpellCyclePanel stats={stats} />
+              <SpellCyclePanel stats={stats} build={build} />
             </div>
           )}
         </>
@@ -7471,6 +7818,24 @@ function SurvivabilityPanel({ build, stats }) {
         <SummaryRow label="Life Steal" value={`${formatNumber(stats.lifeSteal)}/3s`} color={stats.lifeSteal >= 0 ? "#F4F4F5" : "#FF5555"} />
         <SummaryRow label="➜ Effective LS" value={`${formatNumber(Math.round((stats.ehp / stats.hp) * stats.lifeSteal))}/3s`} hint="Life Steal scaled by Effective HP ÷ Health" />
         <SummaryRow label="➜ Life per hit" value={formatNumber(Math.round(stats.lifeSteal / 3 / (stats.mainAttack ? stats.mainAttack.hps : HITS_PER_SECOND.NORMAL)))} hint="Life Steal ÷ 3 s ÷ attacks per second" />
+        {(() => {
+          // Efektywny przyrost zdrowia na sekundę: (Health Regen ÷ 4 s + Life Steal z trafień) × EHP ÷ HP. Life Steal
+          // jak Mana Steal: z cyklem tylko z jego M, bez cyklu przy ciągłym biciu main attackiem.
+          const hps = stats.mainAttack ? stats.mainAttack.hps : HITS_PER_SECOND.NORMAL;
+          const cycle = build.metrics && build.metrics.cycle && build.metrics.cycle.ids && build.metrics.cycle.ids.length > 0 ? build.metrics.cycle : null;
+          const timing = cycle ? cycleTiming(cycle.ids, cycle.cps, hps) : null;
+          const steal = timing ? stealPerSecond(stats.lifeSteal, timing, hps) : stats.lifeSteal / 3;
+          const raw = stats.hpr / 4 + steal;
+          const effective = (raw * stats.ehp) / Math.max(1, stats.hp);
+          return (
+            <SummaryRow
+              label="Effective health gain"
+              value={`${effective >= 0 ? "+" : "−"}${formatNumber(Math.round(Math.abs(effective)))}/s`}
+              color={effective > 0 ? "#55FF55" : effective < 0 ? "#FF5555" : "#F4F4F5"}
+              hint={`(Health Regen ${formatAmount(stats.hpr)} ÷ 4 s + Life Steal ${steal.toFixed(1)}/s${cycle ? ` from the ${timing.melee} main attack${timing.melee === 1 ? "" : "s"} of cycle ${cycleText(cycle.ids)}` : " at constant main attacks"}) × EHP ÷ Health (${(stats.ehp / Math.max(1, stats.hp)).toFixed(2)}) = ${raw.toFixed(1)} HP/s worth ${effective.toFixed(1)} effective HP/s`}
+            />
+          );
+        })()}
         <SummaryRow label="Walk Speed" value={`${stats.walkSpeed >= 0 ? "+" : ""}${formatNumber(stats.walkSpeed)}%`} color={stats.walkSpeed >= 0 ? "#F4F4F5" : "#FF5555"} />
         {stats.meleeRange.base > 0 && (
           <>
@@ -7779,7 +8144,7 @@ function describeOptions(rawOptions) {
   if (options.onlyListed && hasLiveData()) parts.push("only items on the market");
   const overrides = Object.keys(options.scoring.weights).length + Object.keys(options.scoring.tuning).length;
   if (overrides > 0) parts.push(`${overrides} custom score weight${overrides === 1 ? "" : "s"}`);
-  if (!options.preferGuideItems) parts.push("guide items not preferred");
+  if (options.preferGuideItems) parts.push("guide items preferred");
   if (options.defences.length > 0) parts.push(`${options.defences.map((element) => ELEMENT_STYLE[element].label).join(" + ")} defence`);
   if (options.avoidNegativeDefences) parts.push("no negative defences");
   const pinnedCount = Object.keys(options.locked).length;
@@ -7903,9 +8268,9 @@ function FocusSliders({ options, onChange, archetype }) {
       })}
       <p
         className="text-xs text-zinc-500"
-        title={`X% = X% of the group's full priority: 0% ignores it, 100% is all-in, 50% is half of that. "Meta" is where this archetype's guide builds sit. Above meta, Main attack DPS switches to the build's real DPS (attack speed tiers, raw × hits/s, Strength).`}
+        title={`X% = X% of the group's full priority: 0% ignores it, 100% is all-in, 50% is half of that. The marker only shows where this archetype's guide builds sit; it is not a target and adds nothing to the score. Above the marker, Main attack DPS switches to the build's real DPS (attack speed tiers, raw × hits/s, Strength).`}
       >
-        Meta = guide builds' average.
+        Marker = where the guide builds sit (for reference only).
       </p>
     </fieldset>
   );
@@ -8094,7 +8459,7 @@ function representativeWeapon(playerClass, level, treeSettings, items = ITEM_DB)
   return best.score > 0 ? best.weapon : top[0];
 }
 
-function damageGoalOptions(playerClass, level, treeSettings, items = ITEM_DB) {
+function damageGoalOptions(playerClass, level, treeSettings, items = ITEM_DB, cycle = null) {
   const classConfig = CLASSES[playerClass];
   if (!classConfig) return [];
   const weapon = representativeWeapon(playerClass, level, treeSettings, items);
@@ -8113,13 +8478,26 @@ function damageGoalOptions(playerClass, level, treeSettings, items = ITEM_DB) {
   });
   options.sort((a, b) => b.damage - a.damage);
   const melee = spells.has(0) ? evaluateSpell(spells.get(0), stats, weapon, hp) : null;
+  const weaponHps = HITS_PER_SECOND[attackSpeedAfterTier(weapon, statValue(stats, "atkTier"))];
   options.push({
     id: DAMAGE_GOAL_MAIN,
     name: melee ? melee.name : "Main attack",
-    damage: melee && melee.main ? melee.main.amount * HITS_PER_SECOND[attackSpeedAfterTier(weapon, statValue(stats, "atkTier"))] : 0,
+    damage: melee && melee.main ? melee.main.amount * weaponHps : 0,
     cost: null,
     kind: "melee",
   });
+  // cały cykl (gdy formularz ma cykl z czarami, które drzewko zna)
+  const cycleIds = cycle && cycle.ids ? cycle.ids : [];
+  if (cycleIds.some((id) => id !== 0) && cycleIds.every((id) => id === 0 || spells.has(id))) {
+    const timing = cycleTiming(cycleIds, cycle.cps, weaponHps);
+    const perCast = (id) => {
+      const spell = spells.get(id);
+      const evaluated = spell ? evaluateSpell(spell, stats, weapon, hp) : null;
+      return evaluated && evaluated.main && evaluated.main.type === "damage" ? evaluated.main.amount : 0;
+    };
+    const total = cycleIds.reduce((sum, id) => sum + perCast(id), 0);
+    if (total > 0 && timing.seconds > 0) options.push({ id: DAMAGE_GOAL_CYCLE, name: `Whole cycle ${cycleText(cycleIds)}`, damage: total / timing.seconds, cost: null, kind: "cycle" });
+  }
   return options;
 }
 
@@ -8146,7 +8524,13 @@ function goalKey(goal) {
   return Array.isArray(goal) ? goal.join("+") : String(goal);
 }
 
-const DEFAULT_DAMAGE_FORM = { preset: "", goal: null, minEhp: null, cycle: "", cps: 3, steal: true, gain: true, sustain: false, noEvents: true, tradeable: false, freeSp: true };
+// poison: poison w celu obrażeń (domyślnie nie); rolls: "max" (100%, jak Wynnbuilder) albo "avg" (50%);
+// history: start od buildów z tej sesji (domyślnie nie - te same ustawienia = ten sam build); drain: dopuszczalny
+// dren many w mana/s (0 = pełny sustain)
+const DEFAULT_DAMAGE_FORM = { preset: "", goal: null, minEhp: null, cycle: "", cps: 3, steal: true, gain: true, sustain: false, noEvents: true, tradeable: false, freeSp: true, poison: false, rolls: "max", history: false, drain: 0, lr: 0 };
+function formCycleOf(form) {
+  return { ids: parseCycle(form.cycle), cps: form.cps, steal: form.steal, gain: form.gain, poison: Boolean(form.poison), drain: Math.max(0, Number(form.drain) || 0) };
+}
 
 // Suwak EHP chodzi co 5% tego, co da się osiągnąć na danym poziomie; domyślnie 25%.
 function ehpStep(ehpMax) {
@@ -8171,6 +8555,7 @@ function DamageForm({
   treePoints,
   apCap,
   onPreset,
+  onGuideTree = null,
   onEditTree,
   form,
   onForm,
@@ -8190,12 +8575,18 @@ function DamageForm({
   onSweepToggle = null,
   onSweepPick = null,
   shownBuild = null,
+  tradeoff = null,
+  onTradeoff = null,
+  onTradeoffUse = null,
+  onTradeoffPick = null,
 }) {
   const classConfig = playerClass ? CLASSES[playerClass] : null;
   const set = (patch) => onForm({ ...form, ...patch });
   const goal = resolveGoal(goals, form.goal);
   const goalIds = goal ? (Array.isArray(goal.id) ? goal.id : [goal.id]) : [];
-  const cycleIds = [...String(form.cycle || "")].filter((digit) => "1234".includes(digit)).map(Number);
+  const cycleIds = parseCycle(form.cycle);
+  const cycleCasts = cycleIds.filter((id) => id !== 0).length;
+  const cycleMelee = cycleIds.length - cycleCasts;
   const minEhp = form.minEhp === null || form.minEhp === undefined ? defaultMinEhp(ehpMax) : Math.min(form.minEhp, ehpMax);
   const ready = Boolean(playerClass && level && treeIds.length > 0 && goal);
   // Suwak chodzi co 5% tego, co da się osiągnąć na tym poziomie. Drobniejsze kroki tylko udawały precyzję:
@@ -8285,6 +8676,14 @@ function DamageForm({
               "Pick a preset; spells and their costs come from the tree."
             )}
           </p>
+          {onGuideTree && treePresetsFor(playerClass).length > 0 && (
+            <details className="text-xs" open={Boolean(form.treePreset)}>
+              <summary className="mc-link cursor-pointer">Guide trees ({treePresetsFor(playerClass, form.preset || null).length || treePresetsFor(playerClass).length})</summary>
+              <div className="mt-1.5">
+                <GuideTreePresets playerClass={playerClass} archetype={form.preset || null} apCap={apCap} selected={form.treePreset || null} onPick={onGuideTree} compact />
+              </div>
+            </details>
+          )}
         </fieldset>
       )}
 
@@ -8293,17 +8692,17 @@ function DamageForm({
           <label htmlFor="new-goal" className={label}>
             Maximise
           </label>
-          <select id="new-goal" value={goal ? (goal.kind === "multi" ? "multi" : String(goal.id)) : ""} onChange={(event) => event.target.value !== "multi" && set({ goal: event.target.value === DAMAGE_GOAL_MAIN ? DAMAGE_GOAL_MAIN : Number(event.target.value) })} className="mc-input w-full">
+          <select id="new-goal" value={goal ? (goal.kind === "multi" ? "multi" : String(goal.id)) : ""} onChange={(event) => event.target.value !== "multi" && set({ goal: event.target.value === DAMAGE_GOAL_MAIN || event.target.value === DAMAGE_GOAL_CYCLE ? event.target.value : Number(event.target.value) })} className="mc-input w-full">
             {goal && goal.kind === "multi" && <option value="multi">{goal.name} (sum)</option>}
             {goals.map((entry) => (
               <option key={entry.id} value={String(entry.id)}>
                 {entry.name}
-                {entry.kind === "melee" ? " (main attack DPS)" : entry.cost !== null && entry.cost !== undefined ? ` · ${entry.cost.toFixed(0)} mana` : ""}
+                {entry.kind === "melee" ? " (main attack DPS)" : entry.kind === "cycle" ? " (damage per second of the cycle)" : entry.cost !== null && entry.cost !== undefined ? ` · ${entry.cost.toFixed(0)} mana` : ""}
               </option>
             ))}
           </select>
           <div className="flex flex-wrap gap-1" role="group" aria-label="Spells to maximise together">
-            {goals.map((entry) => {
+            {goals.filter((entry) => entry.kind !== "cycle").map((entry) => {
               const on = goalIds.some((id) => String(id) === String(entry.id));
               return (
                 <ToggleChip
@@ -8323,7 +8722,7 @@ function DamageForm({
             })}
           </div>
           <p className={hint} title="Every build is compared by this number, computed with your tree, powders and skill points.">
-            {goal ? (goal.kind === "melee" ? "Main attack damage per second." : goal.kind === "multi" ? `Sum of one cast of ${goal.name}.` : `One hit of ${goal.name}.`) : ""} Tap several to maximise their sum.
+            {goal ? (goal.kind === "melee" ? "Main attack damage per second." : goal.kind === "cycle" ? "Every spell of the cycle once per cast plus every main attack hit (M), per second of the cycle - within the mana drain you allow." : goal.kind === "multi" ? `Sum of one cast of ${goal.name}.` : `One hit of ${goal.name}.`) : ""} Tap several to maximise their sum.
           </p>
         </div>
       )}
@@ -8341,14 +8740,7 @@ function DamageForm({
               </span>
             </div>
             <McRange id="new-ehp" min={0} max={ehpMax} step={step} value={minEhp} accent="#55FF55" onChange={(event) => set({ minEhp: Number(event.target.value) })} className="w-full" />
-            {sweep && (
-              <div className="flex flex-col gap-1">
-                <button type="button" className="mc-link self-start text-xs" aria-expanded={sweepOpen} onClick={onSweepToggle}>
-                  {sweepOpen ? "▾ List of builds" : "▸ List of builds (expand)"}
-                </button>
-                {sweepOpen && <EhpSweepList sweep={sweep} shownBuild={shownBuild} onPick={onSweepPick} />}
-              </div>
-            )}
+            {sweep && <p className="text-xs text-zinc-500">Builds for every EHP step: List of builds, at the bottom of this panel.</p>}
           </div>
           <label className="flex items-center gap-2 text-xs text-zinc-200" title="Health Regen (per 4 s) plus Life Steal (per 3 s) must add up to more than zero per second. Builds that drain your health are thrown away.">
             <input id="new-sustain" type="checkbox" className="mc-check" checked={Boolean(form.sustain)} onChange={() => set({ sustain: !form.sustain })} /> Life sustain &gt; 0 <span className="text-zinc-500">· regen + steal</span>
@@ -8363,10 +8755,9 @@ function DamageForm({
             <input
               id="new-cycle"
               value={form.cycle}
-              onChange={(event) => set({ cycle: event.target.value.replace(/[^1-4]/g, "").slice(0, 16) })}
-              placeholder="e.g. 2343"
-              inputMode="numeric"
-              aria-label="Spell cycle"
+              onChange={(event) => set({ cycle: event.target.value.toUpperCase().replace(/[^1-4M]/g, "").slice(0, 16) })}
+              placeholder="e.g. 2343 or 4MMM"
+              aria-label="Spell cycle: spell numbers 1-4, M = main attack"
               className="mc-input w-0 min-w-0 flex-1 tabular-nums"
             />
             <label htmlFor="new-cps" className="flex items-center gap-1 text-xs text-zinc-400" title="Clicks per second. A spell is 3 clicks, so the cycle takes 3 × spells ÷ clicks per second.">
@@ -8395,16 +8786,32 @@ function DamageForm({
             )}
           </div>
           <div className="flex flex-wrap gap-x-4 gap-y-1">
-            <label className="flex items-center gap-1.5 text-xs text-zinc-200">
-              <input type="checkbox" className="mc-check" checked={form.steal} onChange={() => set({ steal: !form.steal })} /> Mana Steal
+            <label className="flex items-center gap-1.5 text-xs text-zinc-200" title="Mana Steal works on main attack hits: add M to the cycle for every main attack between the spells. Mana per hit = Mana Steal ÷ 3 ÷ hits per second of the weapon (like Wynnbuilder).">
+              <input type="checkbox" className="mc-check" checked={form.steal} onChange={() => set({ steal: !form.steal })} /> Mana Steal <span className="text-zinc-500">· from M hits</span>
             </label>
             <label className="flex items-center gap-1.5 text-xs text-zinc-200">
               <input type="checkbox" className="mc-check" checked={form.gain} onChange={() => set({ gain: !form.gain })} /> Mana from abilities
             </label>
           </div>
-          {cycleIds.length > 0 && <CycleSteps cycle={cycleIds.join("")} playerClass={playerClass} spells={goals.filter((entry) => entry.kind === "spell" && typeof entry.id === "number" && entry.id <= 4)} compact />}
+          <label className="flex items-center gap-2 text-xs text-zinc-300" title="How much mana per second the cycle may lose. 0 = it must sustain itself; more = you accept draining your mana pool (e.g. with raid buffs or for a burst).">
+            Allowed drain
+            <McRange id="new-drain" min={0} max={20} step={0.5} value={Number(form.drain) || 0} accent="#55FFFF" onChange={(event) => set({ drain: Number(event.target.value) })} className="min-w-0 flex-1" aria-label="Allowed mana drain per second" />
+            <span className="w-24 text-right tabular-nums">{(Number(form.drain) || 0) === 0 ? "none" : `${Number(form.drain).toFixed(1)} mana/s`}</span>
+          </label>
+          <label
+            className="flex items-center gap-2 text-xs text-zinc-300"
+            title="Minimum life recovery per second: Health Regen ÷ 4 s + Life Steal from the cycle's main attacks (M; without a cycle, constant main attacks). 0 = no minimum. Builds below it are thrown away."
+          >
+            Life recovery
+            <McRange id="new-lr" min={0} max={lifeRecoveryMax(level)} step={5} value={Math.min(lifeRecoveryMax(level), Number(form.lr) || 0)} accent="#FF5555" onChange={(event) => set({ lr: Number(event.target.value) })} className="min-w-0 flex-1" aria-label="Minimum life recovery per second" />
+            <span className="w-24 text-right tabular-nums">{(Number(form.lr) || 0) === 0 ? "any" : `≥ ${formatNumber(Number(form.lr))} HP/s`}</span>
+          </label>
+          {onTradeoff && <TradeoffSuggest tradeoff={tradeoff} hasCycle={cycleCasts > 0} running={running} form={form} onRun={onTradeoff} onUse={onTradeoffUse} onPick={onTradeoffPick} shownBuild={shownBuild} />}
+          {cycleIds.length > 0 && <CycleSteps cycle={cycleText(cycleIds)} playerClass={playerClass} spells={goals.filter((entry) => entry.kind === "spell" && typeof entry.id === "number" && entry.id <= 4)} compact />}
           <p className={hint}>
-            {cycleIds.length > 0 ? `${cycleIds.length} spells every ${((3 * cycleIds.length) / Math.max(0.5, form.cps)).toFixed(1)} s must pay for themselves.` : "Empty = no mana filter. Suggested cycles are in the class panel."}
+            {cycleIds.length > 0
+              ? `${cycleCasts} spell${cycleCasts === 1 ? "" : "s"}${cycleMelee > 0 ? ` + ${cycleMelee} main attack${cycleMelee === 1 ? "" : "s"}` : ""} every ≈${((3 * cycleCasts) / Math.max(0.5, form.cps) + cycleMelee / Math.max(0.5, form.cps)).toFixed(1)} s must pay for themselves${(Number(form.drain) || 0) > 0 ? `, minus ${Number(form.drain).toFixed(1)} mana/s (100 mana last ≈${Math.round(100 / Number(form.drain))} s)` : ""}.${cycleMelee === 0 && form.steal ? " No M = no Mana Steal." : ""}`
+              : "Empty = no mana filter. 1-4 = spells, M = main attack (Mana Steal only works on hits)."}
           </p>
         </fieldset>
       )}
@@ -8420,6 +8827,15 @@ function DamageForm({
           </label>
           <label className="flex items-center gap-2 text-xs text-zinc-200" title="When the set needs fewer skill points than your level gives, spend the rest where they raise the goal most (or first where they get the build over the filters). Off: the rest stays unspent, like a fresh build in Wynnbuilder.">
             <input id="new-free-sp" type="checkbox" className="mc-check" checked={form.freeSp !== false} onChange={() => set({ freeSp: form.freeSp === false })} /> Spend free skill points <span className="text-zinc-500">· shown as (+X)</span>
+          </label>
+          <label className="flex items-center gap-2 text-xs text-zinc-200" title="Off (default): identifications at their maximum roll, like Wynnbuilder. On: every rolled ID at 50% - then items with fixed IDs (mostly quest rewards) get an edge, because they always count at 100%.">
+            <input id="new-rolls" type="checkbox" className="mc-check" checked={form.rolls === "avg"} onChange={() => set({ rolls: form.rolls === "avg" ? "max" : "avg" })} /> Realistic rolls (50%) <span className="text-zinc-500">· default: max, like Wynnbuilder</span>
+          </label>
+          <label className="flex items-center gap-2 text-xs text-zinc-200" title="Adds Poison per second to the goal (spread over the casts for a spell). Off by default: how poison stacks and works on bosses isn't known, and counting it made the search pick poison-only items. The Poison DPS row in the Damage panel is always shown.">
+            <input id="new-poison" type="checkbox" className="mc-check" checked={Boolean(form.poison)} onChange={() => set({ poison: !form.poison })} /> Count poison in the goal
+          </label>
+          <label className="flex items-center gap-2 text-xs text-zinc-200" title="Also start from every build of this class generated in this session (other spells, EHP steps, filters). Can find a stronger build, but then the result depends on what you generated before. Off: the same settings always give the same build.">
+            <input id="new-history" type="checkbox" className="mc-check" checked={Boolean(form.history)} onChange={() => set({ history: !form.history })} /> Start from my earlier builds <span className="text-zinc-500">· this session</span>
           </label>
           <div className="mt-2">
             <ItemFilters options={options} onChange={onOptions} weaponType={classConfig ? classConfig.weapon : null} level={level || 120} onBrowse={onBrowse} />
@@ -8469,6 +8885,14 @@ function DamageForm({
           <p className={hint}>{ready ? "Damage first: the filters above are pass/fail." : !playerClass ? "Start with a class." : !rankConfirmed ? "Next: your rank." : !level ? "Next: your level." : "Next: an ability tree preset."}</p>
         )}
       </div>
+      {sweep && (
+        <div className="flex flex-col gap-1">
+          <button type="button" className="mc-link self-start text-xs" aria-expanded={sweepOpen} onClick={onSweepToggle}>
+            {sweepOpen ? "▾ List of builds for every EHP step" : "▸ List of builds for every EHP step (compare)"}
+          </button>
+          {sweepOpen && <EhpSweepList sweep={sweep} shownBuild={shownBuild} onPick={onSweepPick} />}
+        </div>
+      )}
     </div>
   );
 }
@@ -8543,6 +8967,13 @@ const WIZARD_STEPS = [
 ];
 
 const WIZARD_CPS = [2, 3, 4, 5, 6, 8];
+// dopuszczalny dren many: pełny sustain, lekki (długie walki), mocny, "burst" (pula znika w kilkanaście sekund)
+const WIZARD_DRAIN = [
+  [0, "Full sustain"],
+  [1, "Slight"],
+  [3, "Heavy"],
+  [8, "Burst"],
+];
 
 function WizardTile({ selected = false, onClick, children, className = "", title = undefined, disabled = false }) {
   return (
@@ -8552,7 +8983,90 @@ function WizardTile({ selected = false, onClick, children, className = "", title
   );
 }
 
-function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, level, levelInput, onLevelInput, treeIds, apCap, preset, onPreset, onEditTree, renderTree = null, goals, goal, form, onForm, ehpMax, options, onOptions, onGenerate, running, progress, onStop = null, treeSettings }) {
+// Podpowiedź pod wynikiem: zamiana Mastery na żywioł broni (np. bolt hybrid: Divzer -> Thunder, Epoch -> Air).
+function MasterySwapHint({ build, apCap, onApply, disabled = false }) {
+  const swap = useMemo(() => {
+    try {
+      return masterySwapSuggestion(build, apCap);
+    } catch (error) {
+      return null;
+    }
+  }, [build, apCap]);
+  if (!swap) return null;
+  const weapon = (build.slots.find((slot) => slot.id === "weapon") || {}).item;
+  return (
+    <p className="text-sm text-zinc-300" title="Same items and skill points, only the tree changes. Regenerating can pick items that fit the new Mastery even better.">
+      <span className="font-semibold" style={{ color: "#55FFFF" }}>Tree tip:</span> swap <b>{swap.from}</b> for <b>{swap.to}</b>
+      {swap.weaponElement && weapon ? ` (${weapon.name} deals ${swap.to.replace(" Mastery", "")} damage)` : ""}: <b className="text-green-400">+{(swap.gain * 100).toFixed(1)}%</b> {goalLabelOf(build)} with this build.{" "}
+      <button type="button" className="mc-btn mc-btn-sm" disabled={disabled} onClick={() => onApply(swap)}>
+        Swap &amp; regenerate
+      </button>
+    </p>
+  );
+}
+
+// Presety drzewek z poradnika: kafelki (kreator) albo zwarta lista (panel), z wyszukiwaniem po nazwach graczy.
+function GuideTreePresets({ playerClass, archetype, apCap, selected, onPick, compact = false }) {
+  const [query, setQuery] = useState("");
+  const all = treePresetsFor(playerClass);
+  if (all.length === 0) return null;
+  const shown = query.trim() ? all.filter((preset) => presetMatches(preset, query)) : all.filter((preset) => !archetype || preset.archetype === archetype);
+  const others = !query.trim() && archetype ? all.length - shown.length : 0;
+  const missing = archetype && !all.some((preset) => preset.archetype === archetype);
+  return (
+    <div className="flex min-w-0 flex-col gap-2">
+      <div className={compact ? "flex min-w-0 flex-col gap-1" : "flex flex-wrap items-center gap-2"}>
+        <span className={compact ? "text-xs text-zinc-300" : "text-sm text-zinc-300"}>Guide trees{archetype && !query.trim() ? ` · ${archetype}` : ""}</span>
+        <input
+          type="search"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="generalist, bolt hybrid, divzer…"
+          aria-label="Search guide trees by build name, variant or weapon"
+          className={compact ? "mc-input w-full min-w-0 text-xs" : "mc-input min-w-0 flex-1 text-xs"}
+          style={{ maxWidth: compact ? undefined : "18rem" }}
+        />
+      </div>
+      {missing && !query.trim() && <p className="text-xs text-zinc-500">No current guide tree for {archetype} (the guide's trees are from an older game version) - the suggested tree is used. Search to see other archetypes.</p>}
+      {shown.length === 0 && query.trim() && <p className="text-xs text-zinc-500">No guide tree matches "{query}".</p>}
+      <div className={compact ? "flex flex-col gap-1" : "grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3"}>
+        {shown.map((preset) => {
+          const on = selected === preset.id;
+          const trimmed = preset.points > apCap;
+          const title = `${preset.builds.join(", ")}. ${preset.points} AP${trimmed ? `; your ${apCap} AP keep the most useful part of it (the full tree comes back when you level up)` : ""}.${preset.cycle ? ` Guide cycle: ${preset.cycle.name} (${preset.cycle.cycle}).` : ""}`;
+          return compact ? (
+            <button key={preset.id} type="button" onClick={() => onPick(preset)} title={title} className={`mc-btn mc-btn-sm w-full min-w-0 justify-start overflow-hidden text-left ${on ? "mc-btn-on" : ""}`}>
+              <span className="min-w-0 truncate">
+                {preset.name}
+                <span className="text-zinc-500"> · {preset.weapons.slice(0, 2).join(", ")}{preset.weapons.length > 2 ? "…" : ""}{trimmed ? ` · trimmed to ${apCap} AP` : ""}</span>
+              </span>
+            </button>
+          ) : (
+            <WizardTile key={preset.id} selected={on} onClick={() => onPick(preset)} className="items-start text-left" title={title}>
+              <span className="text-base font-bold text-zinc-100">
+                {preset.name}
+                {(query.trim() || !archetype) && <span className="ml-1.5 text-xs font-normal text-zinc-500">{preset.archetype}</span>}
+              </span>
+              {preset.aliases.length > 0 && <span className="text-xs text-zinc-400">also: {preset.aliases.join(", ")}</span>}
+              <span className="text-xs text-zinc-400">
+                with {preset.weapons.slice(0, 4).join(", ")}
+                {preset.weapons.length > 4 ? ` +${preset.weapons.length - 4}` : ""}
+              </span>
+              <span className="text-xs text-zinc-500">
+                {preset.masteries.length > 0 ? `${preset.masteries.join(" / ")} Mastery · ` : ""}
+                {trimmed ? `${preset.points} AP → your ${apCap} AP` : `${preset.points} AP`}
+                {preset.cycle ? ` · cycle ${preset.cycle.cycle}` : ""}
+              </span>
+            </WizardTile>
+          );
+        })}
+      </div>
+      {others > 0 && <p className="text-xs text-zinc-500">{others} more for other {playerClass} archetypes - search to see them.</p>}
+    </div>
+  );
+}
+
+function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, level, levelInput, onLevelInput, treeIds, apCap, preset, onPreset, onGuideTree = null, treePreset = null, onEditTree, renderTree = null, goals, goal, form, onForm, ehpMax, options, onOptions, onGenerate, running, progress, onStop = null, treeSettings }) {
   const ts = useTs();
   const classConfig = CLASSES[playerClass];
   const firstOpen = !rankConfirmed ? "rank" : !level ? "level" : treeIds.length === 0 ? "tree" : null;
@@ -8570,12 +9084,12 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
   const set = (patch) => onForm((current) => ({ ...current, ...patch }));
   const step = ehpStep(ehpMax);
   const minEhp = form.minEhp === null || form.minEhp === undefined ? defaultMinEhp(ehpMax) : Math.min(form.minEhp, ehpMax);
-  const cycleDigits = [...String(form.cycle || "")].filter((digit) => "1234".includes(digit));
+  const cycleDigits = [...cycleText(parseCycle(form.cycle))];
   const preview = useMemo(() => (level && treeIds.length > 0 ? classPreview(playerClass, level, treeSettings) : null), [playerClass, level, treeIds, treeSettings]);
   const spells = preview ? preview.stats.spells : [];
   const combos = preset && ARCHETYPE_COMBOS[preset] ? ARCHETYPE_COMBOS[preset].combos : [];
-  const [customCycle, setCustomCycle] = useState(() => [...String(form.cycle || "")].filter((digit) => "1234".includes(digit)).join(""));
-  const cycleOf = (text) => [...String(text || "")].filter((char) => "1234".includes(char)).join("");
+  const [customCycle, setCustomCycle] = useState(() => cycleText(parseCycle(form.cycle)));
+  const cycleOf = (text) => cycleText(parseCycle(text));
   const cyclePresets = (() => {
     const list = combos.filter((entry) => /[1-4]/.test(entry.cycle)).map((entry) => ({ ...entry, source: null }));
     const seen = new Set(list.map((entry) => cycleOf(entry.cycle)));
@@ -8592,18 +9106,18 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
   const otherCyclePresets = classConfig.archetypes
     .filter((arch) => arch !== preset && ARCHETYPE_COMBOS[arch])
     .flatMap((arch) => ARCHETYPE_COMBOS[arch].combos.filter((entry) => /[1-4]/.test(entry.cycle)).map((entry) => ({ ...entry, source: arch })));
-  const customMana = customCycle ? cycleMana(spells, [...customCycle].map(Number), form.cps, form.gain) : null;
+  const customMana = customCycle ? cycleMana(spells, parseCycle(customCycle), form.cps, form.gain, form.drain) : null;
   const customSelected = cycleDigits.length > 0 && cycleDigits.join("") === customCycle && ![...cyclePresets, ...otherCyclePresets].some((entry) => cycleOf(entry.cycle) === customCycle);
   const renderCyclePreset = (entry) => {
-    const digits = [...entry.cycle].filter((char) => "1234".includes(char)).map(Number);
-    const mana = cycleMana(spells, digits, form.cps, form.gain);
+    const digits = parseCycle(entry.cycle);
+    const mana = cycleMana(spells, digits, form.cps, form.gain, form.drain);
     return (
       <WizardTile
         key={`${entry.source || ""}:${entry.name}`}
-        selected={cycleDigits.join("") === digits.join("")}
+        selected={cycleDigits.join("") === cycleText(digits)}
         onClick={() => {
-          set({ cycle: digits.join("") });
-          setCustomCycle(digits.join(""));
+          set({ cycle: cycleText(digits) });
+          setCustomCycle(cycleText(digits));
           next("mana");
         }}
         className="items-start text-left"
@@ -8615,7 +9129,7 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
         </span>
         <CycleSteps cycle={entry.cycle} playerClass={playerClass} spells={spells} compact />
         <span className="text-xs text-zinc-500">
-          {mana ? `${mana.used.toFixed(1)} mana/s at ${form.cps} clicks/s · items must give ${mana.fromItems.toFixed(1)}/s ≈ ${Math.ceil(mana.regen)} Mana Regen or ${Math.ceil(mana.steal)} Mana Steal` : "Some of these spells aren't in your tree yet."}
+          {mana ? cycleManaText(mana, form.cps) : "Some of these spells aren't in your tree yet."}
         </span>
       </WizardTile>
     );
@@ -8636,8 +9150,8 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
     tree: treeIds.length > 0 ? preset || "own tree" : null,
     goal: goal ? goal.name : null,
     ehp: treeIds.length > 0 ? `${Math.round((minEhp / Math.max(1, ehpMax)) * 100)}%` : null,
-    mana: treeIds.length > 0 ? (cycleDigits.length ? `${cycleDigits.join("")} · ${form.cps} cps` : "off") : null,
-    extras: treeIds.length > 0 ? [form.sustain ? "sustain" : null, form.noEvents !== false ? "no events" : null, form.tradeable ? "tradeable" : null, normalized.avoidNegativeDefences ? "no -def" : null].filter(Boolean).join(", ") || "none" : null,
+    mana: treeIds.length > 0 ? `${cycleDigits.length ? `${cycleDigits.join("")} · ${form.cps} cps${Number(form.drain) > 0 ? ` · −${form.drain}/s` : ""}` : "off"}${Number(form.lr) > 0 ? ` · life ≥ ${form.lr}` : ""}` : null,
+    extras: treeIds.length > 0 ? [form.sustain ? "sustain" : null, form.noEvents !== false ? "no events" : null, form.tradeable ? "tradeable" : null, normalized.avoidNegativeDefences ? "no -def" : null, form.rolls === "avg" ? "50% rolls" : null, form.poison ? "poison" : null, form.history ? "earlier builds" : null].filter(Boolean).join(", ") || "none" : null,
     generate: null,
   };
   const heading = {
@@ -8646,7 +9160,7 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
     tree: ["Ability tree", `Pick an archetype - its suggested tree for ${apCap} AP is shown below, where you can compare archetypes and click abilities to change it. "Use this tree" or Next goes on.`],
     goal: ["What to maximise", "One spell (one cast, crits included), the main attack (damage per second) - or click several to maximise their sum. Numbers: with the best weapon for your level alone."],
     ehp: ["How tanky", `Minimum effective HP, as a share of the most your level can reach (${formatNumber(ehpMax)}). Builds below it are thrown away.`],
-    mana: ["Mana: spell cycle", "The spells you cast in a loop must pay for themselves (Mana Regen, Mana Steal, ability mana). Pick a preset or type your own."],
+    mana: ["Mana: spell cycle", "The spells (1-4) and main attacks (M) you do in a loop must pay for themselves (Mana Regen, Mana Steal from M hits, ability mana), or lose at most the drain you allow. Pick a preset or type your own."],
     extras: ["Extras", "Optional filters - click to toggle."],
     generate: ["Ready", "The search runs until a pass finds nothing better: usually 5-30 s, up to ~1.5 min at level 100+ with a high EHP threshold and a mana cycle. You can change anything later in the panel on the left."],
   }[active] || ["", ""];
@@ -8774,11 +9288,26 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
             <span className="text-xs text-zinc-400">Custom - pick abilities yourself</span>
             <span className="text-xs text-zinc-500">{treeIds.length > 0 && !preset ? `${treeIds.length} abilities chosen` : "Opens the Ability tree tab; your tree is used as soon as you come back"}</span>
           </WizardTile>
+          {onGuideTree && treePresetsFor(playerClass).length > 0 && (
+            <div className="sm:col-span-2 xl:col-span-4">
+              <GuideTreePresets
+                playerClass={playerClass}
+                archetype={preset || null}
+                apCap={apCap}
+                selected={treePreset}
+                onPick={(entry) => {
+                  setView("tree");
+                  onGuideTree(entry);
+                  setTreeShown(true);
+                }}
+              />
+            </div>
+          )}
           {treeIds.length > 0 && (
             <div className="flex flex-col gap-2 sm:col-span-2 xl:col-span-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-sm text-zinc-300">
-                  <b className="mc-gold">{preset ? `${preset} tree` : "Your own tree"}</b> · {treeIds.length} abilities
+                  <b className="mc-gold">{preset ? `${treePreset ? (allTreePresets().find((entry) => entry.id === treePreset) || { name: preset }).name : preset} tree` : "Your own tree"}</b> · {treeIds.length} abilities
                   {treeResolved ? ` · ${treeResolved.points} / ${apCap} AP` : ""}
                 </span>
                 <div className="flex flex-wrap gap-2">
@@ -8813,6 +9342,11 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
               onClick={() => {
                 // kliknięcie zaznacza / odznacza; kilka zaznaczonych = maksymalizujemy ich sumę
                 const on = selectedGoals.some((id) => String(id) === String(entry.id));
+                // cały cykl to inna jednostka (obrażenia na sekundę cyklu) - wybierany sam, nie w sumie
+                if (entry.kind === "cycle" || selectedGoals.some((id) => isCycleGoal(id))) {
+                  set({ goal: on ? null : entry.id });
+                  return;
+                }
                 const ids = on ? selectedGoals.filter((id) => String(id) !== String(entry.id)) : [...selectedGoals, entry.id];
                 if (ids.length === 0) return;
                 set({ goal: ids.length === 1 ? ids[0] : ids });
@@ -8880,13 +9414,35 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
                 </WizardTile>
               ))}
             </div>
-            <label className="flex items-center gap-1.5 text-xs text-zinc-200">
-              <input type="checkbox" className="mc-check" checked={form.steal} onChange={() => set({ steal: !form.steal })} /> Mana Steal
+            <label className="flex items-center gap-1.5 text-xs text-zinc-200" title="Mana Steal only works on main attack hits - add M to the cycle">
+              <input type="checkbox" className="mc-check" checked={form.steal} onChange={() => set({ steal: !form.steal })} /> Mana Steal <span className="text-zinc-500">· from M hits</span>
             </label>
             <label className="flex items-center gap-1.5 text-xs text-zinc-200">
               <input type="checkbox" className="mc-check" checked={form.gain} onChange={() => set({ gain: !form.gain })} /> Mana from abilities
             </label>
           </div>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+            <span className="text-sm text-zinc-300">Allowed mana drain</span>
+            <div className="flex flex-wrap gap-1.5">
+              {WIZARD_DRAIN.map(([value, name]) => (
+                <WizardTile key={value} selected={(Number(form.drain) || 0) === value} onClick={() => set({ drain: value })} className="px-2 py-1" title={value === 0 ? "The cycle must pay for itself" : `The cycle may lose ${value} mana/s: 100 mana last about ${Math.round(100 / value)} s`}>
+                  <span className="text-sm font-bold text-zinc-100">{name}</span>
+                  <span className="text-xs text-zinc-500">{value === 0 ? "0 mana/s" : `${value}/s · 100 mana ≈ ${Math.round(100 / value)} s`}</span>
+                </WizardTile>
+              ))}
+            </div>
+          </div>
+          <label className="flex max-w-xl items-center gap-3 text-sm text-zinc-300" title="Minimum life recovery per second: Health Regen ÷ 4 s + Life Steal from the cycle's main attacks (M). 0 = no minimum. After generating, the panel on the left can suggest drain and life recovery for the strongest build.">
+            Life recovery
+            <McRange id="wiz-lr" min={0} max={lifeRecoveryMax(level)} step={5} value={Math.min(lifeRecoveryMax(level), Number(form.lr) || 0)} accent="#FF5555" onChange={(event) => set({ lr: Number(event.target.value) })} className="min-w-0 flex-1" aria-label="Minimum life recovery per second" />
+            <span className="w-28 text-right text-xs tabular-nums">{(Number(form.lr) || 0) === 0 ? "any" : `≥ ${formatNumber(Number(form.lr))} HP/s`}</span>
+          </label>
+          {goals.some((entry) => entry.kind === "cycle") && (
+            <label className="flex items-center gap-2 text-sm text-zinc-200" title="Maximise the damage per second of the whole cycle (every spell once per cast + every main attack hit) instead of one spell - the players' compromise for spells that deal their damage over time.">
+              <input type="checkbox" className="mc-check" checked={selectedGoals.some((id) => isCycleGoal(id))} onChange={() => set({ goal: selectedGoals.some((id) => isCycleGoal(id)) ? null : DAMAGE_GOAL_CYCLE })} />
+              Maximise the whole cycle <span className="text-zinc-500">· DPS of {cycleDigits.join("")} instead of one spell</span>
+            </label>
+          )}
 
           <div className="flex flex-col gap-1.5">
             <span className="text-sm text-zinc-300">{preset && combos.length > 0 ? `Presets for ${preset}` : "Presets"}</span>
@@ -8920,16 +9476,15 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
               <input
                 id="wizard-cycle"
                 value={customCycle}
-                onChange={(event) => setCustomCycle(event.target.value.replace(/[^1-4]/g, "").slice(0, 16))}
+                onChange={(event) => setCustomCycle(event.target.value.toUpperCase().replace(/[^1-4M]/g, "").slice(0, 16))}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && customCycle) {
                     set({ cycle: customCycle });
                     next("mana");
                   }
                 }}
-                placeholder="e.g. 1213"
-                inputMode="numeric"
-                aria-label="Your own spell cycle"
+                placeholder="e.g. 1213 or 4MMM"
+                aria-label="Your own spell cycle: 1-4 = spells, M = main attack"
                 className="mc-input w-0 min-w-0 flex-1 tabular-nums"
               />
               <button type="button" className="mc-btn mc-btn-sm" disabled={!customCycle} onClick={() => setCustomCycle(customCycle.slice(0, -1))} aria-label="Remove the last spell" title="Remove the last spell">
@@ -8939,7 +9494,13 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
                 ×
               </button>
             </div>
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+              <WizardTile disabled={customCycle.length >= 16} onClick={() => setCustomCycle(`${customCycle}M`)} className="p-2" title="A main attack between the spells: Mana Steal and Life Steal only work on hits">
+                <span className="text-sm font-bold" style={ts({ color: "#FFAA00" })}>
+                  + M · Main attack
+                </span>
+                <span className="text-xs text-zinc-500">steals mana</span>
+              </WizardTile>
               {[1, 2, 3, 4].map((id) => {
                 const spell = spells.find((entry) => entry.id === id);
                 const known = Boolean(spell && spell.cost !== null && spell.cost !== undefined);
@@ -8957,7 +9518,7 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
             {customCycle && <CycleSteps cycle={customCycle} playerClass={playerClass} spells={spells} compact />}
             {customCycle && (
               <span className="text-xs text-zinc-500">
-                {customMana ? `${customMana.used.toFixed(1)} mana/s at ${form.cps} clicks/s · items must give ${customMana.fromItems.toFixed(1)}/s ≈ ${Math.ceil(customMana.regen)} Mana Regen or ${Math.ceil(customMana.steal)} Mana Steal` : "Some of these spells aren't in your tree yet."}
+                {customMana ? cycleManaText(customMana, form.cps) : "Some of these spells aren't in your tree yet."}
               </span>
             )}
             <button
@@ -8983,6 +9544,9 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
               ["No event items", "Skip limited-time festival items", form.noEvents !== false, () => set({ noEvents: !(form.noEvents !== false) })],
               ["Tradeable only", "Only items you can buy on the Trade Market", Boolean(form.tradeable), () => set({ tradeable: !form.tradeable })],
               ["Spend free skill points", "Unneeded points go where they add most, shown as (+X)", form.freeSp !== false, () => set({ freeSp: form.freeSp === false })],
+              ["Realistic rolls (50%)", "Off: max rolls, like Wynnbuilder. On: every rolled ID at 50% (fixed-ID items then get an edge)", form.rolls === "avg", () => set({ rolls: form.rolls === "avg" ? "max" : "avg" })],
+              ["Count poison in the goal", "Adds Poison per second to the goal - off by default, it made the search pick poison-only items", Boolean(form.poison), () => set({ poison: !form.poison })],
+              ["Start from earlier builds", "Also start from builds you generated in this session (the result then depends on them)", Boolean(form.history), () => set({ history: !form.history })],
               ["Avoid negative defences", "No item with a negative elemental defence", normalized.avoidNegativeDefences, () => onOptions({ ...options, avoidNegativeDefences: !normalized.avoidNegativeDefences })],
             ].map(([label, hint, on, toggle]) => (
               <WizardTile key={label} selected={on} onClick={toggle} title={hint}>
@@ -9097,14 +9661,25 @@ function classPreview(playerClass, level, treeSettings, items = ITEM_DB) {
 
 // Mana w cyklu jak w filtrze zakładki New: liczą się tylko czary 1-4 (M/F z kombinacji nie kosztują many),
 // cykl trwa 3 kliknięcia na czar ÷ kliknięcia na sekundę.
-function cycleMana(spells, digits, cps, withGain) {
-  const casts = digits.map((id) => spells.find((spell) => spell.id === id)).filter(Boolean);
-  if (casts.length === 0 || casts.length !== digits.length) return null;
-  const seconds = (3 * casts.length) / Math.max(0.5, cps);
+// Mana cyklu przed wyborem broni (kreator, panel klasy): M liczymy przy normalnej szybkości ataku (2,05 trafienia/s).
+function cycleMana(spells, digits, cps, withGain, drain = 0) {
+  const spellIds = digits.filter((id) => id !== 0);
+  const casts = spellIds.map((id) => spells.find((spell) => spell.id === id)).filter(Boolean);
+  if (casts.length !== spellIds.length || digits.length === 0) return null;
+  const hps = HITS_PER_SECOND.NORMAL;
+  const timing = cycleTiming(digits, Math.max(0.5, cps), hps);
+  const seconds = Math.max(0.01, timing.seconds);
   const used = casts.reduce((sum, spell) => sum + (spell.cost || 0), 0) / seconds;
   const gained = withGain ? casts.reduce((sum, spell) => sum + (spell.manaGained || 0), 0) / seconds : 0;
-  const fromItems = Math.max(0, used - gained - BASE_MANA_REGEN / 5);
-  return { seconds, used, gained, fromItems, regen: fromItems * 5, steal: fromItems * 3 };
+  const fromItems = Math.max(0, used - gained - BASE_MANA_REGEN / 5 - Math.max(0, Number(drain) || 0));
+  // Mana Steal potrzebny, żeby trafienia M w cyklu pokryły resztę: steal/s = trafienia/s × (MS ÷ 3 ÷ hps)
+  const steal = timing.hitsPerSecond > 0 ? (fromItems * 3 * hps) / timing.hitsPerSecond : null;
+  return { seconds, used, gained, fromItems, regen: fromItems * 5, steal, melee: timing.melee };
+}
+function cycleManaText(mana, cps) {
+  const base = `${mana.used.toFixed(1)} mana/s at ${cps} clicks/s`;
+  if (mana.fromItems <= 0) return `${base} · sustained without items`;
+  return `${base} · items must give ${mana.fromItems.toFixed(1)}/s ≈ ${Math.ceil(mana.regen)} Mana Regen${mana.steal !== null ? ` or ${Math.ceil(mana.steal)} Mana Steal (normal attack speed)` : " (Mana Steal needs M hits in the cycle)"}`;
 }
 
 // Zakładka New bez wygenerowanego buildu: zaraz po wyborze klasy widać jej archetypy, czary z sugerowanego drzewka
@@ -9127,8 +9702,8 @@ function ClassOverview({ playerClass, level, levelKnown, apCap, preset, treeIds,
   const clicks = SPELL_CLICKS[playerClass] || SPELL_CLICKS.default;
   const names = CLASS_SPELL_NAMES[playerClass];
   const spells = preview ? preview.stats.spells : [];
-  const typed = [...String(form.cycle || "")].filter((digit) => "1234".includes(digit)).map(Number);
-  const typedMana = typed.length > 0 ? cycleMana(spells, typed, form.cps, form.gain) : null;
+  const typed = parseCycle(form.cycle);
+  const typedMana = typed.length > 0 ? cycleMana(spells, typed, form.cps, form.gain, form.drain) : null;
   const need = (mana) =>
     mana.fromItems <= 0 ? (
       <span style={ts({ color: "#55FF55" })}>free: base regen covers it</span>
@@ -9136,10 +9711,10 @@ function ClassOverview({ playerClass, level, levelKnown, apCap, preset, treeIds,
       <>
         needs <span className="tabular-nums text-zinc-100">{mana.fromItems.toFixed(1)}</span> mana/s from items ≈{" "}
         <span className="tabular-nums text-zinc-100">{Math.ceil(mana.regen)}</span> Mana Regen
-        {form.steal ? (
+        {form.steal && mana.steal !== null ? (
           <>
             {" "}
-            or <span className="tabular-nums text-zinc-100">{Math.ceil(mana.steal)}</span> Mana Steal
+            or <span className="tabular-nums text-zinc-100">{Math.ceil(mana.steal)}</span> Mana Steal (M hits, normal attack speed)
           </>
         ) : null}
       </>
@@ -9207,15 +9782,16 @@ function ClassOverview({ playerClass, level, levelKnown, apCap, preset, treeIds,
           </h3>
           <ul className="flex flex-col gap-2">
             {(combo ? combo.combos : []).map((entry) => {
-              const digits = [...entry.cycle].filter((char) => "1234".includes(char)).map(Number);
-              const mana = digits.length > 0 ? cycleMana(spells, digits, form.cps, form.gain) : null;
-              const current = typed.join("") === digits.join("") && arch === preset;
+              const digits = parseCycle(entry.cycle);
+              const hasSpell = digits.some((id) => id !== 0);
+              const mana = hasSpell ? cycleMana(spells, digits, form.cps, form.gain, form.drain) : null;
+              const current = cycleText(typed) === cycleText(digits) && arch === preset;
               return (
                 <li key={entry.name} className="flex flex-col gap-1">
                   <div className="flex flex-wrap items-baseline justify-between gap-x-2">
                     <span className="mc-gold text-sm font-bold">{entry.name}</span>
-                    {digits.length > 0 && (
-                      <button type="button" className={`mc-btn mc-btn-sm ${current ? "mc-btn-on" : ""}`} onClick={() => onUseCycle(arch, digits.join(""))} title="Use as the mana filter (and this archetype's tree)">
+                    {hasSpell && (
+                      <button type="button" className={`mc-btn mc-btn-sm ${current ? "mc-btn-on" : ""}`} onClick={() => onUseCycle(arch, cycleText(digits))} title="Use as the mana filter (and this archetype's tree)">
                         {current ? "In use" : "Use"}
                       </button>
                     )}
@@ -9227,7 +9803,7 @@ function ClassOverview({ playerClass, level, levelKnown, apCap, preset, treeIds,
                       <>
                         {mana.used.toFixed(1)} mana/s{mana.gained > 0 ? ` − ${mana.gained.toFixed(1)} from abilities` : ""} → {need(mana)}
                       </>
-                    ) : digits.length === 0 ? (
+                    ) : !hasSpell ? (
                       "Main attacks only: no mana filter."
                     ) : (
                       "A spell of this cycle isn't in the tree yet."
@@ -9280,7 +9856,7 @@ function DamageSummary({ build }) {
   );
   return (
     <div className="flex flex-wrap items-center gap-2">
-      {chip(build.goalName || "Damage", formatNumber(Math.round(metrics.damage)), null, build.goal === DAMAGE_GOAL_MAIN ? "Main attack damage per second - the number this build maximises" : "One hit of the chosen spell - the number this build maximises")}
+      {chip(build.goalName || "Damage", formatNumber(Math.round(metrics.damage)), null, build.goal === DAMAGE_GOAL_MAIN ? "Main attack damage per second - the number this build maximises" : isCycleGoal(build.goal) ? "Damage per second of the whole spell cycle (every spell once per cast + main attack hits) - the number this build maximises" : "One hit of the chosen spell - the number this build maximises")}
       {chip(
         "EHP",
         `${formatNumber(Math.round(metrics.ehp))}${metrics.minEhp > 0 ? ` / ${formatNumber(Math.round(metrics.minEhp))}` : ""}`,
@@ -9289,17 +9865,17 @@ function DamageSummary({ build }) {
       )}
       {cycle.ids.length > 0 &&
         chip(
-          `Cycle ${cycle.ids.join("")} @ ${cycle.cps}/s`,
+          `Cycle ${cycleText(cycle.ids)} @ ${cycle.cps}/s${cycle.drain ? `, drain ${drainLabel(cycle.drain)}` : ""}`,
           `${metrics.manaNet >= 0 ? "+" : ""}${metrics.manaNet.toFixed(1)} mana/s`,
-          metrics.cycleOk ? metrics.manaNet >= 0 : false,
-          `${metrics.manaUsed.toFixed(1)} mana/s used, ${(metrics.manaIncome + metrics.manaGain).toFixed(1)} from regen${cycle.steal ? " + steal" : ""}${cycle.gain ? " + abilities" : ""}`
+          manaOk(metrics, cycle),
+          `${metrics.manaUsed.toFixed(1)} mana/s used, ${(metrics.manaIncome + metrics.manaGain).toFixed(1)} from regen${cycle.steal && metrics.manaSteal ? " + steal from main attacks" : ""}${cycle.gain ? " + abilities" : ""}${cycle.drain ? `; up to ${cycle.drain} mana/s drain allowed` : ""}`
         )}
       {metrics.sustain !== undefined &&
         chip(
           "Life",
           `${metrics.sustain >= 0 ? "+" : ""}${metrics.sustain.toFixed(1)} HP/s`,
-          metrics.requireSustain ? metrics.sustain > 0 : null,
-          `Health Regen ${formatNumber(Math.round(metrics.hpr))}/4s + Life Steal ${formatNumber(Math.round(metrics.lifeSteal))}/3s${metrics.requireSustain ? " - the filter asks for more than 0" : ""}`
+          metrics.requireSustain || metrics.minSustain > 0 ? sustainPasses(metrics) : null,
+          `Life recovery: Health Regen ${formatNumber(Math.round(metrics.hpr))}/4s + Life Steal ${formatNumber(Math.round(metrics.lifeSteal))}${cycle.ids.length ? " from the cycle's main attacks" : "/3s"}${metrics.minSustain > 0 ? ` - the filter asks for at least ${formatNumber(metrics.minSustain)} HP/s` : metrics.requireSustain ? " - the filter asks for more than 0" : ""}`
         )}
       {chip(
         "Skill points",
@@ -9649,8 +10225,8 @@ function CustomStats({ options, onChange, archetype, weaponType, weaponCounts, l
         />
         <span>
           Prefer items from guide builds
-          <span className="block text-zinc-500" title="Builds from The Ultimate Build Guide (Wynncraft forums), per archetype.">
-            {archetypeConfig ? `${archetypeConfig.guideBuilds} guide build${archetypeConfig.guideBuilds === 1 ? "" : "s"}.` : "126 guide builds."}
+          <span className="block text-zinc-500" title="Builds from The Ultimate Build Guide (Wynncraft forums), per archetype. Off by default. The damage generator never gets a guide bonus: it scores guide builds like any other set.">
+            {archetypeConfig ? `${archetypeConfig.guideBuilds} guide build${archetypeConfig.guideBuilds === 1 ? "" : "s"}; off by default, items get +15–30% when on.` : "126 guide builds; off by default."}
           </span>
         </span>
       </label>
@@ -10879,7 +11455,135 @@ function WelcomeDialog() {
 // Pod suwakiem Effective HP: po jednym buildzie na każdy krok suwaka (0-100%, co 5%). Liczone w tle szybkim
 // przebiegiem generatora (effort "quick"), wiersz po wierszu; build, który przechodzi już wyższy próg, jest też
 // wynikiem dla niego (nie liczymy drugi raz). Kliknięcie wiersza pokazuje ten build.
-const SWEEP_COLUMNS = { display: "grid", gridTemplateColumns: "4.1em 4.1em 0.6em 4.1em 2em minmax(0,1fr)", alignItems: "baseline", columnGap: "0.25em" };
+const SWEEP_COLUMNS = { display: "grid", gridTemplateColumns: "3.2em 4.2em minmax(0,1fr) 3.4em 3.6em", alignItems: "baseline", columnGap: "0.4em" };
+
+// Suwak "Life recovery": do ile HP/s (Health Regen ÷ 4 + Life Steal z trafień) - skala rośnie z poziomem.
+function lifeRecoveryMax(level) {
+  return Math.max(50, Math.round(((level || 120) * 3) / 10) * 10);
+}
+function drainLabel(drain) {
+  return drain === null || drain === undefined || drain >= 999 ? "any" : drain === 0 ? "none" : `≤ ${drain}`;
+}
+// Zapas / dren many i odnawianie życia buildu w liście (kolumny "mana/s" i "life/s").
+function manaCell(metrics) {
+  if (!metrics || !metrics.cycle || !metrics.cycle.ids || metrics.cycle.ids.length === 0) return "—";
+  return `${metrics.manaNet >= 0 ? "+" : ""}${metrics.manaNet.toFixed(1)}`;
+}
+function lifeCell(metrics) {
+  return metrics && Number.isFinite(metrics.sustain) ? formatNumber(Math.round(metrics.sustain)) : "—";
+}
+
+// Limity drenu many, dla których liczymy podpowiedź (szybkie szukanie przy obecnym progu EHP); null = bez limitu.
+const TRADEOFF_DRAINS = [0, 1, 3, 6, null];
+// Podpowiedź przy suwakach Allowed drain i Life recovery: najmocniejszy build przy obecnym progu EHP dla kilku
+// limitów drenu. Proponujemy najmniejszy dren, który trzyma >= 97% najlepszych obrażeń, i odnawianie życia, które
+// ten build ma sam z siebie - ustawione na suwakach nie zabiera obrażeń (ten build nadal przechodzi).
+const TRADEOFF_KEEP = 0.97;
+function tradeoffSuggestion(rows) {
+  const all = rows.filter((row) => (row.status === "done" || row.status === "same") && row.build);
+  // wiersz "bez limitu" tylko dla porównania: build, który traci np. 27 many/s, nie utrzyma cyklu - podpowiadamy
+  // z limitów, przy których pula many starcza na dłużej
+  const limited = all.filter((row) => row.limit !== null);
+  const passed = limited.length > 0 ? limited : all;
+  if (passed.length === 0) return null;
+  const best = passed.reduce((top, row) => (!top || row.build.metrics.damage > top.build.metrics.damage ? row : top), null);
+  const pick = passed.find((row) => row.build.metrics.damage >= TRADEOFF_KEEP * best.build.metrics.damage) || best;
+  const m = pick.build.metrics;
+  const hasCycle = m.cycle && m.cycle.ids && m.cycle.ids.length > 0;
+  const drain = hasCycle && m.manaNet < 0 ? Math.ceil(-m.manaNet * 2) / 2 : 0;
+  const lr = Math.max(0, Math.floor(m.sustain / 5) * 5);
+  const cap = limited.length > 0 ? Math.max(...limited.map((row) => row.limit)) : null;
+  const unlimited = all.find((row) => row.limit === null) || null;
+  return { index: rows.indexOf(pick), drain, lr, damage: m.damage, best: best.build.metrics.damage, bestIndex: rows.indexOf(best), cap, unlimited: unlimited && unlimited.build.metrics.manaNet < 0 && unlimited.build.metrics.damage > best.build.metrics.damage * 1.001 ? { damage: unlimited.build.metrics.damage, manaNet: unlimited.build.metrics.manaNet } : null };
+}
+
+function TradeoffSuggest({ tradeoff, hasCycle, running, form, onRun, onUse, onPick, shownBuild }) {
+  const ts = useTs();
+  const rows = tradeoff ? tradeoff.rows : [];
+  const suggestion = tradeoff && !tradeoff.running ? tradeoff.suggestion : null;
+  const applied = suggestion && (Number(form.drain) || 0) === suggestion.drain && (Number(form.lr) || 0) === suggestion.lr;
+  if (!tradeoff) {
+    return (
+      <button
+        type="button"
+        className="mc-link self-start text-xs"
+        disabled={running}
+        onClick={onRun}
+        title={`Quick searches at your EHP threshold${hasCycle ? " with the mana drain allowed at 0, 1, 3, 6 mana/s, at your current drain (the generated build is reused) and without a limit" : ""}: suggests the smallest drain that keeps at least ${Math.round(TRADEOFF_KEEP * 100)}% of the strongest build's damage, and the life recovery that build has on its own.`}
+      >
+        ✦ Suggest {hasCycle ? "mana drain & life recovery" : "life recovery"} for this cycle
+      </button>
+    );
+  }
+  return (
+    <div className="wbr-drop mc-slot flex flex-col gap-0.5 px-2 py-2 text-xs">
+      <p className="text-zinc-400">
+        Strongest build at <span className="text-zinc-200">{formatNumber(Math.round(tradeoff.minEhp))} EHP</span>
+        {hasCycle ? " for each drain limit:" : ":"}
+      </p>
+      <div style={SWEEP_COLUMNS} className="pb-1 text-zinc-500">
+        <span className="text-right">drain</span>
+        <span className="text-right">EHP</span>
+        <span className="text-right">damage</span>
+        <span className="text-right" title="Mana balance of the cycle per second (negative = drain)">net/s</span>
+        <span className="text-right" title="Life per second after steal: Health Regen ÷ 4 s + Life Steal from main attack hits">life/s</span>
+      </div>
+      {rows.map((row, index) => {
+        const m = row.build ? row.build.metrics : null;
+        const current = Boolean(row.build && shownBuild && row.build === shownBuild);
+        const star = suggestion && suggestion.index === index;
+        return (
+          <button
+            key={String(row.limit)}
+            type="button"
+            disabled={!row.build}
+            onClick={() => onPick(row)}
+            style={{ ...SWEEP_COLUMNS, ...ts({ color: row.status === "fail" ? "#FF5555" : undefined, background: star ? "rgba(85,255,85,0.12)" : current ? "rgba(255,170,0,0.16)" : undefined }) }}
+            className={`tabular-nums text-left hover:bg-white/5 disabled:cursor-default ${star ? "font-bold" : ""}`}
+            title={row.status === "same" ? "A build found with less drain is stronger and passes this limit too, so it is the answer here as well" : row.build ? "Show this build" : ""}
+          >
+            <span className="text-right">{drainLabel(row.limit)}</span>
+            <span className="text-right">{m ? formatNumber(Math.round(m.ehp)) : ""}</span>
+            <span className="text-right">
+              {row.status === "running" ? <span className="text-zinc-400">searching…</span> : row.status === "pending" ? <span className="text-zinc-600">…</span> : row.status === "fail" ? "fails" : m ? `${row.status === "same" ? "= " : ""}${formatNumber(Math.round(m.damage))}` : ""}
+            </span>
+            <span className="text-right" style={m && m.manaNet < 0 ? ts({ color: "#55FFFF" }) : undefined}>{m ? manaCell(m) : ""}</span>
+            <span className="text-right">{m ? lifeCell(m) : ""}</span>
+          </button>
+        );
+      })}
+      {tradeoff.running ? (
+        <p className="pt-1 text-zinc-500">Quick search per limit…</p>
+      ) : suggestion ? (
+        <div className="flex flex-col gap-1 pt-1">
+          <p className="text-zinc-300">
+            Suggested: <b style={ts({ color: "#55FFFF" })}>{hasCycle ? (suggestion.drain > 0 ? `drain ${suggestion.drain} mana/s` : "no drain") : "no cycle"}</b> ·{" "}
+            <b style={ts({ color: "#FF5555" })}>life recovery ≥ {formatNumber(suggestion.lr)} HP/s</b>
+            <span className="text-zinc-500">
+              {" "}
+              ({suggestion.damage >= suggestion.best ? `the strongest build${suggestion.cap !== null ? ` up to ${suggestion.cap} mana/s of drain` : ""}` : `${((suggestion.damage / suggestion.best) * 100).toFixed(1)}% of the strongest${suggestion.cap !== null ? ` up to ${suggestion.cap} mana/s` : ""}`}; with these limits it still passes, so the damage stays)
+            </span>
+          </p>
+          {suggestion.unlimited && (
+            <p className="text-zinc-500">
+              Without a limit: {formatNumber(Math.round(suggestion.unlimited.damage))} ({((suggestion.unlimited.damage / suggestion.best - 1) * 100).toFixed(0)}% more), but it loses {Math.abs(suggestion.unlimited.manaNet).toFixed(1)} mana/s - 200 mana last about {Math.round(200 / Math.max(0.1, -suggestion.unlimited.manaNet))} s.
+            </p>
+          )}
+          <div className="flex flex-wrap gap-2">
+            <button type="button" className="mc-btn mc-btn-sm mc-btn-primary" disabled={applied} onClick={() => onUse(suggestion)}>
+              {applied ? "✓ Set" : "Use these limits"}
+            </button>
+            <button type="button" className="mc-link text-xs" onClick={onRun} disabled={running}>
+              Recompute
+            </button>
+          </div>
+        </div>
+      ) : (
+        <p className="pt-1 text-red-400">Nothing passes your EHP threshold with this cycle. Lower the EHP slider.</p>
+      )}
+    </div>
+  );
+}
 
 // Kolor od czerwonego (najmniej w liście) do zielonego (najwięcej), osobno dla EHP i obrażeń.
 function shadeColor(t) {
@@ -10892,36 +11596,55 @@ function shadeColor(t) {
   return `#${[channel(0), channel(8), channel(4)].map((value) => value.toString(16).padStart(2, "0")).join("")}`;
 }
 
+// Lista buildów dla każdego kroku suwaka EHP jako tabela porównawcza: EHP, obrażenia celu, mana na sekundę po
+// kradzieży (Mana Regen + Mana Steal z trafień M + mana z umiejętności) i życie na sekundę po kradzieży (Health
+// Regen + Life Steal). Kolory w każdej kolumnie od czerwonego (najgorzej w liście) do zielonego (najlepiej);
+// kolejność: od największych obrażeń (wiersze bez buildu na końcu).
+function manaFinal(metrics) {
+  return metrics ? (metrics.manaIncome || 0) + (metrics.manaGain || 0) : 0;
+}
 function EhpSweepList({ sweep, shownBuild, onPick }) {
   const ts = useTs();
   const rows = sweep.rows || [];
   const finished = rows.filter((row) => row.status !== "pending" && row.status !== "running").length;
-  const scored = rows.filter((row) => row.build && row.status !== "fail");
+  const scored = rows.filter((row) => row.build && row.status !== "fail" && row.status !== "unreachable");
   const range = (pick) => {
     const values = scored.map((row) => pick(row.build.metrics));
     return values.length ? [Math.min(...values), Math.max(...values)] : [0, 0];
   };
   const [ehpMin, ehpMax] = range((m) => m.ehp);
   const [dmgMin, dmgMax] = range((m) => m.damage);
+  const [manaMin, manaMax] = range((m) => manaFinal(m));
+  const [lifeMin, lifeMax] = range((m) => m.sustain || 0);
   const shade = (value, min, max) => ts({ color: shadeColor(max > min ? (value - min) / (max - min) : 1) });
+  const hasCycle = scored.some((row) => row.build.metrics.cycle && row.build.metrics.cycle.ids && row.build.metrics.cycle.ids.length > 0);
+  // od największych obrażeń; wiersze bez wyniku (szukane, nieosiągalne, bez buildu) na końcu, w kolejności kroków
+  const ordered = [...rows].sort((a, b) => {
+    const aScored = scored.includes(a);
+    const bScored = scored.includes(b);
+    if (aScored !== bScored) return aScored ? -1 : 1;
+    if (aScored && b.build.metrics.damage !== a.build.metrics.damage) return b.build.metrics.damage - a.build.metrics.damage;
+    return a.pct - b.pct;
+  });
   return (
     <div className="wbr-drop mc-slot flex flex-col gap-0.5 px-2 py-2 text-xs">
       <p className="text-zinc-400">
-        Best <span className="mc-gold">{sweep.goalLabel}</span> for each EHP step:
+        Best <span className="mc-gold">{sweep.goalLabel}</span> for each EHP step, strongest first:
       </p>
       <div style={SWEEP_COLUMNS} className="pb-1 text-zinc-500">
         <span className="text-right">step</span>
-        <span className="text-right" style={{ gridColumn: "2 / span 4" }}>
-          build EHP / min EHP
-        </span>
+        <span className="text-right" title="Effective HP of the build (the step's minimum is in the row's tooltip)">EHP</span>
         <span className="text-right">damage</span>
+        <span className="text-right" title="Mana per second after steal: (Mana Regen + 25) ÷ 5 + Mana Steal from the cycle's main attack hits + ability mana">mana/s</span>
+        <span className="text-right" title="Life per second after steal: Health Regen ÷ 4 s + Life Steal from main attack hits">life/s</span>
       </div>
       {rows.length === 0 && <p className="text-zinc-500">Starting…</p>}
-      {rows.map((row) => {
+      {ordered.map((row) => {
         const current = Boolean(row.build && shownBuild && row.build === shownBuild);
         const metrics = row.build ? row.build.metrics : null;
         const color = row.status === "fail" ? "#FF5555" : undefined;
-        const shaded = metrics && row.status !== "fail";
+        const shaded = Boolean(metrics) && scored.includes(row);
+        const balance = metrics && hasCycle ? ` Mana balance with the cycle: ${metrics.manaNet >= 0 ? "+" : ""}${metrics.manaNet.toFixed(1)}/s (spells cost ${metrics.manaUsed.toFixed(1)}/s).` : "";
         return (
           <button
             key={row.pct}
@@ -10930,7 +11653,7 @@ function EhpSweepList({ sweep, shownBuild, onPick }) {
             onClick={() => onPick(row)}
             style={{ ...SWEEP_COLUMNS, ...ts({ color, background: current ? "rgba(255,170,0,0.16)" : undefined, boxShadow: current ? "inset 2px 0 0 #FFAA00" : undefined }) }}
             className={`tabular-nums text-left hover:bg-white/5 disabled:cursor-default ${current ? "font-bold" : ""}`}
-            title={
+            title={`Minimum ${formatNumber(Math.round(row.minEhp))} EHP.${balance} ${
               row.status === "same"
                 ? "A build found for a neighbouring step also passes this one and deals at least as much, so it is the answer here too"
                 : row.status === "fail"
@@ -10938,17 +11661,14 @@ function EhpSweepList({ sweep, shownBuild, onPick }) {
                   : row.build
                     ? "Show this build"
                     : ""
-            }
+            }`}
           >
             <span className="text-right" style={current ? ts({ color: "#FFAA00" }) : undefined}>
               ({row.pct}%)
             </span>
             <span className="text-right" style={shaded ? shade(metrics.ehp, ehpMin, ehpMax) : undefined}>
-              {metrics ? formatNumber(Math.round(metrics.ehp)) : ""}
+              {metrics && row.status !== "unreachable" ? formatNumber(Math.round(metrics.ehp)) : ""}
             </span>
-            <span className="text-center text-zinc-500">/</span>
-            <span className="text-right">{formatNumber(Math.round(row.minEhp))}</span>
-            <span className="text-zinc-500">EHP</span>
             <span className="whitespace-nowrap text-right">
               {row.status === "running" ? (
                 <span className="text-zinc-400">searching…</span>
@@ -10965,11 +11685,19 @@ function EhpSweepList({ sweep, shownBuild, onPick }) {
                 </>
               )}
             </span>
+            <span className="text-right" style={shaded ? shade(manaFinal(metrics), manaMin, manaMax) : undefined}>
+              {shaded ? manaFinal(metrics).toFixed(1) : ""}
+            </span>
+            <span className="text-right" style={shaded ? shade(metrics.sustain || 0, lifeMin, lifeMax) : undefined}>
+              {shaded ? formatNumber(Math.round(metrics.sustain || 0)) : ""}
+            </span>
           </button>
         );
       })}
       <p className="pt-1 text-zinc-500">
-        {sweep.running ? `Searching ${finished} / ${rows.length}… (quick search per step)` : "Quick search per step · click a row to show that build."}
+        {sweep.running
+          ? `Searching ${finished} / ${rows.length}… (quick search per step)`
+          : "Quick search per step · click a row to show that build. Colours: red = worst in the list, green = best, per column."}
       </p>
     </div>
   );
@@ -10980,7 +11708,7 @@ function EhpSweepList({ sweep, shownBuild, onPick }) {
 // (wzory z liczbami), co wnosi każdy przedmiot i dlaczego nie wygrał najlepszy konkurent w jego slocie.
 function goalLabelOf(build) {
   if (!build) return "";
-  return build.goal === DAMAGE_GOAL_MAIN ? `${build.goalName || "Main attack"} DPS` : build.goalName || "Damage";
+  return build.goal === DAMAGE_GOAL_MAIN || isCycleGoal(build.goal) ? `${build.goalName || "Main attack"} DPS` : build.goalName || "Damage";
 }
 
 function buildItemPool(build, slotId) {
@@ -11019,8 +11747,8 @@ function explainBuild(build) {
     const fails = [];
     if (spOver > 0) fails.push(`needs ${spOver} skill point${spOver === 1 ? "" : "s"} more than level ${build.level} gives`);
     if (minEhp > 0 && metrics.ehp < minEhp) fails.push(`EHP ${formatNumber(Math.round(metrics.ehp))} < ${formatNumber(Math.round(minEhp))}`);
-    if (cycle.ids.length > 0 && !(metrics.cycleOk && metrics.manaNet >= 0)) fails.push(`mana ${metrics.manaNet.toFixed(1)}/s for the cycle`);
-    if (build.metrics.requireSustain && !(metrics.sustain > 0)) fails.push(`life sustain ${metrics.sustain.toFixed(1)} HP/s`);
+    if (!manaOk(metrics, cycle)) fails.push(`mana ${metrics.manaNet.toFixed(1)}/s for the cycle`);
+    if (!sustainPasses({ ...metrics, requireSustain: build.metrics.requireSustain, minSustain: build.metrics.minSustain })) fails.push(`life recovery ${metrics.sustain.toFixed(1)} HP/s`);
     return { metrics, fails };
   };
   const base = measure(picks);
@@ -11220,8 +11948,8 @@ function WhyBuildDialog({ build, onClose }) {
             </p>
             <div className="flex flex-col gap-1">
               <WhyRow label="Effective HP" value={m.minEhp > 0 ? `at least ${formatNumber(Math.round(m.minEhp))}` : "no minimum"} />
-              <WhyRow label="Mana: spell cycle" value={m.cycle.ids.length ? `${m.cycle.ids.join("")} at ${m.cycle.cps} clicks/s${m.cycle.steal ? ", Mana Steal counted" : ""}${m.cycle.gain ? ", ability mana counted" : ""}` : "no cycle"} />
-              <WhyRow label="Life sustain > 0" value={m.requireSustain ? "required" : "off"} />
+              <WhyRow label="Mana: spell cycle" value={m.cycle.ids.length ? `${cycleText(m.cycle.ids)} at ${m.cycle.cps} clicks/s${m.cycle.steal ? ", Mana Steal from main attacks (M)" : ""}${m.cycle.gain ? ", ability mana counted" : ""}${m.cycle.drain ? (m.cycle.drain >= 999 ? ", any drain" : `, drain up to ${m.cycle.drain} mana/s`) : ", full sustain"}` : "no cycle"} />
+              <WhyRow label="Life recovery" value={m.minSustain > 0 ? `at least ${formatNumber(m.minSustain)} HP/s` : m.requireSustain ? "more than 0 HP/s" : "no minimum"} />
               <WhyRow
                 label="Items"
                 value={[m.excludeEvents ? "no limited-time event items" : null, m.tradeableOnly ? "tradeable only" : null, options.attackSpeeds.length ? `weapon speed ${options.attackSpeeds.map((speed) => ATTACK_SPEED_LABELS[speed]).join("/")}` : null, options.avoidNegativeDefences ? "no negative defences" : null, (options.excludedTiers || []).length ? `no ${options.excludedTiers.join("/")}` : null].filter(Boolean).join(" · ") || "every item up to your level"}
@@ -11232,8 +11960,8 @@ function WhyBuildDialog({ build, onClose }) {
 
           <WhySection title={`The number it maximises: ${goalLabel}`}>
             <p>
-              <b className="wbr-welcome-hl text-lg">{formatNumber(Math.round(m.damage))}</b> {build.goal === DAMAGE_GOAL_MAIN ? "damage per second with the main attack" : Array.isArray(build.goal) ? "the sum of one cast of each chosen spell (crits included; the main attack counts its damage per second)" : "average damage of one cast, crits included"}
-              {m.cycle && data && data.base.metrics.poisonDps > 0 ? ` (incl. poison ${formatNumber(Math.round(data.base.metrics.poisonDps))}/s spread over the casts)` : ""}.
+              <b className="wbr-welcome-hl text-lg">{formatNumber(Math.round(m.damage))}</b> {build.goal === DAMAGE_GOAL_MAIN ? "damage per second with the main attack" : isCycleGoal(build.goal) ? "damage per second of the whole cycle: every spell once per cast plus every main attack hit, divided by the time the cycle takes (crits included)" : Array.isArray(build.goal) ? "the sum of one cast of each chosen spell (crits included; the main attack counts its damage per second)" : "average damage of one cast, crits included"}
+              {m.cycle && m.cycle.poison && data && data.base.metrics.poisonDps > 0 ? ` (incl. poison ${formatNumber(Math.round(data.base.metrics.poisonDps))}/s spread over the casts)` : ""}.
             </p>
             {!data && !error && <p className="wbr-welcome-muted">Calculating…</p>}
             {data && elementShares.length > 0 && (
@@ -11282,13 +12010,22 @@ function WhyBuildDialog({ build, onClose }) {
                 <>
                   <WhyRow
                     label="Mana in"
-                    value={`(Mana Regen ${formatNumber(Math.round(stat("mr")))} + 25) ÷ 5${m.cycle.steal ? ` + Mana Steal ${formatNumber(Math.round(stat("ms")))} ÷ 3` : ""}${m.manaGain > 0 ? ` + abilities ${m.manaGain.toFixed(1)}` : ""} = ${(m.manaIncome + m.manaGain).toFixed(1)}/s`}
+                    value={`(Mana Regen ${formatNumber(Math.round(stat("mr")))} + 25) ÷ 5${m.cycle.steal && m.manaSteal ? ` + Mana Steal ${formatNumber(Math.round(stat("ms")))} from main attacks ${m.manaSteal.toFixed(1)}` : m.cycle.steal && stat("ms") > 0 ? " (no M in the cycle, so no Mana Steal)" : ""}${m.manaGain > 0 ? ` + abilities ${m.manaGain.toFixed(1)}` : ""} = ${(m.manaIncome + m.manaGain).toFixed(1)}/s`}
                   />
-                  <WhyRow label="Mana out" value={`cycle ${m.cycle.ids.join("")}: ${m.manaUsed.toFixed(1)}/s (3 clicks per spell ÷ ${m.cycle.cps} clicks/s)`} />
-                  <WhyRow label="Balance" value={`${m.manaNet >= 0 ? "+" : ""}${m.manaNet.toFixed(1)} mana/s`} good={m.manaNet >= 0} />
+                  <WhyRow label="Mana out" value={`cycle ${cycleText(m.cycle.ids)}: ${m.manaUsed.toFixed(1)}/s (3 clicks per spell ÷ ${m.cycle.cps} clicks/s${m.cycle.ids.includes(0) ? ", M = one main attack at the weapon's attack speed" : ""})`} />
+                  <WhyRow label="Balance" value={`${m.manaNet >= 0 ? "+" : ""}${m.manaNet.toFixed(1)} mana/s${m.cycle && m.cycle.drain ? (m.cycle.drain >= 999 ? " (any drain allowed)" : ` (drain up to ${m.cycle.drain} allowed)`) : ""}`} good={manaOk(m, m.cycle)} />
                 </>
               )}
-              <WhyRow label="Life sustain" value={`Health Regen ${formatNumber(Math.round(m.hpr))}/4 s + Life Steal ${formatNumber(Math.round(m.lifeSteal))}/3 s = ${m.sustain >= 0 ? "+" : ""}${m.sustain.toFixed(1)} HP/s`} good={m.requireSustain ? m.sustain > 0 : null} />
+              <WhyRow
+                label="Life sustain"
+                value={`Health Regen ${formatNumber(Math.round(m.hpr))}/4 s + Life Steal ${formatNumber(Math.round(m.lifeSteal))}${m.cycle && m.cycle.ids && m.cycle.ids.length ? (m.cycle.ids.includes(0) ? " from the cycle's main attacks" : " (no M in the cycle, so 0)") : "/3 s"} = ${m.sustain >= 0 ? "+" : ""}${m.sustain.toFixed(1)} HP/s`}
+                good={m.requireSustain || m.minSustain > 0 ? sustainPasses(m) : null}
+              />
+              <WhyRow
+                label="Effective health gain"
+                value={`${(m.healthGain ?? (m.sustain * m.ehp) / Math.max(1, m.hp)) >= 0 ? "+" : ""}${formatNumber(Math.round(m.healthGain ?? (m.sustain * m.ehp) / Math.max(1, m.hp)))} EHP/s (life sustain × EHP ÷ HP)`}
+                hint="How much effective health the sustain gives back each second: defences and agility make every healed point worth more."
+              />
               <WhyRow
                 label="Skill points"
                 value={`${sp.minimum ?? sp.required} needed of ${sp.available}${sp.free && SKILLS.some((skill) => sp.free[skill] > 0) ? ` · free points spent: ${SKILLS.filter((skill) => sp.free[skill] > 0).map((skill) => `+${sp.free[skill]} ${SKILL_STYLE[skill].short}`).join(", ")}` : ""}`}
@@ -11510,6 +12247,111 @@ function treeNodeHeuristic(node, archetype, playerClass) {
   if (/^Cheaper /.test(node.name)) return 0.55;
   if (/Proficiency/.test(node.name)) return 0.5;
   return 0.35;
+}
+
+// PRESETY DRZEWEK Z PORADNIKA (feedback z Discorda: "ability trees should be presets", "idk AI knows what generalist
+// is"). Każde aktualne drzewko z src/guide-trees.json to preset z nazwą podarchetypu, której używają gracze
+// ("Generalist", "Upperbash", "Bolt Hybrid", "Heavy Melee"...) i listą broni, z którymi autorzy go grają. Te same
+// drzewka (np. wersje Crafted / Non Crafted jednego buildu) łączymy w jeden preset z kilkoma nazwami i broniami.
+// Drzewko ułożone na 120 poziom przycina fitTreeToCap do AP gracza; zapisane drzewko wraca po podniesieniu poziomu.
+const ARCHETYPE_WORDS = { "Light Bender": ["light bender", "lightbender"], "Battle Monk": ["battle monk", "battlemonk"] };
+function subArchetypeName(label, archetype) {
+  let text = ` ${String(label || "").toLowerCase()} `;
+  (ARCHETYPE_WORDS[archetype] || [archetype.toLowerCase()]).forEach((word) => {
+    text = text.split(` ${word} `).join(" ");
+  });
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return "Standard";
+  return words.map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(" ");
+}
+let TREE_PRESET_CACHE = null;
+function allTreePresets() {
+  if (TREE_PRESET_CACHE) return TREE_PRESET_CACHE;
+  const guides = new Map((GUIDE_DATA.builds || []).map((entry) => [entry.name, entry]));
+  const presets = [];
+  (GUIDE_TREES.trees || []).forEach((entry) => {
+    const tree = TREE_INDEX[entry.class];
+    if (!tree) return;
+    const byName = new Map(tree.nodes.map((node) => [node.name, node.id]));
+    const ids = entry.nodes.map((name) => byName.get(name)).filter((id) => id !== undefined);
+    if (ids.length === 0 || ids.length !== entry.nodes.length) return;
+    const resolved = resolveTree(tree, ids);
+    if (resolved.invalid.length > 0) return;
+    const guide = guides.get(entry.name);
+    const weapon = guide && guide.items && guide.items.weapon ? guide.items.weapon.replace(/^Masterwork /, "") : entry.name.split(" - ")[0];
+    const label = guide ? guide.label : (entry.name.split(" - ")[1] || "").replace(/\(.*\)/, "").trim();
+    const alias = subArchetypeName(label, entry.archetype);
+    const signature = `${entry.class}:${[...ids].sort((a, b) => a - b).join(",")}`;
+    let preset = presets.find((item) => item.signature === signature);
+    if (!preset) {
+      preset = { id: signature, playerClass: entry.class, archetype: entry.archetype, ids, signature, points: resolved.points, aliasWeapons: new Map(), weapons: [], builds: [], extra: entry.source === "extra" };
+      presets.push(preset);
+    }
+    if (!preset.aliasWeapons.has(alias)) preset.aliasWeapons.set(alias, new Set());
+    preset.aliasWeapons.get(alias).add(weapon);
+    if (!preset.weapons.includes(weapon)) preset.weapons.push(weapon);
+    preset.builds.push(entry.name);
+  });
+  presets.forEach((preset) => {
+    // nazwa: podarchetyp z największą liczbą broni (przy remisie dłuższa, bardziej opisowa nazwa)
+    const aliases = [...preset.aliasWeapons.entries()].sort((a, b) => b[1].size - a[1].size || b[0].length - a[0].length).map(([name]) => name);
+    const named = aliases.filter((name) => name !== "Standard");
+    // bez nazwy podarchetypu: archetyp + broń z poradnika ("Shadestepper · Grimtrap")
+    preset.name = named[0] || `${preset.archetype} · ${preset.weapons[0]}${preset.weapons.length > 1 ? ` +${preset.weapons.length - 1}` : ""}`;
+    preset.aliases = aliases.filter((name) => name !== preset.name && name !== "Standard");
+    // podpowiedź cyklu: combo archetypu o tej samej nazwie (np. "Upperbash" -> 4311)
+    const combos = ARCHETYPE_COMBOS[preset.archetype] ? ARCHETYPE_COMBOS[preset.archetype].combos : [];
+    const combo = combos.find((entry) => [preset.name, ...preset.aliases].some((name) => entry.name.toLowerCase().includes(name.toLowerCase()) || name.toLowerCase().includes(entry.name.toLowerCase().replace(/ fallen| paladin/g, ""))));
+    preset.cycle = combo ? { name: combo.name, cycle: combo.cycle } : null;
+    const tree = TREE_INDEX[preset.playerClass];
+    preset.masteries = preset.ids.map((id) => tree.byId.get(id)).filter((node) => node && / Mastery$/.test(node.name)).map((node) => node.name.replace(" Mastery", ""));
+  });
+  TREE_PRESET_CACHE = presets;
+  return presets;
+}
+function treePresetsFor(playerClass, archetype = null) {
+  return allTreePresets().filter((preset) => preset.playerClass === playerClass && (!archetype || preset.archetype === archetype));
+}
+// wyszukiwanie po nazwach graczy: podarchetyp, inne nazwy, broń, archetyp ("generalist", "bolt hybrid", "divzer")
+function presetMatches(preset, query) {
+  const text = String(query || "").trim().toLowerCase();
+  if (!text) return true;
+  const haystack = [preset.name, ...preset.aliases, ...preset.weapons, preset.archetype, ...preset.builds].join(" | ").toLowerCase();
+  return text.split(/\s+/).every((word) => haystack.includes(word));
+}
+
+// Mastery pod żywioł broni: po wygenerowaniu sprawdzamy zamianę jednej aktywnej Mastery na inną (np. Air -> Thunder,
+// gdy broń bije Thunderem, jak Divzer w bolt hybrid). Zamiana musi dać poprawne drzewko w limicie AP; liczymy ten sam
+// zestaw z tymi samymi skill pointami. Pokazujemy najlepszą, gdy daje > 0,5% celu.
+function masterySwapSuggestion(build, apCap) {
+  if (!build || build.mode !== "damage" || !build.treeSettings || !build.skillPoints) return null;
+  const tree = TREE_INDEX[build.playerClass];
+  if (!tree) return null;
+  const ids = build.treeSettings.selected || [];
+  const active = new Set(ids);
+  const masteries = tree.nodes.filter((node) => /^(Earth|Thunder|Water|Fire|Air) Mastery$/.test(node.name));
+  const on = masteries.filter((node) => active.has(node.id));
+  const off = masteries.filter((node) => !active.has(node.id));
+  if (on.length === 0 || off.length === 0) return null;
+  const env = { treeSettings: build.treeSettings, goal: build.goal, cycle: build.metrics.cycle };
+  const { items, weapon, totals, cycle } = extrasBase(build, env);
+  if (!weapon) return null;
+  const before = evaluateGoal(damageGoalContext(build.playerClass, build.level, build.treeSettings), items, weapon, totals, build.goal, cycle);
+  if (!(before.damage > 0)) return null;
+  const weaponElements = Object.entries(weapon.damage || {}).filter(([element, value]) => element !== "neutral" && value > 0).map(([element]) => element);
+  let best = null;
+  on.forEach((from) => {
+    off.forEach((to) => {
+      const next = ids.filter((id) => id !== from.id).concat(to.id);
+      const resolved = resolveTree(tree, next);
+      if (resolved.invalid.length > 0 || resolved.points > apCap) return;
+      const settings = { ...build.treeSettings, selected: next };
+      const after = evaluateGoal(damageGoalContext(build.playerClass, build.level, settings), items, weapon, totals, build.goal, cycle);
+      const gain = after.damage / before.damage - 1;
+      if (gain > 0.005 && (!best || gain > best.gain)) best = { from: from.name, to: to.name, ids: next, gain, manaOk: manaOk(after, cycle), weaponElement: weaponElements.includes(to.name.replace(" Mastery", "").toLowerCase()) };
+    });
+  });
+  return best;
 }
 
 function guideTreesFor(playerClass, archetype) {
@@ -12937,7 +13779,7 @@ function SolverPanel({ solver, onChange, level, result, running, onSolve, onShow
 // ich w sobie, więc bierze drzewko tej klasy i cel/cykl z formularza (albo najmocniejszy czar drzewka).
 function extrasEnvFor(build, treeSettings, formGoal, formCycle) {
   if (build.mode === "damage" && build.treeSettings && build.metrics) {
-    return { treeSettings: build.treeSettings, goal: build.goal, cycle: build.metrics.cycle, minEhp: build.metrics.minEhp || 0, requireSustain: Boolean(build.metrics.requireSustain), goalName: build.goalName };
+    return { treeSettings: build.treeSettings, goal: build.goal, cycle: build.metrics.cycle, minEhp: build.metrics.minEhp || 0, requireSustain: Boolean(build.metrics.requireSustain), minSustain: build.metrics.minSustain || 0, goalName: build.goalName };
   }
   const goals = damageGoalOptions(build.playerClass, build.level, treeSettings);
   const picked = goals.find((entry) => formGoal !== null && String(entry.id) === String(formGoal)) || goals[0] || null;
@@ -13168,7 +14010,7 @@ function TomesPanel({ build, env }) {
         </div>
         <p className="text-sm text-zinc-400">
           Every slot gets the tome that adds the most to this build together with the tomes already picked, using the generator's model ({env.goalName}, effective HP,
-          mana and life sustain). The same tome twice is allowed, as in game. Values at the 50% roll, like the items.
+          mana and life sustain). The same tome twice is allowed, as in game. Values at the same roll as the items.
         </p>
         <ExtrasSummary before={result.before} after={result.after} env={env} what="tomes" />
         {totals.length > 0 && <p className="text-xs text-zinc-400">From tomes: {totals.join(" · ")}</p>}
@@ -13562,8 +14404,9 @@ function warmEnginePool() {
 function rehydrateBuild(build, params) {
   const slots = build.slots.map((slot) => {
     if (!slot.item) return slot;
-    const base = ITEM_BY_NAME.get(slot.item.name);
-    if (!base) return slot;
+    const plainBase = ITEM_BY_NAME.get(slot.item.name);
+    if (!plainBase) return slot;
+    const base = slot.item.rolls ? withRolls(plainBase, slot.item.rolls) : plainBase;
     if (!slot.item.powders) return { ...slot, item: base };
     const powdered = powderedWeapon(base, slot.item.powders.mixed ? params.powders : slot.item.powders.element);
     const same = powdered && powdered.powders && JSON.stringify(powdered.powders.list) === JSON.stringify(slot.item.powders.list);
@@ -13645,6 +14488,9 @@ export default function BuildRecommender() {
   const [sweepOpen, setSweepOpen] = useState(false);
   const [sweep, setSweep] = useState(null);
   const sweepToken = useRef(0);
+  // podpowiedź drenu many i odnawiania życia (przy suwakach Allowed drain / Life recovery)
+  const [tradeoff, setTradeoff] = useState(null);
+  const tradeoffToken = useRef(0);
   const sweepSource = useRef(null);
   const [whyOpen, setWhyOpen] = useState(false);
   const [damageProgress, setDamageProgress] = useState(null);
@@ -13728,8 +14574,8 @@ export default function BuildRecommender() {
     [treeIds, treeEffects, playerClass]
   );
   const damageGoals = useMemo(
-    () => (buildMode === "new" && playerClass && level && treeIds.length > 0 ? damageGoalOptions(playerClass, level, damageTreeSettings) : []),
-    [buildMode, playerClass, level, treeIds, damageTreeSettings]
+    () => (buildMode === "new" && playerClass && level && treeIds.length > 0 ? damageGoalOptions(playerClass, level, damageTreeSettings, ITEM_DB, { ids: parseCycle(damageForm.cycle), cps: damageForm.cps }) : []),
+    [buildMode, playerClass, level, treeIds, damageTreeSettings, damageForm.cycle, damageForm.cps]
   );
   const ehpMax = playerClass && level ? reachableEhp(playerClass, level) : 100000;
   const damageGoal = resolveGoal(damageGoals, damageForm.goal);
@@ -13740,15 +14586,38 @@ export default function BuildRecommender() {
     level,
     treeIds,
     damageGoal ? damageGoal.id : null,
-    [...String(damageForm.cycle || "")].filter((digit) => "1234".includes(digit)).join(""),
+    cycleText(parseCycle(damageForm.cycle)),
     damageForm.cps,
     damageForm.steal,
     damageForm.gain,
+    Boolean(damageForm.poison),
+    damageForm.rolls || "max",
+    Number(damageForm.drain) || 0,
+    Number(damageForm.lr) || 0,
     Boolean(damageForm.sustain),
     damageForm.noEvents !== false,
     Boolean(damageForm.tradeable),
     damageForm.freeSp !== false,
     itemFilterKey(normalizeOptions(options)),
+  ]);
+  // podpowiedź zależy od tego samego, oprócz samych suwaków drenu i życia, plus od progu EHP
+  const tradeoffKeyNow = JSON.stringify([
+    playerClass,
+    level,
+    treeIds,
+    damageGoal ? damageGoal.id : null,
+    cycleText(parseCycle(damageForm.cycle)),
+    damageForm.cps,
+    damageForm.steal,
+    damageForm.gain,
+    Boolean(damageForm.poison),
+    damageForm.rolls || "max",
+    Boolean(damageForm.sustain),
+    damageForm.noEvents !== false,
+    Boolean(damageForm.tradeable),
+    damageForm.freeSp !== false,
+    itemFilterKey(normalizeOptions(options)),
+    Math.round(damageMinEhp),
   ]);
   // ograniczenia ustawione w zakładce "Old" (rzadkości, budżet, przypięte, rynek) działają też tutaj
   const damageRestrictions = useMemo(() => {
@@ -13768,8 +14637,8 @@ export default function BuildRecommender() {
   const extrasTabLocked = extrasLocked(extrasLevel);
   const extrasTabVisible = tab === "aspects" || tab === "tomes";
   const formCycle = useMemo(
-    () => ({ ids: [...String(damageForm.cycle || "")].filter((digit) => "1234".includes(digit)).map(Number), cps: damageForm.cps, steal: damageForm.steal, gain: damageForm.gain }),
-    [damageForm.cycle, damageForm.cps, damageForm.steal, damageForm.gain]
+    () => formCycleOf(damageForm),
+    [damageForm]
   );
   const formGoalId = damageGoal && build && build.playerClass === playerClass ? damageGoal.id : null;
   const extrasEnv = useMemo(
@@ -13784,9 +14653,13 @@ export default function BuildRecommender() {
           generated.playerClass !== playerClass ||
           goalKey(generated.goal) !== (damageGoal ? goalKey(damageGoal.id) : "null") ||
           Math.round(generated.metrics.minEhp) !== Math.round(damageMinEhp) ||
-          generated.metrics.cycle.ids.join("") !== [...String(damageForm.cycle || "")].filter((digit) => "1234".includes(digit)).join("") ||
+          cycleText(generated.metrics.cycle.ids) !== cycleText(parseCycle(damageForm.cycle)) ||
           generated.metrics.cycle.cps !== damageForm.cps ||
+          Boolean(generated.metrics.cycle.poison) !== Boolean(damageForm.poison) ||
+          (generated.metrics.cycle.drain || 0) !== (Number(damageForm.drain) || 0) ||
+          (generated.metrics.rollPercent || 100) !== (damageForm.rolls === "avg" ? 50 : 100) ||
           Boolean(generated.metrics.requireSustain) !== Boolean(damageForm.sustain) ||
+          (generated.metrics.minSustain || 0) !== (Number(damageForm.lr) || 0) ||
           Boolean(generated.metrics.excludeEvents) !== (damageForm.noEvents !== false) ||
           Boolean(generated.metrics.tradeableOnly) !== Boolean(damageForm.tradeable) ||
           (generated.metrics.spendFreeSkillPoints !== false) !== (damageForm.freeSp !== false) ||
@@ -13808,13 +14681,131 @@ export default function BuildRecommender() {
   function applyTreePreset(arch) {
     const suggestion = suggestAbilityTree(playerClass, arch, apCap);
     setTreeSelections((current) => ({ ...current, [playerClass]: suggestion.ids }));
-    setDamageForm((current) => ({ ...current, preset: arch, goal: null }));
+    setDamageForm((current) => ({ ...current, preset: arch, treePreset: null, goal: null }));
     setArchetype(arch);
+  }
+
+  // "Swap & regenerate": nowe drzewko, a po jego przeliczeniu (efekt na treeIds) od razu nowe szukanie
+  const [regenerateAfterTree, setRegenerateAfterTree] = useState(false);
+  function applyMasterySwap(swap) {
+    setTreeSelections((current) => ({ ...current, [playerClass]: swap.ids }));
+    setDamageForm((current) => ({ ...current, preset: current.preset, treePreset: null }));
+    setRegenerateAfterTree(true);
+  }
+  useEffect(() => {
+    if (!regenerateAfterTree) return;
+    setRegenerateAfterTree(false);
+    handleGenerateDamage();
+  }, [treeIds]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // drzewko z poradnika (preset z nazwą podarchetypu): zapisujemy całe, poziom przycina je do AP (fitTreeToCap)
+  function applyGuideTree(preset) {
+    setTreeSelections((current) => ({ ...current, [preset.playerClass]: preset.ids }));
+    setDamageForm((current) => ({ ...current, preset: preset.archetype, treePreset: preset.id, goal: null }));
+    setArchetype(preset.archetype);
   }
 
   function useCycle(arch, digits) {
     if (arch !== damageForm.preset || treeIds.length === 0) applyTreePreset(arch);
     setDamageForm((current) => ({ ...current, cycle: digits }));
+  }
+
+  // Ustawienia generatora z formularza (bez progu EHP i bez zestawów startowych).
+  function damageParams() {
+    return {
+      playerClass,
+      level,
+      archetype: damageForm.preset || archetype || null,
+      treeSettings: damageTreeSettings,
+      goal: damageGoal.id,
+      cycle: formCycleOf(damageForm),
+      rollPercent: damageForm.rolls === "avg" ? 50 : 100,
+      useHistory: Boolean(damageForm.history),
+      requireSustain: Boolean(damageForm.sustain),
+      minSustain: Math.max(0, Number(damageForm.lr) || 0),
+      excludeEvents: damageForm.noEvents !== false,
+      tradeableOnly: Boolean(damageForm.tradeable),
+      spendFreeSkillPoints: damageForm.freeSp !== false,
+      options,
+      powders: options.powders,
+    };
+  }
+
+  // ---- podpowiedź: dren many i odnawianie życia dla najmocniejszego buildu przy obecnym EHP ----
+  async function runTradeoff() {
+    if (!playerClass || !level || treeIds.length === 0 || !damageGoal) return;
+    const token = (tradeoffToken.current += 1);
+    const key = tradeoffKeyNow;
+    const params = damageParams();
+    const hasCycle = params.cycle.ids.some((id) => id !== 0);
+    const current = Math.max(0, Number(damageForm.drain) || 0);
+    const limits = hasCycle ? [...new Set([...TRADEOFF_DRAINS.filter((limit) => limit !== null), current])].sort((a, b) => a - b).concat([null]) : [null];
+    const rows = limits.map((limit) => ({ limit, status: "pending", build: null }));
+    const minEhp = damageMinEhp;
+    // wygenerowany build z tymi samymi ustawieniami (bez minimum życia) to gotowy wiersz dla obecnego drenu
+    const shown = result && result.build && result.build.mode === "damage" && !outdated && !(result.build.metrics.minSustain > 0) ? result.build : null;
+    const publish = (running) => {
+      if (tradeoffToken.current !== token) return;
+      setTradeoff({ key, rows: rows.map((row) => ({ ...row })), running, minEhp, suggestion: running ? null : tradeoffSuggestion(rows) });
+    };
+    publish(true);
+    const seedOf = (build) => ({ picks: Object.fromEntries(build.slots.filter((slot) => slot.item && slot.id !== "weapon").map((slot) => [slot.id, slot.item])), weapon: build.slots.find((slot) => slot.id === "weapon").item });
+    // wygenerowany build od razu w swoim wierszu (i jako start dla pozostałych)
+    if (shown && hasCycle) {
+      const own = rows.find((row) => row.limit === current);
+      if (own) {
+        own.build = shown;
+        own.status = shown.passed ? "done" : "fail";
+      }
+    }
+    for (const [index, row] of rows.entries()) {
+      if (tradeoffToken.current !== token) return;
+      // słabszy limit (mniejszy dren) jest też spełniony przy większym: najlepszy dotąd build przechodzi i tutaj
+      const carried = rows.slice(0, index).filter((entry) => entry.status === "done" || entry.status === "same").reduce((top, entry) => (!top || entry.build.metrics.damage > top.metrics.damage ? entry.build : top), null);
+      if (row.build) {
+        if (carried && row.status === "done" && carried.metrics.damage > row.build.metrics.damage) {
+          row.build = carried;
+          row.status = "same";
+        }
+        continue;
+      }
+      row.status = "running";
+      publish(true);
+      try {
+        // bez minimum życia (widać, ile build ma sam z siebie); dren: limit wiersza, null = bez limitu; startujemy też
+        // z buildów z poprzednich wierszy (szybkie szukanie bywa słabsze niż pełne)
+        const seeds = rows.filter((entry) => entry.build).map((entry) => seedOf(entry.build));
+        const build = await runDamageGeneration({ ...params, seeds, minEhp, minSustain: 0, cycle: { ...params.cycle, drain: row.limit === null ? 999 : row.limit }, effort: "quick" });
+        if (tradeoffToken.current !== token) return;
+        if (carried && (!build.passed || carried.metrics.damage > build.metrics.damage)) {
+          row.build = carried;
+          row.status = "same";
+        } else {
+          row.build = build;
+          row.status = build.passed ? "done" : "fail";
+        }
+      } catch (error) {
+        if (error.cancelled) {
+          if (tradeoffToken.current === token) setTradeoff(null);
+          return;
+        }
+        row.status = "fail";
+      }
+      publish(true);
+    }
+    publish(false);
+  }
+
+  function applyTradeoff(suggestion) {
+    setDamageForm((current) => ({ ...current, drain: suggestion.drain, lr: suggestion.lr }));
+  }
+
+  function pickTradeoffRow(row) {
+    if (!row.build) return;
+    setResult({ build: row.build, run: (result ? result.run : 0) + 1, ms: row.build.stats ? row.build.stats.ms : 0, at: new Date() });
+    setGuideView(null);
+    setSolverView(null);
+    setTab("build");
   }
 
   function handleGenerateDamage() {
@@ -13825,27 +14816,13 @@ export default function BuildRecommender() {
     setDamageRunning(true);
     setDamageProgress({ label: "Starting", fraction: 0 });
     setBuildError(null);
-    const cycleDigits = [...String(damageForm.cycle || "")].filter((digit) => "1234".includes(digit)).join("");
-    // Portfel sesji: każdy build tej klasy wygenerowany w tej sesji (inny cel, próg EHP, cykl, poziom, filtry) jest
-    // punktem startu dla następnego - generator i tak sprawdza go od nowa pod bieżące filtry i bieżący cel. Testy
-    // portfelowe pokazały, że build zbudowany pod jeden czar bywa lepszy w innym niż build zbudowany pod ten drugi.
+    // Portfel sesji (opcja "Start from my earlier builds", domyślnie wyłączona): każdy build tej klasy wygenerowany w tej
+    // sesji jest punktem startu dla następnego. Bez niej te same ustawienia zawsze dają ten sam build (feedback:
+    // "roulette builds" - wynik zależał od tego, co gracz generował wcześniej).
     const historyKey = playerClass;
-    const seeds = damageHistory.current.get(historyKey) || [];
+    const seeds = damageForm.history ? damageHistory.current.get(historyKey) || [] : [];
     // te same ustawienia (bez progu EHP) liczy potem lista buildów pod suwakiem
-    const params = {
-      playerClass,
-      level,
-      archetype: damageForm.preset || archetype || null,
-      treeSettings: damageTreeSettings,
-      goal: damageGoal.id,
-      cycle: { ids: [...String(damageForm.cycle || "")].filter((digit) => "1234".includes(digit)).map(Number), cps: damageForm.cps, steal: damageForm.steal, gain: damageForm.gain },
-      requireSustain: Boolean(damageForm.sustain),
-      excludeEvents: damageForm.noEvents !== false,
-      tradeableOnly: Boolean(damageForm.tradeable),
-      spendFreeSkillPoints: damageForm.freeSp !== false,
-      options,
-      powders: options.powders,
-    };
+    const params = damageParams();
     const key = sweepKeyNow;
     setTimeout(async () => {
       try {
@@ -13875,6 +14852,13 @@ export default function BuildRecommender() {
     if (ENGINE_POOL) ENGINE_POOL.cancel();
   }
 
+  // zmiana ustawień przerywa podpowiedź drenu/życia (liczona dla innych ustawień)
+  useEffect(() => {
+    if (tradeoff && tradeoff.key !== tradeoffKeyNow) {
+      tradeoffToken.current += 1;
+      setTradeoff(null);
+    }
+  }, [tradeoffKeyNow]); // eslint-disable-line react-hooks/exhaustive-deps
   // ---- lista buildów dla kolejnych progów EHP ----
   // zmiana ustawień przerywa liczenie listy dla starych ustawień (wynik i tak byłby ukryty)
   useEffect(() => {
@@ -13924,7 +14908,7 @@ export default function BuildRecommender() {
         row.status = "running";
         publish(true);
         try {
-          const seeds = damageHistory.current.get(source.params.playerClass) || [];
+          const seeds = source.params.useHistory ? damageHistory.current.get(source.params.playerClass) || [] : [];
           const build = await runDamageGeneration({ ...source.params, seeds, minEhp: row.minEhp, effort: "quick" });
           if (sweepToken.current !== token) return;
           row.build = build;
@@ -14144,6 +15128,7 @@ export default function BuildRecommender() {
                   treePoints={treePoints}
                   apCap={apCap}
                   onPreset={applyTreePreset}
+                  onGuideTree={applyGuideTree}
                   onEditTree={() => setTab("tree")}
                   form={damageForm}
                   onForm={setDamageForm}
@@ -14163,6 +15148,10 @@ export default function BuildRecommender() {
                   onSweepToggle={toggleSweep}
                   onSweepPick={pickSweepRow}
                   shownBuild={result && result.build && result.build.mode === "damage" ? result.build : null}
+                  tradeoff={tradeoff && tradeoff.key === tradeoffKeyNow ? tradeoff : null}
+                  onTradeoff={runTradeoff}
+                  onTradeoffUse={applyTradeoff}
+                  onTradeoffPick={pickTradeoffRow}
                 />
               {buildError && <p className="text-xs text-red-400">{buildError}</p>}
             </section>
@@ -14226,7 +15215,7 @@ export default function BuildRecommender() {
                 onChange={(ids) => {
                   setTreeSelections((current) => ({ ...current, [playerClass]: ids }));
                   // ręczna zmiana drzewka = "własne drzewko" (archetyp do przewodnika i Build info zostaje w `archetype`)
-                  setDamageForm((current) => (current.preset ? { ...current, preset: "" } : current));
+                  setDamageForm((current) => (current.preset || current.treePreset ? { ...current, preset: "", treePreset: null } : current));
                 }}
                 buildArchetype={archetype}
                 onUseArchetype={(arch) => setArchetype(arch)}
@@ -14301,6 +15290,8 @@ export default function BuildRecommender() {
                 apCap={apCap}
                 preset={damageForm.preset}
                 onPreset={applyTreePreset}
+                onGuideTree={applyGuideTree}
+                treePreset={damageForm.treePreset || null}
                 onEditTree={() => setTab("tree")}
                 renderTree={() => (
                   <AbilityTree
@@ -14311,7 +15302,7 @@ export default function BuildRecommender() {
                     fullPoints={storedTreePoints}
                     onChange={(ids) => {
                       setTreeSelections((current) => ({ ...current, [playerClass]: ids }));
-                      setDamageForm((current) => (current.preset ? { ...current, preset: "" } : current));
+                      setDamageForm((current) => (current.preset || current.treePreset ? { ...current, preset: "", treePreset: null } : current));
                     }}
                     buildArchetype={archetype}
                     onUseArchetype={(arch) => setArchetype(arch)}
@@ -14420,7 +15411,7 @@ export default function BuildRecommender() {
                   <p className="text-sm text-zinc-400">
                     {build.mode === "damage" ? (
                       <>
-                        Damage first · <span className="tabular-nums font-bold text-amber-400">{formatNumber(Math.round(build.metrics.damage))}</span> {build.goal === DAMAGE_GOAL_MAIN ? "main attack DPS" : Array.isArray(build.goal) ? `${build.goalName} (sum of one cast each)` : `per ${build.goalName} hit`} · from{" "}
+                        Damage first · <span className="tabular-nums font-bold text-amber-400">{formatNumber(Math.round(build.metrics.damage))}</span> {build.goal === DAMAGE_GOAL_MAIN ? "main attack DPS" : isCycleGoal(build.goal) ? `${build.goalName} DPS` : Array.isArray(build.goal) ? `${build.goalName} (sum of one cast each)` : `per ${build.goalName} hit`} · from{" "}
                       </>
                     ) : (
                       <>
@@ -14470,13 +15461,26 @@ export default function BuildRecommender() {
                   {warning}
                 </p>
               ))}
+              {!viewed && build.mode === "damage" && build.playerClass === playerClass && <MasterySwapHint build={build} apCap={apCap} onApply={applyMasterySwap} disabled={damageRunning} />}
               {build.mode !== "damage" && <WeightChips profile={build.profile} />}
               {build.mode !== "damage" && <ScoreGuide build={build} />}
               <p
                 className="text-xs text-zinc-500"
-                title="Identifications are shown and scored at a 50% roll (positive IDs = 80% of base, negative = base); in game they roll 30–130%. The [xx%] tag after each value is the roll; press Rolls on a card to set your own item's rolls."
+                title={
+                  build.metrics && build.metrics.rollPercent === 50
+                    ? "This build was generated with Realistic rolls: identifications at a 50% roll (positive IDs = 80% of base, negative = base). Items with fixed IDs (mostly quest rewards) always count at 100%, so they get an edge. The [xx%] tag after each value is the roll; press Rolls on a card to set your own item's rolls."
+                    : "Identifications are shown and scored at their max roll (100%), like Wynnbuilder, so the numbers match the exported build. In game they roll 30–130% of base. The [xx%] tag after each value is the roll; press Rolls on a card to set your own item's rolls."
+                }
               >
-                Average rolls <span className="mc-gold">(50%)</span>
+                {build.metrics && build.metrics.rollPercent === 50 ? (
+                  <>
+                    Realistic rolls <span className="mc-gold">(50%)</span> · items with fixed IDs keep 100% and get an edge
+                  </>
+                ) : (
+                  <>
+                    Max rolls <span className="mc-gold">(100%, like Wynnbuilder)</span>
+                  </>
+                )}
                 {Object.keys(rolls).length > 0 ? (
                   <>
                     {" "}
@@ -14610,6 +15614,7 @@ export const __engine = {
   GUIDE_DATA,
   ARCHETYPE_COMBOS,
   DAMAGE_GOAL_MAIN,
+  DAMAGE_GOAL_CYCLE,
   MAX_ASSIGNED_PER_SKILL,
   WEAPON_CLASS,
   generateDamageBuild,
@@ -14632,4 +15637,18 @@ export const __engine = {
   classPreview,
   setBonusSkills,
   allocateFreeSkillPoints,
+  parseCycle,
+  cycleText,
+  normalizeCycle,
+  cycleTiming,
+  stealPerSecond,
+  manaOk,
+  rolledItems,
+  HITS_PER_SECOND,
+  allTreePresets,
+  treePresetsFor,
+  presetMatches,
+  masterySwapSuggestion,
+  sustainPasses,
+  DAMAGE_BEAM,
 };

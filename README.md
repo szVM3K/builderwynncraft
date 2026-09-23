@@ -33,6 +33,7 @@ npm run test:sp      # skill point solver only: 20,000 random item sets, a few s
 npm run test:wynnbuilder  # "Open in Wynnbuilder" links: 10 builds encoded and decoded back, ~1 min
 npm run test:stable  # same settings twice = same build (5 scenarios), a few minutes
 npm run test:workers # Web Worker tasks give the same build as one thread (2 scenarios), a few minutes
+npm run test:discord # Discord feedback fixes: rolls, Mana/Life Steal from M hits, poison, drain, life recovery, whole cycle, guide tree presets
 npm run test:deep    # deep optimality certificate: exhaustive pair swaps + triples for 8 builds, ~15-20 min
 npm run test:matrix  # the matrix only
 npm run test:soak    # endless random scenarios in parallel shards until Ctrl+C
@@ -147,16 +148,36 @@ The generator asks *what is the strongest build that still survives and still pa
    they burn and how much Mana Regen *or* Mana Steal your items would need to sustain them. **Use** on a cycle puts
    it into the mana filter (and loads that archetype's tree). Before a class is chosen the page shows the five
    class portraits to pick from.
-2. **Rank** and **level**, then an **ability tree** preset (or your own tree from the Ability tree tab).
+2. **Rank** and **level**, then an **ability tree**: an archetype (the suggested tree for your AP), a **guide tree**
+   (below), or your own tree from the Ability tree tab.
 3. **Maximise**: the main attack or one spell from the tree - or several at once (click more tiles in the setup
    guide, or tap the spell chips under the Maximise list in the left panel - each tap adds or removes one): then the search maximises their sum (one cast of each; the main attack counts its damage per second).
+   With a spell cycle set there is also **Whole cycle** (e.g. `Whole cycle 4311MM`): every spell of the cycle once
+   per cast plus every main attack hit (M), divided by the time the cycle takes - the compromise players suggested
+   for spells that deal their damage over time (Multihit, Arrow Storm, totems): maximise the total spell damage of
+   the cycle at an acceptable mana drain.
 4. **Must have** (pass/fail, never weights):
    - **Effective HP** – a slider in 5% steps of the most EHP your level can reach (`src/ehp-range.json`).
-   - **Life sustain > 0** (optional) – Health Regen per second (raw × (1 + %), ÷ 4 s) plus Life Steal (÷ 3 s)
-     must stay above zero, so the build doesn't drain your health.
-   - **Mana: spell cycle** – spells you cast, clicks per second, Mana Steal and ability mana on/off. Income is
-     `(Mana Regen + 25) / 5 + Mana Steal / 3`, the cycle lasts `3 × spells / clicks per second`. The clicks field
-     can be cleared and retyped (0.5–12); leaving it empty puts the last valid value back.
+   - **Life sustain > 0** (optional) – life recovery (below) must stay above zero, so the build doesn't drain your
+     health.
+   - **Mana: spell cycle** – spells (1-4) and main attacks (**M**) you do in a loop, clicks per second, Mana Steal
+     and ability mana on/off. A spell is 3 clicks; M is one main attack, never faster than the weapon's attacks per
+     second (after attack speed tiers). Income is `(Mana Regen + 25) / 5` plus Mana Steal **only from the cycle's M
+     hits**: each hit gives `Mana Steal / 3 / attacks per second` (Wynnbuilder's "mana per hit"), so a cycle
+     without M gets no Mana Steal and slow weapons get more per hit. The clicks field can be cleared and retyped
+     (0.5–12); leaving it empty puts the last valid value back.
+   - **Allowed drain** (0-20 mana/s; setup guide: Full sustain / Slight / Heavy / Burst) – the cycle may lose this
+     much mana per second: the filter is `mana balance ≥ −drain` instead of `≥ 0`. The hint shows how long 100
+     mana last.
+   - **Life recovery** (0 = any) – minimum `Health Regen / 4 s + Life Steal` in HP per second. Life Steal, like
+     Mana Steal, comes from main attack hits: with a cycle only from its M hits (`Life Steal / 3 / attacks per
+     second` each), without a cycle from constant main attacks (`Life Steal / 3`).
+   - **✦ Suggest mana drain & life recovery** (under the two sliders): quick searches at your EHP threshold with the
+     drain allowed at 0, 1, 3, 6 mana/s, at your current drain (the generated build is reused for it) and without a
+     limit, shown as a table (drain limit, EHP, damage, mana and life per second; click a row to see the build). The suggestion is the smallest drain that keeps at least 97% of the
+     strongest build with a limited drain, and the life recovery that build has on its own - so **Use these limits**
+     doesn't cost damage: that build still passes them. The row without a limit is only for comparison (a build
+     losing 27 mana/s can't keep the cycle going); the line under the table says how long its mana would last.
 5. **Items** (pinned items always stay):
    - *No limited-time event items* (on by default) skips the items you can only get during a festival (74 in the
      current `src/event-items.json`).
@@ -168,24 +189,50 @@ The generator asks *what is the strongest build that still survives and still pa
      secret, see above; disabled without data).
    - *Pin items · rarities · budget* (folded): pin an item to its slot (the rest is fitted around it), allowed
      rarities, and the emerald budget when prices are available.
+   - *Realistic rolls (50%)* (off): identifications count at their **max roll by default, like Wynnbuilder**, so the
+     numbers match the exported build. On: every rolled ID at 50% (positive = 80% of base) - items with fixed IDs
+     (mostly quest rewards) then get an edge, and the result says so.
+   - *Count poison in the goal* (off): adds Poison per second to the goal (spread over the casts for a spell). Off
+     by default - how poison stacks and works on bosses isn't known, and counting it made the search pick
+     poison-only items (Tarred Gem, Nightlock). The Poison DPS row in the Damage panel is always shown.
+   - *Start from my earlier builds* (off): also start from every build of the class generated in this session.
+     Off, the same settings always give the same build.
 
 **Setup guide**: after picking a class the main panel walks through the rest the same way - big clickable tiles for
 the rank, the level, the ability tree (an archetype - the guide stays on this step and shows the loaded tree below
-the tiles, so you can compare archetypes and click abilities to adjust it, then **Use this tree ›**; or **Your own
-tree**: it opens the Ability tree tab, where a "Back to the setup guide" button returns with the tree you clicked
-together), what to maximise (one or several spells) (every spell of the tree and the main attack,
+the tiles, so you can compare archetypes and click abilities to adjust it, then **Use this tree ›**; a **guide
+tree**; or **Your own tree**: it opens the Ability tree tab, where a "Back to the setup guide" button returns with
+the tree you clicked together), what to maximise (one or several spells) (every spell of the tree and the main attack,
 with its damage using the best weapon for your level), how tanky (Glass cannon 0% … Wall 70% of the reachable EHP,
 with the numbers), the mana cycle (clicks per second 2-8 and Mana Steal / ability mana on or off; presets: no filter,
 the archetype's suggested cycles, a "spam" loop for every damage spell of the tree and - folded - the cycles of the
 class's other archetypes; or **Your own cycle**: type the spell numbers or click the spells to add them, with the
-steps and the Mana Regen / Mana Steal it needs shown live) and extras (life sustain, event items, tradeable only, negative defences, weapon attack speed), then a
-summary with Generate. **‹ Previous** and **Next ›** at the bottom of every step move one step back or on
+steps and the Mana Regen / Mana Steal it needs shown live; M adds a main attack; allowed drain tiles, the Life
+recovery slider and "Maximise the whole cycle") and extras (life sustain, event items, tradeable only, negative
+defences, weapon attack speed, realistic rolls, poison, earlier builds), then a summary with Generate. **‹ Previous** and **Next ›** at the bottom of every step move one step back or on
 (Previous on the rank step returns to the class choice). A row of steps on top shows what is chosen and jumps back to any step; the left panel shows
 the same settings. On a phone the guide comes before the form.
 
-**List of builds** (under the Effective HP slider, after a build is generated): one build for every step of the
-slider, 0% to 100%, as `(25%)  9,540 / 9,380 EHP  33,205` - the build's EHP, the minimum of that step and the goal's
-damage, in columns so the numbers line up. The rows are computed in the background with a quick version of the
+**Guide trees** (setup guide's tree step, and "Guide trees" under the archetype buttons in the left panel): every
+current tree from The Ultimate Build Guide (`src/guide-trees.json`) as a preset, named the way players name the
+variant - *Generalist*, *Upperbash*, *Bash Upper*, *Bolt Hybrid*, *Spell*, *Heavy Melee* (the guide build's label
+without the archetype) - with the weapons the guide plays it with, its masteries, AP and the matching cycle.
+Identical trees of several guide builds (Crafted / Non Crafted, different weapons) are one preset with all their
+names ("Bolt Hybrid · also: Hybrid" for Stratiformis, Divzer and Eschaton). The search box finds presets by those
+names, weapons or archetypes ("generalist", "bolt hybrid", "divzer"). A tree laid out for 50 AP is trimmed to your AP
+(the full tree comes back when you level up). Archetypes whose guide trees are from an older game version have none.
+
+**Tree tip: swap Mastery** (under the result): after generating, every swap of one active elemental Mastery for
+another (e.g. Air → Thunder when the weapon deals Thunder, like Divzer in a bolt hybrid) is checked on the same
+items and skill points; if the tree stays valid within your AP and the goal gains more than 0.5%, the best swap is
+shown with **Swap & regenerate**.
+
+**List of builds for every EHP step** (at the bottom of the left panel, after a build is generated): one build for
+every step of the Effective HP slider, 0% to 100%, as a comparison table sorted by damage (strongest first): the
+step, the build's EHP, the goal's damage, **mana/s** after steal (`(Mana Regen + 25) / 5` + Mana Steal from the
+cycle's M hits + ability mana; the balance with the cycle is in the row's tooltip) and **life/s** after steal
+(Health Regen / 4 s + Life Steal from main attack hits). Every column is coloured from red (worst in the list) to
+green (best), so you see what each extra step of EHP costs in damage, mana and life. The rows are computed in the background with a quick version of the
 search (no +20% EHP beam, no beams for other spells, fewer candidates polished; about 2-4 s per step at level
 100); a build that already passes the next step is also the answer for it and isn't searched twice, a build found for
 a higher step that deals more replaces the lower steps' builds (so the list only goes down), and once a step finds
@@ -226,6 +273,19 @@ filters). The Skill points panel and the summary show them in brackets: `Strengt
 **Spend free skill points** (Items, on by default) turns this off - the rest then stays unspent, as in a fresh
 Wynnbuilder build.
 
+**Weapon and powder screening.** A weapon's damage on its own is a poor predictor of the best build: at level 100
+with a Battle Monk cycle, Infused Hive Spear is 44th by its bare damage, but a set built around it with **fire**
+powders (the element that is *weakest* for the bare weapon - fire damage and Defence items make it) beats the best
+Thrundacrack set by 16%. So besides the 5 weapons with the most bare damage, the search now also takes the 2 with the
+most *potential* (bare damage with the level's free skill points spent on the goal, best powder element), and
+screens the 8 weapons with the most potential with **every** powder element through a narrow beam (3 wide); the 2
+best weapon + element pairs join the full search. Their sets get their own places in every later stage (short and
+full polish, strong starts), so they can only add to the result, never push out a set that would have won
+before. Measured on 10 scenarios at levels 90-120 (cycles, EHP 20-35%): 3 builds stronger (+0.5%, +10%, +17%), none
+weaker, about 1.6 times the time. The Battle Monk case itself is still missed (the QA matrix reports it as
+BETTER_BUILD_KNOWN: a Fallen build passes the same filters with +7%); a search pinned to Infused Hive Spear with
+fire powders finds +16%, so the weapon + element choice is the next thing to improve.
+
 **Exact pair swaps.** The winner of every pass then gets the same pair check as the deep test, inside the search:
 candidate lists per slot (best by damage, EHP, skill point cost, mana, strongest that break a filter alone, empty
 slot, every weapon with every powder element), every pair of slots × every pair from the lists, exact skill points
@@ -247,10 +307,10 @@ third click (before: 24, and four got weaker); the one exception had nothing pas
 the tie-break on damage. The price is time: about 2-3 times longer than before, typically 5-30 s, up to ~1.5 min
 for level 100+ builds with a high EHP threshold and a mana cycle.
 
-Every build of the class generated in the same session (any goal, EHP threshold, cycle, level or filters) is fed
-into the next search as a starting point and re-checked against the current filters (and checked exactly "as is"
-at the end), so switching spells or dragging the EHP slider never loses a better build you already found. A
-progress bar shows the stage and pass.
+With **Start from my earlier builds** (off by default), every build of the class generated in the same session (any
+goal, EHP threshold, cycle, level or filters) is fed into the next search as a starting point and re-checked
+against the current filters (and checked exactly "as is" at the end). It is off by default because it made results
+depend on what you generated before ("roulette builds"). A progress bar shows the stage and pass.
 
 **Background thread (Web Worker).** The search runs in a Web Worker, so the page never freezes while it works
 (before: frames froze for up to ~0.7 s at a time) and **Stop** (next to the progress bar) ends it at once and keeps
@@ -347,8 +407,18 @@ keeps a community rating of **which identifications actually matter on a given i
 - **Wynnbuilder-style breakdowns**: the main attack and every spell from the tree expand into their parts
   (per-element multipliers, average with crits, non-crit and crit ranges per element, healing), followed by
   Mana Regen with the base (+25/5s), Mana Steal per hit, Total Mana (100 + Max Mana + Intelligence), Effective
-  Life Steal, Life per hit, Walk Speed and main attack range. The spell cycle calculator (e.g. "1213" at
-  9 clicks/s) shows mana use and balance.
+  Life Steal, Life per hit, Walk Speed and main attack range. The spell cycle calculator (e.g. "1213" or "4MMM"
+  at 9 clicks/s; it starts with the generated build's cycle) shows mana use and balance, Mana Steal only from the M
+  hits, and **Spell timing** (folded): every damage spell with its damage per cast and how long it deals it
+  (Arrow Storm's arrows, Phantom Ray's beam, totems, Smoke Bomb... - base values from the ability tree data) plus
+  what players report about recasting (Multihit for Acrobat, Fireworks).
+- **Effective health gain** (Survivability): life recovery × EHP ÷ HP - how much effective health the sustain
+  gives back per second (defences and Agility make every healed point worth more). Also in Why this build?.
+- **Powder special** (Damage panel): when the weapon has two tier IV+ powders of one element, its special - Quake,
+  Chain Lightning and Courage with their damage per hit (percent of the weapon's damage as that element, main
+  attack scaling, crits), Curse (+damage taken), Wind Prison (next hit bonus) - with the level from the powders'
+  average tier (4 … 7) and the radius / chains. Values as on the wiki and in Wynnbuilder. Shown for reference; the
+  generator doesn't count it (how often it fires isn't known).
 - **Effective Health (game)** is computed as on the in-game Combat Information screen:
   HP ÷ (1 − Defence %) ÷ (1 − Agility %) without the class multiplier, next to Wynnbuilder's EHP. The
   "[100%] Spell Damage" and "[100%] Main Attack Damage" blocks show the per-element ranges and the total bonus
@@ -366,6 +436,32 @@ keeps a community rating of **which identifications actually matter on a given i
   against that order; when a build has an item with negative skill points, or the fast result can't be equipped
   in that order, the assignment comes from a port of Wynnbuilder's `calculate_skillpoints` – the same points as
   Wynnbuilder. Set bonus skill points are added at the end (they don't help meet requirements).
+
+### Discord feedback, 0.35.0
+
+Players on Discord said the builds at level 105+ were weak and listed why. What was wrong in the code and what
+changed:
+
+| Complaint | Cause | Now |
+| --- | --- | --- |
+| "Why is Tarred Gem even a pick" | poison added to the spell goal (~42k poison per 3 s in one build) | poison off the goal by default, *Count poison in the goal* to turn it on |
+| Intensity, Diamond Hydro/Static, Discharge… everywhere | IDs at 50% rolls, while 1005 items with fixed IDs always count 100% | max rolls by default, like Wynnbuilder; *Realistic rolls (50%)* optional |
+| "Assumes 20 cps and can cycle melees between spells" | full Mana Steal with no main attack in the cycle | Mana (and Life) Steal only from M hits in the cycle, per hit from attack speed |
+| "Can only build for 0 sustain or 0 drain" | mana filter was `≥ 0` | Allowed drain slider, Life recovery slider and a suggestion for both |
+| "Roulette builds" | every earlier build seeded the next search | off by default (*Start from my earlier builds*) |
+| "Trained on the build guide" | +15-30% for guide items, "Meta" label on the sliders | bonus off by default, label now says the marker is only where guide builds sit |
+| "Ability trees should be presets", "generalist" | trees only from weights | guide trees as named presets with search, Mastery swap tip |
+| "Multihit says total damage…" | no timing | Whole cycle goal, Spell timing table |
+| "Doesn't know what chain lightning is" | powder specials not shown | Powder special in the Damage panel |
+
+**Checked at level 105+** (every archetype at level 120 and 106, 25% EHP, strongest spell, no cycle; the same run
+before and after, harness evaluator): poison items in the 30 builds went from 51 to 6 (the Shadestepper and
+Ritualist builds were made only of poison items), items with fixed IDs from 130 to 64, and every level-120 build
+with a complete guide build to compare beats the best one of its archetype under the same filters (10 of 10,
+×1.26 to ×2.23 on the goal). The same 30 scenarios with the archetype's first suggested cycle at 3 clicks/s (e.g.
+`4311`, `MMM3M`, `413MMM`): all 30 pass the mana filter, Mana Steal only counts in the cycles with M (and slow
+weapons get more per hit), 3 poison items and 43 fixed-ID items in total, and every level-120 build with a guide
+build to compare beats it (6 of 6, ×1.14 to ×2.23).
 
 ### Verified against Wynnbuilder
 

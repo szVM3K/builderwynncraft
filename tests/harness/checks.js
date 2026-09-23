@@ -42,11 +42,22 @@ export function isEligible(params, item, slotId) {
 }
 
 let poolCache = new Map();
+// The item database at the scenario's roll (100% = the default, like Wynnbuilder; 50% = "Realistic rolls").
+export function itemsOf(params) {
+  return params.rollPercent && params.rollPercent < 100 ? E.rolledItems(E.ITEM_DB, params.rollPercent) : E.ITEM_DB;
+}
+const byNameCache = new Map();
+export function itemByName(params, name) {
+  const percent = params.rollPercent && params.rollPercent < 100 ? params.rollPercent : 100;
+  if (percent === 100) return E.ITEM_BY_NAME.get(name);
+  if (!byNameCache.has(percent)) byNameCache.set(percent, new Map(itemsOf(params).map((item) => [item.name, item])));
+  return byNameCache.get(percent).get(name);
+}
 export function eligiblePool(params, slotId) {
-  const key = JSON.stringify([slotId, params.playerClass, params.level, params.options, params.excludeEvents, params.tradeableOnly]);
+  const key = JSON.stringify([slotId, params.playerClass, params.level, params.options, params.excludeEvents, params.tradeableOnly, params.rollPercent || 100]);
   if (!poolCache.has(key)) {
     if (poolCache.size > 200) poolCache = new Map();
-    poolCache.set(key, E.ITEM_DB.filter((item) => isEligible(params, item, slotId)));
+    poolCache.set(key, itemsOf(params).filter((item) => isEligible(params, item, slotId)));
   }
   return poolCache.get(key);
 }
@@ -56,7 +67,7 @@ export function eligiblePool(params, slotId) {
 // point solver. Returns metrics + feasibility against the scenario's hard filters.
 export function makeEvaluator(params) {
   const ctx = E.damageGoalContext(params.playerClass, params.level, params.treeSettings);
-  const cycle = { ids: params.cycle.ids || [], cps: params.cycle.cps || 9, steal: params.cycle.steal !== false, gain: params.cycle.gain !== false };
+  const cycle = E.normalizeCycle({ ...params.cycle, cps: params.cycle.cps || 9 });
   const cache = new Map();
   // extraSkills: undefined = free skill points spent like the generator does (allocateFreeSkillPoints: first to
   // pass the filters, then for damage); an object = exactly these extra points (null/{} = none).
@@ -74,8 +85,8 @@ export function makeEvaluator(params) {
       const spent = sp.total + E.SKILLS.reduce((sum, skill) => sum + ((extra && extra[skill]) || 0), 0);
       const spOk = spent <= ctx.available && sp.capOverflow === 0 && E.SKILLS.every((skill) => (sp.assigned[skill] || 0) + ((extra && extra[skill]) || 0) <= E.MAX_ASSIGNED_PER_SKILL);
       const ehpOk = params.minEhp <= 0 || m.ehp >= params.minEhp;
-      const manaOk = cycle.ids.length === 0 || (m.cycleOk && m.manaNet >= 0);
-      const sustainOk = !params.requireSustain || m.sustain > 0;
+      const manaOk = E.manaOk(m, cycle);
+      const sustainOk = (!params.requireSustain || m.sustain > 0) && (!(params.minSustain > 0) || m.sustain >= params.minSustain - 1e-9);
       return { spOk, ehpOk, manaOk, sustainOk, feasible: spOk && !illegal && !clash && ehpOk && manaOk && sustainOk };
     };
     let extra = auto ? null : extraSkills;
@@ -87,7 +98,7 @@ export function makeEvaluator(params) {
         if (j.feasible) return 1e15 + metrics.damage;
         let miss = 0;
         if (!j.ehpOk) miss += 1 - metrics.ehp / params.minEhp;
-        if (!j.manaOk) miss += metrics.manaUsed > 0 ? Math.max(0, 1 - (metrics.manaIncome + metrics.manaGain) / metrics.manaUsed) : 1;
+        if (!j.manaOk) miss += metrics.manaUsed > 0 ? Math.max(0, 1 - (metrics.manaIncome + metrics.manaGain + cycle.drain) / metrics.manaUsed) : 1;
         if (!j.sustainOk) miss += 0.5;
         return -miss;
       };
@@ -227,10 +238,24 @@ export async function checkBuild(scenario, build, { limits = DEFAULT_LIMITS, pai
   // One goal, or several (their sum). If the generator's objective adds poison (evaluateGoal → poisonDps), add the
   // same share to the summary's number: DPS for the main attack, poison per cast for a spell (casts/s = clicks/s ÷ 3).
   const uiGoalDamage = (id) => {
+    if (id === E.DAMAGE_GOAL_CYCLE) {
+      // whole cycle: every spell once per cast + every main attack hit, per second of the cycle
+      const ids = params.cycle.ids || [];
+      const hps = stats.mainAttack ? stats.mainAttack.hps : E.HITS_PER_SECOND.NORMAL;
+      const cps = params.cycle.cps || 9;
+      const casts = ids.filter((entry) => entry !== 0).length;
+      const seconds = (3 * casts) / cps + (ids.length - casts) * Math.max(1 / cps, 1 / hps);
+      const total = ids.reduce((sum, entry) => {
+        if (entry === 0) return sum + (stats.mainAttack ? stats.mainAttack.hit : 0);
+        const found = stats.spells.find((spellEntry) => spellEntry.id === entry);
+        return sum + (found && found.main && found.main.type === "damage" ? found.main.amount : 0);
+      }, 0);
+      return seconds > 0 ? total / seconds + (params.cycle.poison && total > 0 && asReported.poisonDps ? asReported.poisonDps : 0) : 0;
+    }
     const spell = id === E.DAMAGE_GOAL_MAIN ? null : stats.spells.find((entry) => entry.id === id);
     let value = id === E.DAMAGE_GOAL_MAIN ? (stats.mainAttack ? stats.mainAttack.dps : 0) : spell && spell.main ? spell.main.amount : 0;
     const damaging = id === E.DAMAGE_GOAL_MAIN ? value > 0 : Boolean(spell && spell.main && spell.main.type === "damage" && value > 0);
-    if (damaging && asReported.poisonDps) value += id === E.DAMAGE_GOAL_MAIN ? asReported.poisonDps : asReported.poisonDps / (Math.max(0.1, params.cycle.cps || 9) / 3);
+    if (params.cycle.poison && damaging && asReported.poisonDps) value += id === E.DAMAGE_GOAL_MAIN ? asReported.poisonDps : asReported.poisonDps / (Math.max(0.1, params.cycle.cps || 9) / 3);
     return value;
   };
   const uiDamage = (Array.isArray(params.goal) ? params.goal : [params.goal]).reduce((sum, id) => sum + uiGoalDamage(id), 0);
@@ -239,12 +264,19 @@ export async function checkBuild(scenario, build, { limits = DEFAULT_LIMITS, pai
   if (!close(build.metrics.damage, asReported.damage) || !close(build.metrics.ehp, asReported.ehp))
     add("error", "EVAL_MISMATCH", `generator metrics (${Math.round(build.metrics.damage)} / ${Math.round(build.metrics.ehp)}) differ from a re-evaluation with the same skill points (${Math.round(asReported.damage)} / ${Math.round(asReported.ehp)})`);
   if (params.cycle.ids.length) {
-    const spells = params.cycle.ids.map((id) => stats.spells.find((spell) => spell.id === id));
+    // Independent re-computation from the summary: a spell = 3 clicks, M = one main attack (at least one click,
+    // never faster than the weapon's attacks/s); Mana Steal only from those hits (Mana Steal ÷ 3 per attack/s each).
+    const castIds = params.cycle.ids.filter((id) => id !== 0);
+    const spells = castIds.map((id) => stats.spells.find((spell) => spell.id === id));
     if (spells.every(Boolean)) {
-      const seconds = (3 * params.cycle.ids.length) / params.cycle.cps;
+      const hps = stats.mainAttack ? stats.mainAttack.hps : E.HITS_PER_SECOND.NORMAL;
+      const cps = params.cycle.cps || 9;
+      const melee = params.cycle.ids.length - castIds.length;
+      const seconds = (3 * castIds.length) / cps + melee * Math.max(1 / cps, 1 / hps);
       const used = spells.reduce((sum, spell) => sum + (spell.cost || 0), 0) / seconds;
       const gained = params.cycle.gain !== false ? spells.reduce((sum, spell) => sum + (spell.manaGained || 0), 0) / seconds : 0;
-      const income = (stats.manaRegen + 25) / 5 + (params.cycle.steal !== false ? stats.manaSteal / 3 : 0);
+      const steal = params.cycle.steal !== false && melee > 0 ? ((melee / seconds) * (stats.manaSteal / 3)) / hps : 0;
+      const income = (stats.manaRegen + 25) / 5 + steal;
       const net = income + gained - used;
       if (Math.abs(net - build.metrics.manaNet) > 0.05 + 0.02 * Math.abs(net)) add("error", "MANA_MISMATCH", `generator mana ${build.metrics.manaNet.toFixed(2)}/s vs summary ${net.toFixed(2)}/s`);
     }
@@ -353,7 +385,7 @@ export async function checkBuild(scenario, build, { limits = DEFAULT_LIMITS, pai
       .forEach((entry) => {
         const guidePicks = {};
         const complete = E.SLOTS.every((slot) => {
-          const item = E.ITEM_BY_NAME.get(entry.items[slot.id]);
+          const item = itemByName(params, entry.items[slot.id]);
           if (!item || !isEligible(params, item, slot.id)) return false;
           guidePicks[slot.id] = item;
           return true;
