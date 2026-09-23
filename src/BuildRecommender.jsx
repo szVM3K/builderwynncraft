@@ -11455,7 +11455,7 @@ function WelcomeDialog() {
 // Pod suwakiem Effective HP: po jednym buildzie na każdy krok suwaka (0-100%, co 5%). Liczone w tle szybkim
 // przebiegiem generatora (effort "quick"), wiersz po wierszu; build, który przechodzi już wyższy próg, jest też
 // wynikiem dla niego (nie liczymy drugi raz). Kliknięcie wiersza pokazuje ten build.
-const SWEEP_COLUMNS = { display: "grid", gridTemplateColumns: "3.2em 4.2em minmax(0,1fr) 3.4em 3.6em", alignItems: "baseline", columnGap: "0.4em" };
+const SWEEP_COLUMNS = { display: "grid", gridTemplateColumns: "3.4em 4.4em minmax(0,1fr) 4em 4em", alignItems: "baseline", columnGap: "0.3em" };
 
 // Suwak "Life recovery": do ile HP/s (Health Regen ÷ 4 + Life Steal z trafień) - skala rośnie z poziomem.
 function lifeRecoveryMax(level) {
@@ -14900,6 +14900,16 @@ export default function BuildRecommender() {
       if (mainBuild && Math.round(mainBuild.metrics.minEhp) === Math.round(row.minEhp)) {
         row.build = mainBuild;
         row.status = mainBuild.passed ? "done" : "fail";
+        // pełny wynik z wyższego progu przechodzi też niższe: gdzie szybkie szukanie znalazło mniej, on jest odpowiedzią
+        if (mainBuild.passed) {
+          for (let lower = 0; lower < index; lower += 1) {
+            const target = rows[lower];
+            if (target.build && target.build.passed && target.build.metrics.damage < mainBuild.metrics.damage) {
+              target.build = { ...mainBuild, metrics: { ...mainBuild.metrics, minEhp: target.minEhp } };
+              target.status = "same";
+            }
+          }
+        }
       } else if (previous && previous.build && previous.build.passed && previous.build.metrics.ehp >= row.minEhp) {
         // zestaw z poprzedniego progu przechodzi i ten, więc jest też odpowiedzią dla niego
         row.build = { ...previous.build, metrics: { ...previous.build.metrics, minEhp: row.minEhp } };
