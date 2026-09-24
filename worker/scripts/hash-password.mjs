@@ -1,5 +1,3 @@
-// Makes the value for the ADMIN_PASSWORD_HASH secret: node scripts/hash-password.mjs "your password"
-// PBKDF2-SHA256, 100 000 iterations (the most Cloudflare Workers allow), random 16-byte salt.
 import { webcrypto as crypto } from "node:crypto";
 
 const password = process.argv[2];
