@@ -117,6 +117,24 @@ describe("Share: message with the item list", () => {
     expect(old.rank).toBe("hero");
   });
 
+  it("0.40 settings travel with the link: walk speed worth, Major ID sliders, build attack speed; old links get the defaults", () => {
+    const options = { ...E.DEFAULT_OPTIONS, speedValue: 0.2, majorSliders: "max", attackSpeeds: ["NORMAL", "FAST"], attackSpeedsFinal: true };
+    const form = { ...E.DEFAULT_DAMAGE_FORM, spd: { min: -20, max: null } };
+    const back = E.decodeShareSettings(E.encodeShareSettings({ form, options, rank: "" }));
+    expect(back.options.speedValue).toBe(0.2);
+    expect(back.options.majorSliders).toBe("max");
+    expect(back.options.attackSpeedsFinal).toBe(true);
+    expect(back.form.spd).toEqual({ min: -20, max: null }); // "Slow ok" stays −20 (no migration to the new default)
+    const off = E.decodeShareSettings(E.encodeShareSettings({ form: E.DEFAULT_DAMAGE_FORM, options: { ...E.DEFAULT_OPTIONS, speedValue: 0 }, rank: "" }));
+    expect(off.options.speedValue).toBe(0);
+    // a 0.39 link without the new keys: defaults (1% per +10%, sliders at 0, weapon speed only, walk speed ≥ 0)
+    const old = E.decodeShareSettings(Buffer.from(JSON.stringify({ v: 2, pr: "Fallen" })).toString("base64url"));
+    expect(old.options.speedValue).toBe(E.SPEED_VALUE_DEFAULT);
+    expect(old.options.majorSliders).toBe("zero");
+    expect(old.options.attackSpeedsFinal).toBe(false);
+    expect(old.form.spd).toEqual({ min: 0, max: null });
+  });
+
   it("Share: short link by default (just the build), settings on request", () => {
     const guide = guides()[2];
     const parsed = E.parseBuildHash(guide.url);
@@ -175,7 +193,9 @@ describe("Effective HP range slider", () => {
   });
 
   it("a maximum just under the unbounded result: second search, a build inside the range", async () => {
-    const scenario = makeScenario({ playerClass: "Warrior", archetype: "Fallen", level: 90, goal: "first", ehpPct: 25, cycle: "none" });
+    // walk speed worth off (0.40): with it the unbounded build sits right at the EHP minimum, so there is no room for a
+    // maximum "just under" it - this test is about the EHP range, not about walk speed
+    const scenario = makeScenario({ playerClass: "Warrior", archetype: "Fallen", level: 90, goal: "first", ehpPct: 25, cycle: "none", options: { speedValue: 0 } });
     const free = await generate(scenario.params);
     await tick();
     const maxEhp = Math.max(scenario.params.minEhp + 200, Math.round(free.metrics.ehp * 0.995));

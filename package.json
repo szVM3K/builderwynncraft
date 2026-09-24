@@ -1,7 +1,7 @@
 {
   "name": "wynncraft-build-recommender",
   "private": true,
-  "version": "0.39.2",
+  "version": "0.40.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -14,6 +14,7 @@
     "update-item-weights": "node scripts/update-item-weights.mjs",
     "update-event-items": "node scripts/update-event-items.mjs",
     "update-tomes-aspects": "node scripts/update-tomes-aspects.mjs",
+    "update-major-ids": "node scripts/update-major-ids.mjs",
     "test": "vitest run",
     "test:matrix": "vitest run tests/matrix",
     "test:sp": "vitest run tests/skillpoints.test.js",
@@ -24,6 +25,7 @@
     "test:optimizer": "vitest run tests/optimizer.test.js",
     "test:feedback": "vitest run tests/feedback.test.js",
     "test:share": "vitest run tests/share.test.js",
+    "test:major": "vitest run tests/major-speed.test.js",
     "bench:optimizer": "vite-node scripts/bench-optimizer.mjs --",
     "test:deep": "vitest run --config vitest.deep.config.js",
     "test:soak": "vitest run --config vitest.soak.config.js"

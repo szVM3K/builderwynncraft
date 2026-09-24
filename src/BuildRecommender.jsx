@@ -13,6 +13,7 @@ import EVENT_ITEMS from "./event-items.json";
 import TOMES_ASPECTS from "./tomes-aspects.json";
 import WB_IDS from "./wynnbuilder-ids.json";
 import PACKAGE_INFO from "../package.json";
+import MAJOR_ID_DATA from "./major-ids.json";
 
 // Wersja strony (package.json) - w oknie Info i w podpowiedzi przycisku Info (0.39.2)
 const APP_VERSION = PACKAGE_INFO.version;
@@ -350,7 +351,33 @@ const DEFAULT_OPTIONS = {
   onlyListed: false, // tylko przedmioty wystawione dziś na Trade Markecie (przypięte zostają, gracz je ma)
   powders: "auto", // powdery broni w wyniku i obrażeniach: auto (żywioł focusu) | earth..air | none
   scoring: { weights: {}, tuning: {} }, // zakładka "Score calculation": własne wagi statystyk i stałe wyniku
+  speedValue: 0.1, // 0.40: ile obrażeń wart jest Walk Speed (ułamek celu na +100%); SPEED_VALUES
+  majorSliders: "zero", // 0.40: suwaki major ID w generatorze: zero | half | max (karta i panele pokazują ustawienia gracza)
+  attackSpeedsFinal: false, // 0.40: zaznaczone szybkości dotyczą też szybkości ataku CAŁEGO buildu (po -X / +X tierach z przedmiotów)
 };
+// Walk Speed w ocenie (0.40, feedback: "walk speed jest kluczowy, 4% dmg za 68% walk speeda to żadna strata"): generator
+// porównuje buildy po celu × (1 + wartość × Walk Speed / 100), Walk Speed liczony od −100% do +50%. Domyślnie 1% obrażeń
+// za każde +10% (0.1): +48% walk speed = +4,8%, −20% = −2%. Wyświetlane obrażenia zostają prawdziwe (metrics.damage),
+// porównanie idzie po metrics.value.
+const SPEED_VALUES = [
+  { value: 0, label: "Off", hint: "only damage counts (walk speed only through its range)" },
+  { value: 0.05, label: "1% damage per +20%", hint: "1% damage for every +20% walk speed" },
+  { value: 0.1, label: "1% damage per +10%", hint: "1% damage for every +10% walk speed (default)" },
+  { value: 0.2, label: "1% damage per +5%", hint: "1% damage for every +5% walk speed" },
+];
+const SPEED_VALUE_DEFAULT = 0.1;
+const SPEED_VALUE_CAP = 50;
+function speedFactorOf(walkSpeed, value) {
+  if (!(value > 0)) return 1;
+  const counted = Math.max(-100, Math.min(SPEED_VALUE_CAP, Number(walkSpeed) || 0));
+  return Math.max(0.05, 1 + (value * counted) / 100);
+}
+// Wartość buildu do porównań między buildami (lista buildów, podpowiedzi): cel z Walk Speed, jak w generatorze.
+function buildValueOf(build) {
+  const metrics = build && build.metrics;
+  if (!metrics) return 0;
+  return Number.isFinite(metrics.value) ? metrics.value : metrics.damage || 0;
+}
 const DEFENCE_PREF_SHARE = 0.75; // wybrana obrona: waga = 75% najważniejszej statystyki archetypu
 const OFF_ELEMENT_KEEP = 0.25; // przy własnym focusie inne żywioły zachowują 25% wagi (preferencja, nie wymóg)
 const GUIDE_ITEM_BONUS = 0.3; // przedmiot z buildów poradnika: wynik x (1 + 0.15..0.3) zależnie od popularności
@@ -540,6 +567,9 @@ function normalizeOptions(options = DEFAULT_OPTIONS) {
     onlyListed: options.onlyListed === true,
     powders: options.powders === "none" || ["earth", "thunder", "water", "fire", "air"].includes(options.powders) || isPowderMix(options.powders) ? options.powders : "auto",
     scoring: normalizeScoring(options.scoring),
+    attackSpeedsFinal: options.attackSpeedsFinal === true,
+    majorSliders: ["zero", "half", "max"].includes(options.majorSliders) ? options.majorSliders : "zero",
+    speedValue: SPEED_VALUES.some((entry) => entry.value === Number(options.speedValue)) && options.speedValue !== null && options.speedValue !== "" ? Number(options.speedValue) : SPEED_VALUE_DEFAULT,
   };
 }
 
@@ -1648,6 +1678,7 @@ const PROBE_STEPS = {
   hpBonus: 500, hp: 500, eDefPct: 10, tDefPct: 10, wDefPct: 10, fDefPct: 10, aDefPct: 10,
   mr: 5, ms: 5, spRaw1: 5, spRaw2: 5, spRaw3: 5, spRaw4: 5, spPct1: 10, spPct2: 10, spPct3: 10, spPct4: 10,
   poison: 300,
+  spd: 10, // 0.40: Walk Speed ma wagę, gdy liczy się w celu (options.speedValue)
 };
 const SKILL_PROBES = new Set(SKILLS);
 
@@ -1678,12 +1709,70 @@ function propStatInputs(merged) {
 }
 
 // Statystyki zestawu jak w computeBuildStats, ale bez liczenia wszystkich czarów.
+// MAJOR ID W OBLICZENIACH (0.40): major ID z założonych przedmiotów i z bonusów setów (ten sam dwa razy liczy się raz,
+// jak w grze) doklejają swoje efekty do drzewka jak aspekty - Wynnbuilder atree.js "Apply major IDs": tylko zdolności
+// klasy postaci albo "Any", tylko gdy ich dependencies są aktywne, tylko do zdolności obecnych w drzewku (base_abil).
+let MAJOR_SET_NAMES = null;
+function majorSetNames() {
+  if (!MAJOR_SET_NAMES) MAJOR_SET_NAMES = new Set(Object.entries(ITEM_SETS).filter(([, set]) => (set.bonuses || []).some((bonus) => bonus && Array.isArray(bonus.majorIds) && bonus.majorIds.length > 0)).map(([name]) => name));
+  return MAJOR_SET_NAMES;
+}
+// klucz major ID -> przedmioty / sety, które go dają (null = żadnego)
+function majorSourcesOf(items) {
+  let out = null;
+  const add = (key, source) => {
+    if (!out) out = new Map();
+    if (!out.has(key)) out.set(key, []);
+    out.get(key).push(source);
+  };
+  let setPieces = false;
+  items.forEach((item) => {
+    if (!item) return;
+    if (item.majorIds && item.majorIds.length > 0) item.majorIds.forEach((key) => add(key, item.name));
+    if (item.set && majorSetNames().has(item.set)) setPieces = true;
+  });
+  if (setPieces) activeSets(items).forEach(({ name, bonus }) => (Array.isArray(bonus.majorIds) ? bonus.majorIds : []).forEach((key) => add(key, `${name} set`)));
+  return out;
+}
+const MAJOR_ABILITIES_CACHE = new Map();
+function majorAbilitiesFor(key, playerClass) {
+  const cacheKey = `${key}|${playerClass}`;
+  if (!MAJOR_ABILITIES_CACHE.has(cacheKey)) MAJOR_ABILITIES_CACHE.set(cacheKey, majorIdAbilities(key, playerClass));
+  return MAJOR_ABILITIES_CACHE.get(cacheKey);
+}
+// [{ key, name, sources, abilities }] - tylko major ID z efektami dla tej klasy, w stałej kolejności
+function majorEntriesFor(items, playerClass) {
+  const sources = majorSourcesOf(items);
+  if (!sources) return [];
+  return [...sources.keys()]
+    .sort()
+    .map((key) => ({ key, name: majorIdName(key), sources: sources.get(key), abilities: majorAbilitiesFor(key, playerClass) }))
+    .filter((entry) => entry.abilities.length > 0);
+}
+function treeForItems(ctx, items) {
+  if (ctx.noMajors) return ctx.tree;
+  const entries = majorEntriesFor(items, ctx.playerClass);
+  if (entries.length === 0) return ctx.tree;
+  const key = entries.map((entry) => entry.key).join("|");
+  if (!ctx.majorTrees) ctx.majorTrees = new Map();
+  let tree = ctx.majorTrees.get(key);
+  if (!tree) {
+    const state = treeStateFor(ctx.playerClass, ctx.treeSettings.selected, ctx.treeSettings.aspects || [], entries);
+    tree = { ...state, majorKey: key, propKeys: propStatInputs(state.merged) };
+    if (ctx.majorTrees.size < 512) ctx.majorTrees.set(key, tree);
+  }
+  return tree;
+}
+
 function goalStats(ctx, items, weapon, skillTotals) {
   const fake = { level: ctx.level, playerClass: ctx.playerClass, skillPoints: { totals: skillTotals } };
   const stats = buildStatMap(fake, items, weapon);
-  treeRawStats(ctx.tree.merged, stats);
-  const spellKey = (ctx.propKeys || []).map((key) => statValue(stats, key)).join(",");
-  const scaled = applyTreeScaling(ctx.tree.merged, copyStats(stats), ctx.tree.interactives, ctx.treeSettings);
+  // 0.40: major ID z przedmiotów i setów zmieniają drzewko (osobny wariant na każdy zestaw major ID, w pamięci ctx)
+  const tree = treeForItems(ctx, items);
+  treeRawStats(tree.merged, stats);
+  const keys = tree.propKeys || ctx.propKeys || [];
+  const spellKey = `${tree.majorKey || ""}|${keys.map((key) => statValue(stats, key)).join(",")}`;
+  const scaled = applyTreeScaling(tree.merged, copyStats(stats), tree.interactives, ctx.scaleSettings || ctx.treeSettings);
   Object.entries(scaled.added).forEach(([key, value]) => {
     if (MULTIPLIER_MAPS.includes(key)) Object.entries(value).forEach(([inner, amount]) => mergeStat(stats, `${key}.${inner}`, amount));
     else mergeStat(stats, key, value);
@@ -1841,7 +1930,9 @@ function evaluateGoal(ctx, items, weapon, skillTotals, goal, cycle, altGoals = n
   const sustain = hpr / 4 + lifeStealPerSecond;
   // Walk Speed buildu (suwak zakresu Walk Speed): ta sama liczba co "Walk Speed" w podsumowaniu (computeBuildStats)
   const walkSpeed = statValue(stats, "spd");
-  const result = { damage: 0, ehp, hp, hpr, lifeSteal, sustain, walkSpeed, healthGain: (sustain * ehp) / hp, manaIncome: 0, manaUsed: 0, manaGain: 0, manaSteal: 0, manaNet: 0, cycleOk: true, goalName: "", stats };
+  // 0.40: szybkość ataku buildu po tierach z przedmiotów (filtr "Only builds with the checked speeds")
+  const attackSpeed = weapon ? attackSpeedAfterTier(weapon, statValue(stats, "atkTier")) : null;
+  const result = { damage: 0, ehp, hp, hpr, lifeSteal, sustain, walkSpeed, attackSpeed, healthGain: (sustain * ehp) / hp, manaIncome: 0, manaUsed: 0, manaGain: 0, manaSteal: 0, manaNet: 0, cycleOk: true, goalName: "", stats };
   if (!weapon) return result;
   let spells = ctx.spellCache ? ctx.spellCache.get(spellKey) : null;
   if (!spells) {
@@ -1927,6 +2018,14 @@ function evaluateGoal(ctx, items, weapon, skillTotals, goal, cycle, altGoals = n
   if (blend > 0) {
     result.rawDamage = result.damage;
     result.damage = result.damage > 0 ? Math.pow(result.damage, 1 - blend) * Math.pow(Math.max(1, result.ehp), blend) : 0;
+  }
+  // 0.40: Walk Speed w celu generatora (ctx.speedValue ustawia tylko generator); prawdziwe obrażenia w rawDamage
+  if (ctx.speedValue > 0) {
+    const factor = speedFactorOf(result.walkSpeed, ctx.speedValue);
+    if (result.rawDamage === undefined) result.rawDamage = result.damage;
+    result.speedFactor = factor;
+    result.damage *= factor;
+    if (result.alt) result.alt = result.alt.map((value) => value * factor);
   }
   return result;
 }
@@ -2097,6 +2196,10 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
   // Optimizer: wolne punkty, które gracz już przydzielił, zmniejszają budżet (build musi się zmieścić razem z nimi)
   if (spReserve > 0) ctx.available = Math.max(0, ctx.available - spReserve);
   const normalized = normalizeOptions(options);
+  // 0.40: Walk Speed w porównaniu buildów (tylko w szukaniu; wynik pokazuje prawdziwe obrażenia)
+  if (objective === "damage" && normalized.speedValue > 0) ctx.speedValue = normalized.speedValue;
+  // 0.40: suwaki major ID liczone przy ustawieniu "Major ID sliders" (domyślnie 0 = bez bonusu, którego gracz może nie utrzymać)
+  ctx.scaleSettings = { ...ctx.treeSettings, majorSliders: normalized.majorSliders };
   const lockedNames = new Set(Object.values(normalized.locked || {}));
   const excluded = new Set(normalized.excluded || []);
   const excludedTiers = new Set(normalized.excludedTiers || []);
@@ -2166,6 +2269,16 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
       });
   }
   const guideNames = new Set(Object.values(guideItemsBySlot).flatMap((set) => [...set].map((item) => item.name)));
+  // 0.40: przedmioty z major ID, które model liczy dla tej klasy - liniowa ocena (proxyScore) nie widzi ich efektów,
+  // więc zawsze są w pulach kandydatów (wiązka, dopieszczanie, pary); dokładną ocenę dostają w dopieszczaniu i w
+  // końcowej kontroli (każdy przedmiot w każdym slocie). Wymuszanie ich w każdym kroku wiązki zmieniało wyniki bez
+  // major ID (testy: -1-4% w 3 z 7 scenariuszy), więc wiązka wybiera je jak inne przedmioty.
+  const majorItemSet = new Set();
+  const majorItemsBySlot = {};
+  SLOTS.forEach((slot) => {
+    majorItemsBySlot[slot.id] = bySlot[slot.id].filter((item) => item.majorIds && item.majorIds.some((key) => majorAbilitiesFor(key, playerClass).length > 0));
+    majorItemsBySlot[slot.id].forEach((item) => majorItemSet.add(item));
+  });
 
   const powderElements = powders === "none" ? [null] : ELEMENTS.includes(powders) || isPowderMix(powders) ? [powders] : [null, ...ELEMENTS];
   const cycleCfg = normalizeCycle(cycle);
@@ -2244,6 +2357,10 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
   const spdLimits = normalizeRange(spdRange);
   const spdFloor = spdLimits && spdLimits.min !== null ? spdLimits.min : null;
   const spdOk = (metrics) => inRange(metrics.walkSpeed, spdLimits);
+  // 0.40: "Only builds with the checked speeds" - szybkość ataku całego buildu (broń + tiery z przedmiotów) musi być
+  // zaznaczona; przedmioty z -X tierami nie zwalniają buildu poniżej wybranych szybkości. Twardy filtr jak minimum.
+  const atkAllowed = normalized.attackSpeedsFinal && normalized.attackSpeeds.length > 0 ? new Set(normalized.attackSpeeds) : null;
+  const atkOk = (metrics) => !atkAllowed || !metrics.attackSpeed || atkAllowed.has(metrics.attackSpeed);
   // górne granice (nadwyżka many, życie, Walk Speed) - wolne skill pointy ich nie obniżają, więc sprawdza je ocena bez
   // wolnych punktów (zob. evaluateExact)
   const upperOk = (metrics) =>
@@ -2270,6 +2387,7 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
     } else if (cycleCfg.ids.length > 0 && manaFloor !== null && manaFloor > 0 && metrics.manaNet < manaFloor) miss += Math.min(1, (manaFloor - metrics.manaNet) / RANGE_SCALE.mana);
     if (manaCeil !== null && metrics.manaNet > manaCeil) miss += Math.min(1, rangeMiss(metrics.manaNet, manaLimits, RANGE_SCALE.mana));
     if (!spdOk(metrics)) miss += 0.5 + Math.min(1, rangeMiss(metrics.walkSpeed, spdLimits, RANGE_SCALE.spd));
+    if (!atkOk(metrics)) miss += 1;
     if (budget && metrics.cost > budget) miss += metrics.cost / budget - 1;
     return miss;
   };
@@ -2278,7 +2396,8 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
     (!requireSustain || metrics.sustain > 0) &&
     (!lifeLimits || lifeLimits.min === null || metrics.sustain >= lifeLimits.min - 1e-9) &&
     (cycleCfg.ids.length === 0 || (metrics.cycleOk && (manaFloor === null || metrics.manaNet >= manaFloor - 1e-9))) &&
-    (spdFloor === null || metrics.walkSpeed >= spdFloor - 1e-9);
+    (spdFloor === null || metrics.walkSpeed >= spdFloor - 1e-9) &&
+    atkOk(metrics);
   // Przybliżone szukanie (wiązka, dopieszczanie, pary): górne granice zakresów tylko jako łagodna kara w wartości
   // zestawu - twardo liczą się dopiero w dokładnym etapie (exactOk). Twarda górna granica już tutaj spychała
   // dopieszczanie do pierwszego zestawu pod granicą i gubiła lepsze (testy: -5-7% przy nadwyżce many ≤ +1, choć
@@ -2317,6 +2436,8 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
     // Walk Speed poniżej minimum: łagodna kara rosnąca z postępem (kolejny przedmiot może ją jeszcze podnieść; kara
     // skalowana postępem granicy albo z wykładnikiem jak EHP gubiła lepsze zestawy - testy: -7%)
     if (spdFloor !== null && metrics.walkSpeed < spdFloor) factor *= Math.exp(-((spdFloor - metrics.walkSpeed) / RANGE_SCALE.spd) * progress);
+    // szybkość ataku buildu spoza zaznaczonych: kara rośnie z postępem (kolejny przedmiot z +tierem może to naprawić)
+    if (!atkOk(metrics)) factor *= 1 - 0.8 * progress;
     if (budget && metrics.cost > budget) factor *= Math.pow(budget / metrics.cost, 2);
     return factor;
   }
@@ -2427,6 +2548,7 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
       if (needSustain) take("sustain", DAMAGE_BEAM.extraPerSlot);
       // minimum Walk Speed: najszybsze przedmioty slotu też są kandydatami (inaczej wiązka odrzuca je, zanim filtr je zobaczy)
       if (spdFloor !== null) take("spd", DAMAGE_BEAM.extraPerSlot);
+      (majorItemsBySlot[slotId] || []).forEach((item) => pool.add(item));
       candidates[slotId] = [...pool].map((item) => ({ item, damage: phase === "ehp" ? proxyScore(item, weights.ehp) : proxyScore(item, weights.damage), ehp: proxyScore(item, weights.ehp), mana: proxyScore(item, weights.mana), spd: item.ids.spd || 0 }));
     });
     let beam = [{ items: [], picks: {}, metrics: evaluate([], weapon) }];
@@ -2661,6 +2783,7 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
       if (cycleCfg.ids.length > 0) take("mana", weights.mana, Math.ceil((DAMAGE_BEAM.polishPool * repairing) / 2));
       if (needSustain) topBy(bySlot[slotId], sustainProxy, Math.ceil(DAMAGE_BEAM.polishPool / 2)).forEach((item) => pool.add(item));
       if (spdNear(candidate.metrics)) topBy(bySlot[slotId], (item) => item.ids.spd || 0, Math.ceil(DAMAGE_BEAM.polishPool / 2)).forEach((item) => pool.add(item));
+      (majorItemsBySlot[slotId] || []).forEach((item) => pool.add(item));
       if (candidate.picks[slotId]) pool.add(candidate.picks[slotId]);
       pools[slotId] = [...pool];
     });
@@ -2739,6 +2862,7 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
       if (cycleCfg.ids.length > 0) take((item) => proxyScore(item, weights.mana), Math.ceil(DAMAGE_BEAM.pairPool / 2));
       if (needSustain) take(sustainProxy, Math.ceil(DAMAGE_BEAM.pairPool / 2));
       if (spdNear(start.metrics)) take((item) => item.ids.spd || 0, Math.ceil(DAMAGE_BEAM.pairPool / 2));
+      (majorItemsBySlot[slotId] || []).forEach((item) => pool.add(item));
       pools[slotId] = [...pool];
     });
     let best = start;
@@ -2779,6 +2903,7 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
     sustainOk(metrics) &&
     manaOk(metrics, cycleCfg) &&
     spdOk(metrics) &&
+    atkOk(metrics) &&
     (!budget || metrics.cost <= budget);
   // tylko dolne granice (skill pointy, EHP, dren many, minimum życia i Walk Speed, budżet) - optymistyczna ocena z wolnymi
   // punktami sprawdza je, a górne granice sprawdza ocena bez nich (upperOk)
@@ -2789,6 +2914,7 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
     (!lifeLimits || lifeLimits.min === null || metrics.sustain >= lifeLimits.min - 1e-9) &&
     (cycleCfg.ids.length === 0 || (metrics.cycleOk && (manaFloor === null || metrics.manaNet >= manaFloor - 1e-9))) &&
     (spdFloor === null || metrics.walkSpeed >= spdFloor - 1e-9) &&
+    atkOk(metrics) &&
     (!budget || metrics.cost <= budget);
   const exactRank = (metrics) => (exactOk(metrics) ? 1e15 + metrics.damage : -shortfall(metrics));
   // bar: obecnie najlepszy wynik; wolne punkty rozdzielamy tylko kandydatom, którzy mają szansę go pobić
@@ -3308,6 +3434,8 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
   });
   const spentSp = SKILLS.reduce((sum, skill) => sum + assignedSp[skill], 0);
   const finalMetrics = evaluateGoal(ctx, allItems, best.weapon, totalsSp, goal, cycleCfg);
+  // prawdziwe obrażenia do pokazania; finalMetrics.damage = wartość, po której szukanie porównywało (z Walk Speed)
+  const finalDamage = ctx.speedValue > 0 && finalMetrics.rawDamage !== undefined ? finalMetrics.rawDamage : finalMetrics.damage;
   const spValid = spentSp <= ctx.available && exactSp.capOverflow === 0 && SKILLS.every((skill) => assignedSp[skill] <= MAX_ASSIGNED_PER_SKILL);
   const passed =
     spValid &&
@@ -3315,7 +3443,8 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
     (ehpCeil === null || finalMetrics.ehp <= ehpCeil + 1e-9) &&
     manaOk(finalMetrics, cycleCfg) &&
     sustainOk(finalMetrics) &&
-    spdOk(finalMetrics);
+    spdOk(finalMetrics) &&
+    atkOk(finalMetrics);
   const warnings = [];
   if (!spValid) warnings.push(`This set needs ${exactSp.total} skill points, but level ${level} gives ${ctx.available}.`);
   if (minEhp > 0 && finalMetrics.ehp < minEhp)
@@ -3339,6 +3468,10 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
       `Nothing with these settings ${low ? "reaches" : "stays under"} ${bound > 0 ? "+" : bound < 0 ? "−" : ""}${Math.abs(bound)}% walk speed; the closest build has ${finalMetrics.walkSpeed > 0 ? "+" : finalMetrics.walkSpeed < 0 ? "−" : ""}${Math.abs(Math.round(finalMetrics.walkSpeed))}%. ${low ? "Lower the Walk Speed minimum" : "Raise the Walk Speed maximum"} or the other thresholds.`
     );
   }
+  if (!atkOk(finalMetrics))
+    warnings.push(
+      `Nothing with these settings keeps the build's attack speed at ${normalized.attackSpeeds.map((speed) => ATTACK_SPEED_LABELS[speed]).join(" / ")}; the closest build attacks at ${ATTACK_SPEED_LABELS[finalMetrics.attackSpeed] || finalMetrics.attackSpeed} (items change the weapon's speed by tiers). Check more speeds or turn off "Only builds with the checked speeds".`
+    );
   const pinnedNames = Object.values(normalized.locked || {});
   if (!passed && pinnedNames.length > 0) warnings.push(`Pinned item${pinnedNames.length === 1 ? "" : "s"} (${pinnedNames.join(", ")}) stay in the build even when they keep it from passing the filters; unpin to compare.`);
   if (cycleCfg.ids.length > 0 && !finalMetrics.cycleOk) warnings.push("Some spells in the cycle aren't unlocked in your ability tree, so their mana cost is unknown.");
@@ -3369,7 +3502,8 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
     const without = allItems.filter((item) => item !== picks[slotId]);
     const sp = computeSkillPoints(without);
     const totals = freeExtra ? Object.fromEntries(SKILLS.map((skill) => [skill, (sp.totals[skill] || 0) + freeExtra[skill]])) : sp.totals;
-    return finalMetrics.damage - evaluateGoal(ctx, without, best.weapon, totals, goal, cycleCfg).damage;
+    const other = evaluateGoal(ctx, without, best.weapon, totals, goal, cycleCfg);
+    return finalDamage - (other.rawDamage !== undefined ? other.rawDamage : other.damage);
   };
   return {
     mode: "damage",
@@ -3385,7 +3519,10 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
     options: normalized,
     profile: getArchetypeProfile(archetype && CLASSES[playerClass].archetypes.includes(archetype) ? archetype : CLASSES[playerClass].archetypes[0], normalized),
     metrics: {
-      damage: finalMetrics.damage,
+      damage: finalDamage,
+      value: finalMetrics.damage,
+      speedValue: ctx.speedValue || 0,
+      speedFactor: finalMetrics.speedFactor || 1,
       ehp: finalMetrics.ehp,
       hp: finalMetrics.hp,
       manaNet: finalMetrics.manaNet,
@@ -3401,6 +3538,7 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
       lifeRange: lifeLimits,
       spdRange: spdLimits,
       walkSpeed: finalMetrics.walkSpeed,
+      attackSpeed: finalMetrics.attackSpeed || null,
       excludeEvents,
       tradeableOnly,
       spendFreeSkillPoints,
@@ -3417,10 +3555,10 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
     warnings,
     cost: hasPriceData() ? { ...buildCost(allItems, lockedNames), budget } : null,
     lockedSlots: Object.keys(normalized.locked || {}),
-    score: finalMetrics.damage,
+    score: finalDamage,
     slots: SLOTS.map((slot) => {
       const item = picks[slot.id] || null;
-      return { ...slot, item, score: item ? (slot.id === "weapon" ? finalMetrics.damage : slotScore(slot.id)) : 0, contributions: [] };
+      return { ...slot, item, score: item ? (slot.id === "weapon" ? finalDamage : slotScore(slot.id)) : 0, contributions: [] };
     }),
     skillPoints: { available: ctx.available, assigned: assignedSp, totals: totalsSp, required: spentSp, minimum: exactSp.total, free: freeExtra, remaining: ctx.available - spentSp, valid: spValid },
     totals: itemStatTotals(allItems),
@@ -4993,6 +5131,11 @@ function CompactItemSummary({ item, build, classOk, levelOk, playerClass }) {
             No skill req.
           </span>
         )}
+        {item.majorIds.length > 0 && (
+          <span className={chip} style={ts({ borderColor: "#7A5A10", color: MAJOR_NAME_COLOR, background: "#1E170A" })} title={item.majorIds.map((key) => majorIdTitle(key, playerClass)).join("\n")}>
+            ★ Major ID
+          </span>
+        )}
         {item.base && item.base.hp ? (
           <span className={chip} style={ts({ borderColor: "#8A2A2A", color: "#FF7777", background: "#1E0A10" })} title="Base Health">
             ❤ {formatNumber(item.base.hp)}
@@ -5027,6 +5170,96 @@ function titleCase(constant) {
     .split("_")
     .map((word) => capitalize(word))
     .join(" ");
+}
+
+// MAJOR ID (0.40): nazwy i opisy z src/major-ids.json (majid.json Wynnbuildera, npm run update-major-ids) i to, czy
+// model je liczy. Efekty mają format węzłów drzewka (class, base_abil, dependencies, effects) - doklejamy je do drzewka
+// jak aspekty (mergeTreeAbilities). Opisy zawierają [fire], [neutral]... jak w Wynnbuilderze - pokazujemy symbole żywiołów.
+const MAJOR_IDS = (MAJOR_ID_DATA && MAJOR_ID_DATA.majorIds) || {};
+const MAJOR_TEXT_ELEMENT = /\[(neutral|earth|thunder|water|fire|air)\]/g;
+const MAJOR_NAME_COLOR = "#FFAA00";
+function majorIdName(key) {
+  const entry = MAJOR_IDS[key];
+  return entry ? entry.displayName : titleCase(key);
+}
+function majorIdDescription(key) {
+  const entry = MAJOR_IDS[key];
+  return entry ? entry.description.replace(MAJOR_TEXT_ELEMENT, (_, element) => `${ELEMENT_STYLE[element].label} `) : "";
+}
+// zdolności major ID, które działają dla klasy (klasa "Any" = każda); null = wszystkie
+function majorIdAbilities(key, playerClass = null) {
+  const entry = MAJOR_IDS[key];
+  // zdolność liczy się, gdy ma efekty albo zmienia właściwości (np. Heartbeat: charges +1 przy Arrow Wall)
+  return entry
+    ? entry.abilities.filter((ability) => ((ability.effects && ability.effects.length > 0) || (ability.properties && Object.keys(ability.properties).length > 0)) && (!playerClass || ability.class === "Any" || ability.class === playerClass))
+    : [];
+}
+// Co model robi z major ID: { counted, text } - krótka informacja pod opisem.
+function majorIdStatus(key, playerClass = null) {
+  const all = majorIdAbilities(key, null);
+  if (all.length === 0) return { counted: false, text: "Not counted in damage or EHP (the model can't simulate it)." };
+  const mine = majorIdAbilities(key, playerClass);
+  if (mine.length === 0) return { counted: false, text: `Not counted: it only works for ${[...new Set(all.map((ability) => ability.class))].join(", ")}.` };
+  const effects = mine.flatMap((ability) => ability.effects);
+  const slider = effects.some((effect) => effect.type === "stat_scaling" && effect.slider === true);
+  const toggle = effects.some((effect) => effect.type === "raw_stat" && effect.toggle);
+  const needs = [...new Set(mine.flatMap((ability) => ability.dependencies || []))]
+    .map((id) => {
+      const node = playerClass && TREE_DATA.classes[playerClass] ? TREE_DATA.classes[playerClass].find((entry) => entry.id === id) : null;
+      return node ? node.name : null;
+    })
+    .filter(Boolean);
+  const parts = ["Counted in damage and EHP"];
+  if (needs.length > 0) parts.push(`when ${needs.join(", ")} ${needs.length === 1 ? "is" : "are"} in your tree`);
+  if (slider || toggle) parts.push(`${slider ? "slider" : "toggle"} in Ability tree effects${slider ? " (the generator counts it at the Major ID sliders setting)" : " (off until you turn it on)"}`);
+  return { counted: true, text: `${parts.join("; ")}.` };
+}
+// Opis z symbolami żywiołów w kolorach (jak w grze / Wynnbuilderze)
+function MajorIdText({ text }) {
+  const parts = [];
+  let last = 0;
+  String(text || "").replace(MAJOR_TEXT_ELEMENT, (match, element, offset) => {
+    if (offset > last) parts.push(text.slice(last, offset));
+    parts.push(
+      <span key={offset} style={{ color: ELEMENT_STYLE[element].color }} title={ELEMENT_STYLE[element].label}>
+        {ELEMENT_STYLE[element].symbol}
+      </span>
+    );
+    last = offset + match.length;
+    return match;
+  });
+  if (last < String(text || "").length) parts.push(String(text).slice(last));
+  return <>{parts}</>;
+}
+// Blok major ID na karcie (po "Details") i w bonusach setów: nazwa złotem, opis szarym, informacja o obliczeniach.
+function MajorIdBlock({ keys, playerClass = null, compact = false }) {
+  const ts = useTs();
+  const list = (keys || []).filter((key) => !(MAJOR_IDS[key] && MAJOR_IDS[key].hidden));
+  if (list.length === 0) return null;
+  return (
+    <div className={`flex flex-col ${compact ? "gap-1 text-xs" : "gap-1.5 text-sm"}`}>
+      {list.map((key) => {
+        const status = majorIdStatus(key, playerClass);
+        return (
+          <div key={key} className="flex flex-col gap-0.5">
+            <span style={ts({ color: MAJOR_NAME_COLOR })}>+{majorIdName(key)}</span>
+            {MAJOR_IDS[key] && (
+              <span style={ts({ color: TOOLTIP.muted })}>
+                <MajorIdText text={MAJOR_IDS[key].description} />
+              </span>
+            )}
+            <span className="text-xs" style={ts({ color: status.counted ? "#55FF55" : "#8c8c8c" })}>
+              {status.counted ? "✓ " : ""}
+              {status.text}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+function majorIdTitle(key, playerClass = null) {
+  return `${majorIdName(key)}: ${majorIdDescription(key)} ${majorIdStatus(key, playerClass).text}`.trim();
 }
 
 function weaponFocusShare(item, profile) {
@@ -5526,11 +5759,10 @@ function ItemCardInner({ slot, build, actions, powder = null, open = true, onTog
             <IdentificationList item={item} relevant={relevant} playerClass={build.playerClass} />
 
             {item.majorIds.length > 0 && (
-              <div className="flex flex-col gap-0.5 text-base" style={ts({ color: "#55FFFF" })}>
-                {item.majorIds.map((major) => (
-                  <span key={major}>+ Major ID: {titleCase(major)}</span>
-                ))}
-              </div>
+              <>
+                <TooltipDivider color={color} />
+                <MajorIdBlock keys={item.majorIds} playerClass={build.playerClass} />
+              </>
             )}
           </>
         )}
@@ -5902,7 +6134,8 @@ const AFFIXES = (() => {
   base.forEach((entry) => (entry.max = Math.max(1, ...ITEM_DB.map((item) => affixValue(item, entry)))));
   const majorList = [...majors.entries()]
     .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([major, count]) => ({ id: `major:${major}`, kind: "major", key: major, label: `Major ID: ${titleCase(major)}`, group: "Major IDs", count, max: 1 }));
+    .map(([major, count]) => ({ id: `major:${major}`, kind: "major", key: major, label: majorIdName(major), description: majorIdDescription(major), group: "Major IDs", count, max: 1 }))
+    .sort((a, b) => a.label.localeCompare(b.label));
   return [...ids, ...base, ...majorList];
 })();
 const AFFIX_BY_ID = new Map(AFFIXES.map((affix) => [affix.id, affix]));
@@ -5945,7 +6178,7 @@ function affixSortValue(item, filters) {
 }
 
 function affixText(item, affix) {
-  if (affix.kind === "major") return titleCase(affix.key);
+  if (affix.kind === "major") return `Major ID: ${majorIdName(affix.key)}`;
   if (affix.kind === "base") return `${formatNumber(affixValue(item, affix))} ${affix.label}`;
   const current = item.ids[affix.key] || item.baseIds[affix.key] || 0;
   const top = idRolls(item, affix.key) ? rollRange(affix.key, item.baseIds[affix.key])[1] : null;
@@ -5958,7 +6191,8 @@ function AffixPicker({ selected, onChange, mode, onModeChange }) {
   const [query, setQuery] = useState("");
   const needle = query.trim().toLowerCase();
   const chosen = new Set(selected.map((filter) => filter.id));
-  const visible = AFFIXES.filter((affix) => !needle || affix.label.toLowerCase().includes(needle) || affix.group.toLowerCase().includes(needle) || affix.key.toLowerCase() === needle);
+  // 0.40: major ID szukane też po opisie (np. "poison" znajduje Plague)
+  const visible = AFFIXES.filter((affix) => !needle || affix.label.toLowerCase().includes(needle) || affix.group.toLowerCase().includes(needle) || affix.key.toLowerCase() === needle || (affix.kind === "major" && affix.description.toLowerCase().includes(needle)));
   const toggle = (affix) => onChange(chosen.has(affix.id) ? selected.filter((filter) => filter.id !== affix.id) : [...selected, { id: affix.id, min: "" }]);
   return (
     <div className="flex flex-col gap-2">
@@ -6018,7 +6252,7 @@ function AffixPicker({ selected, onChange, mode, onModeChange }) {
           <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder={`Search ${AFFIXES.length} identifications, e.g. mana, thunder, cost, major`}
+            placeholder={`Search ${AFFIXES.length} identifications, e.g. mana, thunder, cost, major, poison`}
             className="mc-input w-full"
             aria-label="Search identifications"
             autoFocus
@@ -6042,7 +6276,7 @@ function AffixPicker({ selected, onChange, mode, onModeChange }) {
                         onClick={() => toggle(affix)}
                         className="mc-slot flex items-center gap-1 px-2 py-0.5 text-left text-xs"
                         style={ts({ color: chosen.has(affix.id) ? "#FFAA00" : "#e0e0e0", borderColor: chosen.has(affix.id) ? "#FFAA00" : undefined })}
-                        title={`${affix.count} item${affix.count === 1 ? "" : "s"} in the game have it`}
+                        title={`${affix.kind === "major" ? `${majorIdTitle(affix.key)}\n` : ""}${affix.count} item${affix.count === 1 ? "" : "s"} in the game have it`}
                       >
                         {chosen.has(affix.id) ? "✓ " : ""}
                         {affix.label}
@@ -6446,6 +6680,11 @@ function ItemBrowserDialogBody({ build, slotId = null, playerClass, level, optio
                       {fallbackStats.map((c) => `${formatStatValue(c.key, c.value)} ${STAT_META[c.key] ? STAT_META[c.key].label : c.key}`).join(" · ")}
                       {levelGap ? <span style={ts({ color: "#FFAA00" })}>{stats.length > 0 ? " · " : ""}far below your level ({formatScore(levelGap.contribution)})</span> : null}
                     </span>
+                    {item.majorIds.length > 0 && (
+                      <span className="text-xs" style={ts({ color: MAJOR_NAME_COLOR })} title={item.majorIds.map((key) => majorIdTitle(key, playerClass)).join("\n")}>
+                        ★ {item.majorIds.map(majorIdName).join(" · ")}
+                      </span>
+                    )}
                     {affixFilters.length > 0 && (
                       <span className="text-xs" style={ts({ color: "#FFAA00" })}>
                         {affixFilters
@@ -7040,7 +7279,7 @@ function copyStats(stats) {
 // Aktywne węzły drzewka (po walidacji) scalone w zdolności, w kolejności wierszy drzewka.
 // aspects: [[aspekt z tomes-aspects.json, tier 1..n]] - efekty tieru doklejane jak w Wynnbuilderze (atree.js,
 // "Apply aspects"): tylko do zdolności, które są w drzewku, i tylko gdy wszystkie ich "deps" są aktywne.
-function mergeTreeAbilities(playerClass, activeIds, aspects = []) {
+function mergeTreeAbilities(playerClass, activeIds, aspects = [], majors = []) {
   const merged = new Map();
   merged.set(MELEE_ABILITY_ID, {
     id: MELEE_ABILITY_ID,
@@ -7080,6 +7319,22 @@ function mergeTreeAbilities(playerClass, activeIds, aspects = []) {
       });
     });
   });
+  // 0.40: major ID (majorEntriesFor) po aspektach - jak Wynnbuilder: klasa postaci albo "Any", aktywne dependencies,
+  // base_abil obecny w drzewku (inaczej nic). Efekty dostają majorId (panel Ability tree effects: grupa "Major IDs").
+  majors.forEach((major) => {
+    major.abilities.forEach((ability) => {
+      if (ability.class !== "Any" && ability.class !== playerClass) return;
+      if ((ability.dependencies || []).some((id) => !activeIds.has(id))) return;
+      if (ability.base_abil === undefined || ability.base_abil === null) return;
+      const base = merged.get(ability.base_abil);
+      if (!base) return;
+      base.effects.push(...cloneJson(ability.effects || []).map((effect) => ({ ...effect, majorId: major.key, majorName: major.name, majorFrom: (major.sources || []).join(", ") })));
+      base.nodes.push(major.name);
+      Object.entries(ability.properties || {}).forEach(([key, value]) => {
+        base.props[key] = key in base.props ? base.props[key] + value : value;
+      });
+    });
+  });
   return merged;
 }
 
@@ -7092,7 +7347,7 @@ function treeInteractives(merged) {
     ability.effects.forEach((effect) => {
       if (effect.type === "stat_scaling" && effect.slider === true && effect.slider_name) pending.push([effect, ability]);
       if (effect.type === "raw_stat" && effect.toggle && !toggles.has(effect.toggle)) {
-        toggles.set(effect.toggle, { name: effect.toggle, ability: ability.name });
+        toggles.set(effect.toggle, { name: effect.toggle, ability: ability.name, major: effect.majorId ? { key: effect.majorId, name: effect.majorName, from: effect.majorFrom } : null });
       }
     });
   });
@@ -7119,7 +7374,7 @@ function treeInteractives(merged) {
           info.defaultValue += defaultValue;
         }
       } else if (behavior === "merge") {
-        sliders.set(name, { name, ability: ability.name, max, defaultValue, step: effect.slider_step || 1, owner: ability, maxMult: 1, overwritten: false });
+        sliders.set(name, { name, ability: ability.name, max, defaultValue, step: effect.slider_step || 1, owner: ability, maxMult: 1, overwritten: false, major: effect.majorId ? { key: effect.majorId, name: effect.majorName, from: effect.majorFrom } : null });
       } else {
         deferred.push([effect, ability]);
       }
@@ -7136,6 +7391,11 @@ function treeInteractives(merged) {
 }
 
 function sliderValue(info, settings) {
+  // 0.40: suwaki major ID w generatorze / Optimizerze / Solverze: ustawienie "Major ID sliders" (0 / połowa / maksimum)
+  if (info.major && settings && settings.majorSliders) {
+    const value = settings.majorSliders === "max" ? info.max : settings.majorSliders === "half" ? Math.round(info.max / 2) : 0;
+    return Math.min(info.max, Math.max(0, value));
+  }
   const chosen = settings && settings.sliders ? settings.sliders[info.name] : undefined;
   const value = typeof chosen === "number" && Number.isFinite(chosen) ? chosen : info.defaultValue;
   return Math.min(info.max, Math.max(0, value));
@@ -7524,10 +7784,10 @@ function evaluateSpell(spell, stats, weapon, totalHp) {
 }
 
 // Stan drzewka dla klasy: aktywne węzły (walidowane jak w zakładce), scalone zdolności, suwaki i przełączniki.
-function treeStateFor(playerClass, selectedIds = [], aspects = []) {
+function treeStateFor(playerClass, selectedIds = [], aspects = [], majors = []) {
   const tree = TREE_INDEX[playerClass];
   const resolved = tree ? resolveTree(tree, selectedIds) : { reachable: new Set(), points: 0 };
-  const merged = mergeTreeAbilities(playerClass, resolved.reachable, aspects);
+  const merged = mergeTreeAbilities(playerClass, resolved.reachable, aspects, majors);
   return { active: resolved.reachable, points: resolved.points, merged, interactives: treeInteractives(merged) };
 }
 
@@ -7582,7 +7842,7 @@ function weaponPowderSpecial(weapon, stats, critChance) {
   return out;
 }
 
-function computeBuildStats(build, treeSettings = null) {
+function computeBuildStats(build, treeSettings = null, { majors: withMajors = true } = {}) {
   // tomy gracza (Creator / Optimizer: build.tomes) liczą się jak przedmioty z samymi identyfikacjami
   const items = [...build.slots.filter((slot) => slot.item).map((slot) => slot.item), ...(build.tomes || [])];
   const weapon = (build.slots.find((slot) => slot.id === "weapon") || {}).item;
@@ -7590,7 +7850,9 @@ function computeBuildStats(build, treeSettings = null) {
   const skills = build.skillPoints.totals;
   const stats = buildStatMap(build, items, weapon);
   // aspekty (treeSettings.aspects: pary [aspekt, tier]) doklejają się do zdolności drzewka jak w generatorze
-  const tree = treeStateFor(build.playerClass, (treeSettings && treeSettings.selected) || [], (treeSettings && treeSettings.aspects) || []);
+  // 0.40: major ID przedmiotów i setów buildu (suwaki i przełączniki w ustawieniach gracza, jak drzewko)
+  const majors = withMajors ? majorEntriesFor(items, build.playerClass) : [];
+  const tree = treeStateFor(build.playerClass, (treeSettings && treeSettings.selected) || [], (treeSettings && treeSettings.aspects) || [], majors);
   treeRawStats(tree.merged, stats);
   const preStats = copyStats(stats);
   const scaled = applyTreeScaling(tree.merged, preStats, tree.interactives, treeSettings);
@@ -7599,7 +7861,7 @@ function computeBuildStats(build, treeSettings = null) {
     else mergeStat(stats, key, value);
   });
   const hp = Math.max(5, statValue(stats, "hp") + statValue(stats, "hpBonus"));
-  const result = { weapon, ids, skills, stats, hp, tree: { ...tree, activeCount: tree.active.size }, spells: [] };
+  const result = { weapon, ids, skills, stats, hp, tree: { ...tree, activeCount: tree.active.size, majors }, spells: [] };
   if (weapon) {
     const spells = collectTreeSpells(scaled.edited, scaled.translate);
     const melee = spells.has(0) ? evaluateSpell(spells.get(0), stats, weapon, hp) : null;
@@ -8244,8 +8506,11 @@ function treePassiveBonuses(merged) {
 
 // Przełączniki i suwaki aktywnych zdolności (np. Corrupted, Mask of the Lunatic) + stałe bonusy drzewka.
 function TreeEffectsPanel({ playerClass, state, settings, onChange, onOpenTree }) {
-  const toggles = [...state.interactives.toggles.values()];
-  const sliders = [...state.interactives.sliders.values()];
+  // 0.40: przełączniki i suwaki major ID (z przedmiotów buildu) w osobnej grupie "Major IDs"
+  const toggles = [...state.interactives.toggles.values()].filter((toggle) => !toggle.major);
+  const sliders = [...state.interactives.sliders.values()].filter((slider) => !slider.major);
+  const majorToggles = [...state.interactives.toggles.values()].filter((toggle) => toggle.major);
+  const majorSliders = [...state.interactives.sliders.values()].filter((slider) => slider.major);
   const passive = useMemo(() => treePassiveBonuses(state.merged), [state.merged]);
   const current = settings || { toggles: {}, sliders: {} };
   const changed = Object.keys(current.toggles || {}).length > 0 || Object.keys(current.sliders || {}).length > 0;
@@ -8333,8 +8598,43 @@ function TreeEffectsPanel({ playerClass, state, settings, onChange, onOpenTree }
               })}
             </div>
           )}
-          {toggles.length === 0 && sliders.length === 0 && <p className="text-xs text-zinc-500">These abilities have no toggles or sliders.</p>}
+          {toggles.length === 0 && sliders.length === 0 && majorToggles.length === 0 && majorSliders.length === 0 && <p className="text-xs text-zinc-500">These abilities have no toggles or sliders.</p>}
         </>
+      )}
+      {(majorToggles.length > 0 || majorSliders.length > 0) && (
+        <div className="mc-hr flex flex-col gap-2 pt-3">
+          <span className="text-xs" style={ts({ color: MAJOR_NAME_COLOR })}>
+            Major IDs <span className="text-zinc-500">(from your items; the generator counts sliders at its "Major ID sliders" setting)</span>
+          </span>
+          {majorToggles.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {majorToggles.map((toggle) => (
+                <ToggleChip key={toggle.name} pressed={Boolean((current.toggles || {})[toggle.name])} onClick={() => setToggle(toggle.name)}>
+                  <span title={`${majorIdTitle(toggle.major.key, playerClass)} From ${toggle.major.from}.`}>
+                    {toggle.name} <span className="text-zinc-500">({toggle.major.from})</span>
+                  </span>
+                </ToggleChip>
+              ))}
+            </div>
+          )}
+          {majorSliders.map((slider) => {
+            const value = sliderValue(slider, current);
+            const id = `major-slider-${slider.name.replace(/\W+/g, "-")}`;
+            return (
+              <div key={slider.name} className="flex flex-col gap-1">
+                <div className="flex items-baseline justify-between gap-2 text-xs">
+                  <label htmlFor={id} className="text-zinc-200" title={`${majorIdTitle(slider.major.key, playerClass)} From ${slider.major.from}.`}>
+                    {slider.name} <span className="text-zinc-500">({slider.major.name} · {slider.major.from})</span>
+                  </label>
+                  <span className="tabular-nums text-zinc-200">
+                    {value} / {slider.max}
+                  </span>
+                </div>
+                <McRange id={id} min={0} max={slider.max} step={slider.step} value={value} onChange={(event) => setSlider(slider.name, Number(event.target.value))} className="w-full" accent={MAJOR_NAME_COLOR} />
+              </div>
+            );
+          })}
+        </div>
       )}
     </section>
   );
@@ -8407,11 +8707,11 @@ function SetBonusList({ items, playerClass }) {
                     </li>
                   );
                 })}
-                {majors.map((major) => (
-                  <li key={major} className="text-zinc-300">
-                    Major ID: {major}
+                {majors.length > 0 && (
+                  <li className="pt-1 font-sans">
+                    <MajorIdBlock keys={majors} playerClass={playerClass} compact />
                   </li>
-                ))}
+                )}
               </ul>
             )}
           </div>
@@ -8446,7 +8746,7 @@ function describeOptions(rawOptions) {
   const parts = [];
   if (options.elements.length > 0) parts.push(`${options.elements.map((element) => ELEMENT_STYLE[element].label).join(" + ")} damage`);
   if (options.attackSpeeds.length > 0) {
-    parts.push(`${options.attackSpeeds.map((speed) => ATTACK_SPEED_LABELS[speed]).join(" / ")} weapons`);
+    parts.push(`${options.attackSpeeds.map((speed) => ATTACK_SPEED_LABELS[speed]).join(" / ")} ${options.attackSpeedsFinal ? "builds (after item tiers)" : "weapons"}`);
   }
   if (options.boosts.length > 0) {
     parts.push(`extra ${options.boosts.map((id) => STAT_BOOSTS.find((boost) => boost.id === id).label).join(", ")}`);
@@ -8618,8 +8918,8 @@ function rangeUi(kind, level) {
     accent: "#FFFF55",
     presets: [
       ["Any", { min: null, max: null }, "No walk speed condition (like 0.35)"],
-      ["Default", { ...DEFAULT_SPD_RANGE }, "At least −20% walk speed"],
-      ["No slowdown", { min: 0, max: null }, "At least 0%"],
+      ["Slow ok", { min: -20, max: null }, "At least −20% walk speed (the default before 0.40)"],
+      ["Default", { ...DEFAULT_SPD_RANGE }, "At least 0%: never slower than normal"],
       ["Mobile", { min: 20, max: null }, "At least +20%"],
       ["Fast", { min: 40, max: null }, "At least +40%"],
     ],
@@ -9007,6 +9307,8 @@ function damageGoalOptions(playerClass, level, treeSettings, items = ITEM_DB, cy
   const weapon = representativeWeapon(playerClass, level, treeSettings, items);
   if (!weapon) return [];
   const ctx = damageGoalContext(playerClass, level, treeSettings);
+  // lista celów z samego drzewka: major ID "reprezentatywnej" broni (np. Accretion Chain) nie dokładają czarów (0.40)
+  ctx.noMajors = true;
   const sp = computeSkillPoints([weapon]);
   const { stats, scaled } = goalStats(ctx, [weapon], weapon, sp.totals);
   const hp = Math.max(5, statValue(stats, "hp") + statValue(stats, "hpBonus"));
@@ -9073,7 +9375,7 @@ function goalKey(goal) {
 // spd = Walk Speed w % (domyślnie co najmniej -20%). Przełącznik "Life sustain > 0" zastąpiło minimum 1 HP/s.
 const DEFAULT_MANA_RANGE = { min: 0, max: 1 };
 const DEFAULT_LIFE_RANGE = { min: null, max: null };
-const DEFAULT_SPD_RANGE = { min: -20, max: null };
+const DEFAULT_SPD_RANGE = { min: 0, max: null }; // 0.40: nie wolniej niż normalnie (wcześniej −20%)
 const DEFAULT_DAMAGE_FORM = { preset: "", goal: null, minEhp: null, maxEhp: null, cycle: "", cps: 3, steal: true, gain: true, noEvents: true, tradeable: false, freeSp: true, poison: false, rolls: "max", drain: DEFAULT_MANA_RANGE, lr: DEFAULT_LIFE_RANGE, spd: DEFAULT_SPD_RANGE, raidMana: 0 };
 // Para { min, max } z formularza; stare wartości liczbowe (0.35-0.36) przez fromNumber.
 function rangePair(value, fromNumber) {
@@ -9429,8 +9731,9 @@ function DamageForm({
             value={formSpdPair(form)}
             onChange={(range) => set({ spd: range })}
             hint={speedRangeHint(shownBuild)}
-            title="Walk Speed of the whole build (items, sets, ability tree) - the number in the summary. The default minimum (−20%) keeps the search from slow builds; Any = no condition."
+            title="Walk Speed of the whole build (items, sets, ability tree) - the number in the summary. The default minimum (0%) keeps the search from builds slower than normal; Any = no condition."
           />
+          <SpeedValueControl id="new-speed-value" options={options} onChange={onOptions} />
         </fieldset>
       )}
 
@@ -9510,6 +9813,7 @@ function DamageForm({
             <CheckRow id="new-free-sp" checked={form.freeSp !== false} onChange={() => set({ freeSp: form.freeSp === false })} label="Spend free skill points" hint="shown as (+X)" title="When the set needs fewer skill points than your level gives, spend the rest where they raise the goal most (or first where they get the build over the filters). Off: the rest stays unspent, like a fresh build in Wynnbuilder." />
             <CheckRow id="new-rolls" checked={form.rolls === "avg"} onChange={() => set({ rolls: form.rolls === "avg" ? "max" : "avg" })} label="Realistic rolls (50%)" hint="off = max, like Wynnbuilder" title="Off (default): identifications at their maximum roll, like Wynnbuilder. On: every rolled ID at 50% - then items with fixed IDs (mostly quest rewards) get an edge, because they always count at 100%." />
             <CheckRow id="new-poison" checked={Boolean(form.poison)} onChange={() => set({ poison: !form.poison })} label="Count poison in the goal" title="Adds Poison per second to the goal (spread over the casts for a spell). Off by default: how poison stacks and works on bosses isn't known, and counting it made the search pick poison-only items. The Poison DPS row in the Damage panel is always shown." />
+            <MajorSlidersControl id="new-major-sliders" options={options} onChange={onOptions} />
           </div>
           <div className="mt-2">
             <ItemFilters options={options} onChange={onOptions} weaponType={classConfig ? classConfig.weapon : null} level={level || 120} onBrowse={onBrowse} />
@@ -10348,7 +10652,8 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
             </React.Fragment>
           ))}
           <SectionBar wide />
-          <RangeControl id="wiz-spd" kind="spd" level={level} heading value={formSpdPair(form)} onChange={(range) => set({ spd: range })} hint="Walk Speed of the whole build (items, sets, ability tree). The default minimum (−20%) keeps the search from slow builds; Any = no condition." />
+          <RangeControl id="wiz-spd" kind="spd" level={level} heading value={formSpdPair(form)} onChange={(range) => set({ spd: range })} hint="Walk Speed of the whole build (items, sets, ability tree). The default minimum (0%) keeps the search from builds slower than normal; Any = no condition." />
+          <SpeedValueControl id="wiz-speed-value" options={options} onChange={onOptions} />
           <SectionBar wide />
           <div className="flex flex-col gap-2">
             <h3 className={SECTION_HEAD}>
@@ -10361,6 +10666,7 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
                 </WizardTile>
               ))}
             </div>
+            <AttackSpeedFinalCheck id="wiz-atk-final" options={options} onChange={onOptions} />
           </div>
         </div>
       )}
@@ -10430,7 +10736,8 @@ function classPreview(playerClass, level, treeSettings, items = ITEM_DB) {
   if (!weapon) return null;
   const sp = computeSkillPoints([weapon]);
   const build = { playerClass, level, archetype: null, slots: SLOTS.map((slot) => ({ ...slot, item: slot.id === "weapon" ? weapon : null })), skillPoints: { totals: sp.totals } };
-  return { weapon, stats: computeBuildStats(build, treeSettings) };
+  // podgląd klasy z samego drzewka: major ID przykładowej broni się nie liczą (0.40)
+  return { weapon, stats: computeBuildStats(build, treeSettings, { majors: false }) };
 }
 
 // Mana w cyklu jak w filtrze zakładki New: liczą się tylko czary 1-4 (M/F z kombinacji nie kosztują many),
@@ -10730,7 +11037,7 @@ function PinnedList({ options, onChange }) {
 // Klucz filtrów przedmiotów (do wykrywania, że wynik jest nieaktualny).
 function itemFilterKey(normalized) {
   if (!normalized) return "";
-  return JSON.stringify([normalized.excludedTiers, normalized.budget, normalized.onlyListed, normalized.locked, normalized.excluded, normalized.attackSpeeds, normalized.avoidNegativeDefences]);
+  return JSON.stringify([normalized.excludedTiers, normalized.budget, normalized.onlyListed, normalized.locked, normalized.excluded, normalized.attackSpeeds, normalized.avoidNegativeDefences, normalized.attackSpeeds.length > 0 && normalized.attackSpeedsFinal, normalized.majorSliders]);
 }
 
 // Pola "Avoid negative defences" i "Live on the Trade Market" (sekcja Items › Filters w lewym panelu).
@@ -10779,7 +11086,8 @@ function ItemFilters({ options, onChange, weaponType, level, onBrowse }) {
             </ToggleChip>
           ))}
         </div>
-        <span className="text-xs text-zinc-500">{normalized.attackSpeeds.length > 0 ? "Only weapons with the checked speeds." : "None checked = any speed."}</span>
+        <span className="text-xs text-zinc-500">{normalized.attackSpeeds.length > 0 ? (normalized.attackSpeedsFinal ? "Weapons and the whole build at the checked speeds." : "Only weapons with the checked speeds.") : "None checked = any speed."}</span>
+        <AttackSpeedFinalCheck id="new-atk-final" options={options} onChange={onChange} />
       </div>
       <button type="button" className="mc-link self-start text-xs" aria-expanded={open} onClick={() => setOpen(!open)}>
         {open ? "▾" : "▸"} Pin items · rarities{market ? " · budget" : ""}
@@ -11561,6 +11869,75 @@ const POWDER_LEVELS = [1, 5, 15, 25, 40, 55, 70]; // najniższy poziom przedmiot
 const ROMAN = ["I", "II", "III", "IV", "V", "VI", "VII"];
 // Wybór powderów broni (Weapon powders): auto / jeden żywioł / własna mieszanka / bez powderów. Używany w formularzu
 // generatora (sekcja Items) i w Custom stats.
+// 0.40: "Major ID sliders" - przy jakiej wartości generator liczy suwaki major ID (np. Manic Edge "Mana Lost")
+const MAJOR_SLIDER_CHOICES = [
+  ["zero", "0 (no bonus)", "Safe: the search never picks an item for a bonus you may not keep up."],
+  ["half", "Half", "Sliders at half of their maximum."],
+  ["max", "Maximum", "Sliders at their maximum: the best case, e.g. Manic Edge with all 24 mana lost."],
+];
+function MajorSlidersControl({ id, options, onChange }) {
+  const value = normalizeOptions(options).majorSliders;
+  const choice = MAJOR_SLIDER_CHOICES.find(([key]) => key === value) || MAJOR_SLIDER_CHOICES[0];
+  return (
+    <label htmlFor={id} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 text-xs text-zinc-200" title={`Major IDs with a slider (stacks, mana lost...) count at this value when the generator compares builds. ${choice[2]} The card and the Damage panel always use the sliders you set in Ability tree effects.`}>
+      <span className="min-w-0">
+        Major ID sliders <span className="text-zinc-500">· in the search</span>
+      </span>
+      <select id={id} value={value} onChange={(event) => onChange({ ...options, majorSliders: event.target.value })} className="mc-input py-0.5 text-xs">
+        {MAJOR_SLIDER_CHOICES.map(([key, label]) => (
+          <option key={key} value={key}>
+            {label}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+// 0.40: "Only builds with the checked speeds" - szybkość ataku całego buildu, nie tylko broni
+function AttackSpeedFinalCheck({ id, options, onChange }) {
+  const normalized = normalizeOptions(options);
+  const none = normalized.attackSpeeds.length === 0;
+  return (
+    <CheckRow
+      id={id}
+      checked={normalized.attackSpeedsFinal}
+      onChange={() => onChange({ ...options, attackSpeedsFinal: !normalized.attackSpeedsFinal })}
+      label="Only builds with the checked speeds"
+      hint={none ? "check a speed first" : "after item tiers"}
+      disabled={none}
+      title="Some items change the weapon's attack speed by tiers (e.g. −1 tier turns a Normal bow into a Slow one). On: the whole build - weapon plus every attack speed bonus and penalty from items and sets - must end at a checked speed. Off: only the weapon's own speed is checked."
+    />
+  );
+}
+
+// 0.40: "Walk speed is worth" - ile obrażeń generator oddaje za Walk Speed (options.speedValue)
+function SpeedValueControl({ id, options, onChange, heading = false }) {
+  const value = normalizeOptions(options).speedValue;
+  const choice = SPEED_VALUES.find((entry) => entry.value === value) || SPEED_VALUES[2];
+  return (
+    <div className="flex flex-col gap-1">
+      <label htmlFor={id} className={heading ? SECTION_HEAD : "text-xs text-zinc-300"}>
+        Walk speed is worth
+      </label>
+      <select
+        id={id}
+        value={String(value)}
+        onChange={(event) => onChange({ ...options, speedValue: Number(event.target.value) })}
+        className="mc-input w-full"
+        title="The search compares builds by the goal × (1 + value × walk speed), walk speed counted up to +50%. With 1% per +10%, a build with +48% walk speed beats one with −20% if it has at most ~6.5% less damage. The damage shown is always the real number."
+      >
+        {SPEED_VALUES.map((entry) => (
+          <option key={entry.value} value={String(entry.value)}>
+            {entry.value === 0 ? "Nothing (damage only)" : entry.label}
+          </option>
+        ))}
+      </select>
+      <p className="text-xs text-zinc-500">{value > 0 ? `${choice.hint.charAt(0).toUpperCase()}${choice.hint.slice(1)}, counted up to +${SPEED_VALUE_CAP}%.` : "Walk speed only through the range above."}</p>
+    </div>
+  );
+}
+
 function WeaponPowdersControl({ options, onChange }) {
   return (
     <div className="flex flex-col gap-2">
@@ -11923,7 +12300,7 @@ const SITE_SOURCES = [
   [
     "Wynnbuilder",
     "https://wynnbuilder.github.io/",
-    "item and ability tree data, damage formulas, the 16×16 item sprites and ability tree textures (GPL-3.0); tomes and aspects data (2.2.4.0), powder and damage calculations, the build link format for import and export",
+    "item and ability tree data, damage formulas, the 16×16 item sprites and ability tree textures (GPL-3.0); tomes and aspects data (2.2.4.0), major ID descriptions and effects (majid.json), powder and damage calculations, the build link format for import and export",
   ],
   ["Build Solver (rawfish69)", "https://rawfish69.github.io/build-solver/", "the model for the Build Solver tab"],
   ["Wynncraft Wiki", "https://wynncraft.wiki.gg/", "weapon DPS, identification rolls, ability trees, powders, class portraits and festival item lists; skill points, tomes, aspects, raid and dungeon levels, version history"],
@@ -12048,7 +12425,7 @@ function InfoDialogBody({ onClose }) {
                 {hl("Mana.")} Type your spell cycle (1-4 = spells, M = main attack) and clicks per second, and the range of its mana balance (the minimum = the drain you accept,
                 the maximum = how much surplus is fine). Life recovery has a range too. In raids you can add your team's mana buff under Advanced, at the bottom of the left panel.
               </li>
-              <li>{hl("Extras.")} Event items, tradeable only, negative defences, max or realistic rolls, poison, free skill points, the walk speed range (default: at least −20%), weapon attack speed.</li>
+              <li>{hl("Extras.")} Event items, tradeable only, negative defences, max or realistic rolls, poison, free skill points, the walk speed range (default: at least 0%) and how much walk speed is worth in damage (default: 1% per +10%), weapon attack speed.</li>
               <li>{hl("Generate.")} The left panel comes back: change anything and generate again. "Settings changed: regenerate" means the build shown is for older settings.</li>
               <li>
                 {hl("Read the result.")} Item cards (other picks, rolls, pin or exclude an item), Why this build? (every number and what each item adds), Open in Wynnbuilder,
@@ -12076,6 +12453,11 @@ function InfoDialogBody({ onClose }) {
               <li className="wbr-welcome-source">
                 {hl("Not counted")}: poison (unless "Count poison in the goal"), powder specials (shown in the Damage panel only), tomes and aspects (their own tabs), how long
                 spells take to deal their damage (use Whole cycle), crafted items, enemies' resistances and your team's buffs.
+              </li>
+              <li className="wbr-welcome-source">
+                {hl("Major IDs")}: counted where Wynnbuilder counts them - spell changes and flat bonuses always, sliders (e.g. Manic Edge "Mana Lost") at the "Major ID sliders" setting, toggles when
+                you turn them on in Ability tree effects. Major IDs with effects the model can't simulate (poison spreading, pulling items, effects on kill) show their description only,
+                marked "Not counted" on the item.
               </li>
             </ul>
           </section>
@@ -12315,8 +12697,8 @@ function tradeoffSuggestion(rows) {
   const limited = all.filter((row) => row.limit !== null);
   const passed = limited.length > 0 ? limited : all;
   if (passed.length === 0) return null;
-  const best = passed.reduce((top, row) => (!top || row.build.metrics.damage > top.build.metrics.damage ? row : top), null);
-  const pick = passed.find((row) => row.build.metrics.damage >= TRADEOFF_KEEP * best.build.metrics.damage) || best;
+  const best = passed.reduce((top, row) => (!top || buildValueOf(row.build) > buildValueOf(top.build) ? row : top), null);
+  const pick = passed.find((row) => buildValueOf(row.build) >= TRADEOFF_KEEP * buildValueOf(best.build)) || best;
   const m = pick.build.metrics;
   const hasCycle = m.cycle && m.cycle.ids && m.cycle.ids.length > 0;
   const drain = hasCycle && m.manaNet < 0 ? Math.ceil(-m.manaNet * 2) / 2 : 0;
@@ -16393,9 +16775,11 @@ function shareSettingsData({ form, options, rank }) {
     t: [f.rolls === "avg", Boolean(f.poison), f.noEvents !== false, Boolean(f.tradeable), f.freeSp !== false, f.steal !== false, f.gain !== false].map((flag) => (flag ? 1 : 0)),
     k: Object.entries(o.locked).map(([slotId, name]) => [slotId, id(name)]),
     x: o.excluded.map(id),
-    o: [o.excludedTiers, o.attackSpeeds, o.avoidNegativeDefences ? 1 : 0, o.onlyListed ? 1 : 0, o.budget || 0, o.budgetUnit, o.powders],
+    o: [o.excludedTiers, o.attackSpeeds, o.avoidNegativeDefences ? 1 : 0, o.onlyListed ? 1 : 0, o.budget || 0, o.budgetUnit, o.powders, o.attackSpeedsFinal ? 1 : 0],
     pr: f.preset || "",
     tp: f.treePreset || null,
+    sv: o.speedValue,
+    ms: o.majorSliders,
   };
 }
 let shareDefaultsCache = null;
@@ -16466,6 +16850,10 @@ function decodeShareSettings(code) {
     budget: extra[4] || null,
     budgetUnit: extra[5] || "le",
     powders: extra[6] || "auto",
+    attackSpeedsFinal: extra[7] === 1,
+    // 0.40: ile wart jest Walk Speed (link sprzed 0.40 = domyślnie)
+    speedValue: data.sv === undefined ? SPEED_VALUE_DEFAULT : data.sv,
+    majorSliders: typeof data.ms === "string" ? data.ms : "zero",
   });
   return { form, options, rank: typeof data.r === "string" ? data.r : "" };
 }
@@ -16647,6 +17035,9 @@ function optCandidates(spec, slotId) {
     if (spec.filters.avoidNegativeDefences && hasNegativeDefence(item)) return false;
     if (allowed && !allowed.has(item.name)) return false;
     if (slot.type === "weapon" && spec.filters.attackSpeeds.length > 0 && !spec.filters.attackSpeeds.includes(item.atkSpd)) return false;
+    // 0.40: pełne przeszukanie bez przedmiotów z major ID (ich efektów nie widzą granice); każdy z nich dostaje potem
+    // osobne przeszukanie z nim przypiętym (runOptimizer)
+    if (spec.excludeMajors && countedMajor(item, spec.playerClass)) return false;
     return true;
   });
   if (slot.type !== "weapon") return items;
@@ -17623,6 +18014,24 @@ function optItemsOf(spec, picks, emptySlots) {
   });
   return { items, weapon: items.find((item) => item.__slot === "weapon") || null };
 }
+// 0.40: przedmiot z major ID, który model liczy dla klasy
+function countedMajor(item, playerClass) {
+  return Boolean(item && item.majorIds && item.majorIds.some((key) => majorAbilitiesFor(key, playerClass).length > 0));
+}
+// Przypięcia do pełnego przeszukania: każdy przedmiot z major ID z pul pustych slotów (broń: każdy wariant powderów).
+// Granice przeszukiwania (styczne) nie widzą efektów major ID, więc główne przeszukanie idzie bez nich, a każdy z nich
+// ma własne - wtedy jego efekt jest stały i granice są poprawne. Build z dwoma przedmiotami z major ID w pustych
+// slotach naraz znajduje szybkie szukanie i zamiany, pełne przeszukanie go nie gwarantuje.
+function optMajorPins(spec, emptySlots) {
+  const pins = [];
+  emptySlots.forEach((slotId) => {
+    if (slotId === "ring2" && emptySlots.includes("ring1")) return; // pierścienie są symetryczne
+    optCandidates({ ...spec, excludeMajors: false }, slotId)
+      .filter((item) => countedMajor(item, spec.playerClass))
+      .forEach((item) => pins.push({ slotId, ...optPickOf(slotId, item), rolls: null }));
+  });
+  return pins;
+}
 function optPickOf(slotId, item) {
   return { name: item.name, powders: item.powders && item.powders.list && (slotId === "weapon" || ARMOUR_SLOT_IDS.includes(slotId)) ? powderText(item.powders.list) : "" };
 }
@@ -18178,6 +18587,9 @@ async function runOptimizer({ ws, params, allowedNames = null, executor, makeExe
             // pełne przeszukanie: kandydaci pierwszego slotu w kawałkach, rozdzielanych na wątki; każdy kawałek dostaje
             // aktualny rekord (lepszy rekord = więcej odciętych gałęzi)
             checked = 0;
+            // 0.40: przedmioty z major ID poza główną pulą (osobne przeszukania z przypiętym przedmiotem, niżej)
+            const pins = optMajorPins(spec, plan.emptySlots);
+            const mainSpec = pins.length > 0 ? { ...spec, excludeMajors: true } : spec;
             const count = plan.firstCount;
             const pieces = Math.max(1, Math.min(count, executor.threads * 8));
             const size = Math.max(1, Math.ceil(count / pieces));
@@ -18195,7 +18607,7 @@ async function runOptimizer({ ws, params, allowedNames = null, executor, makeExe
               while (ranges.length > 0 && !stopRef.current) {
                 const [from, to] = ranges.shift();
                 const key = `${from}-${to}`;
-                const result = await executor.run("bnb", { ...payload, from, to, incumbent: best, refPicks: picks }, (tick) => {
+                const result = await executor.run("bnb", { ...payload, spec: mainSpec, from, to, incumbent: best, refPicks: picks }, (tick) => {
                   live.set(key, tick.checked);
                   if (tick.picks && tick.best > best) {
                     best = tick.best;
@@ -18213,6 +18625,27 @@ async function runOptimizer({ ws, params, allowedNames = null, executor, makeExe
               }
             };
             await Promise.all(Array.from({ length: Math.max(1, executor.threads) }, worker));
+            // 0.40: przedmioty z major ID - każdy przypięty, reszta pustych slotów przeszukana w całości
+            if (pins.length > 0 && !stopRef.current) {
+              const queue = [...pins];
+              let pinned = 0;
+              const pinWorker = async () => {
+                while (queue.length > 0 && !stopRef.current) {
+                  const pin = queue.shift();
+                  const pinSpec = { ...mainSpec, fixed: [...mainSpec.fixed.filter((entry) => entry.slotId !== pin.slotId), pin] };
+                  const rest = plan.emptySlots.filter((slotId) => slotId !== pin.slotId);
+                  const result = await executor.run("bnb", { spec: pinSpec, treeIds: plan.treeIds, emptySlots: rest, from: 0, to: null, incumbent: best, refPicks: picks });
+                  pinned += 1;
+                  checked += result.checked;
+                  if (result.best > best) {
+                    best = result.best;
+                    picks = { ...(result.picks || {}), [pin.slotId]: { name: pin.name, powders: pin.powders } };
+                  }
+                  report("items", { total: plan.total, checked: Math.min(checked, plan.total), note: `Items with major IDs ${pinned}/${pins.length}` });
+                }
+              };
+              await Promise.all(Array.from({ length: Math.max(1, executor.threads) }, pinWorker));
+            }
             complete = !stopRef.current;
           }
         }
@@ -21441,6 +21874,7 @@ export default function BuildRecommender() {
           Boolean(generated.metrics.tradeableOnly) !== Boolean(damageForm.tradeable) ||
           (generated.metrics.spendFreeSkillPoints !== false) !== (damageForm.freeSp !== false) ||
           itemFilterKey(generated.options) !== itemFilterKey(normalizeOptions(options)) ||
+          (generated.options && generated.options.speedValue !== undefined ? generated.options.speedValue : SPEED_VALUE_DEFAULT) !== normalizeOptions(options).speedValue ||
           generated.treeSettings.selected.length !== treeIds.length
         : generated.level !== level || generated.playerClass !== playerClass || generated.archetype !== archetype || !sameOptions(generated.options, options))
   );
@@ -21544,9 +21978,9 @@ export default function BuildRecommender() {
     for (const [index, row] of rows.entries()) {
       if (tradeoffToken.current !== token) return;
       // słabszy limit (mniejszy dren) jest też spełniony przy większym: najlepszy dotąd build przechodzi i tutaj
-      const carried = rows.slice(0, index).filter((entry) => entry.status === "done" || entry.status === "same").reduce((top, entry) => (!top || entry.build.metrics.damage > top.metrics.damage ? entry.build : top), null);
+      const carried = rows.slice(0, index).filter((entry) => entry.status === "done" || entry.status === "same").reduce((top, entry) => (!top || buildValueOf(entry.build) > buildValueOf(top) ? entry.build : top), null);
       if (row.build) {
-        if (carried && row.status === "done" && carried.metrics.damage > row.build.metrics.damage) {
+        if (carried && row.status === "done" && buildValueOf(carried) > buildValueOf(row.build)) {
           row.build = carried;
           row.status = "same";
         }
@@ -21560,7 +21994,7 @@ export default function BuildRecommender() {
         const seeds = rows.filter((entry) => entry.build).map((entry) => seedOf(entry.build));
         const build = await runDamageGeneration({ ...params, seeds, minEhp, lifeRange: null, cycle: { ...params.cycle, mana: row.limit === null ? null : { min: -row.limit, max: null } }, effort: "quick" });
         if (tradeoffToken.current !== token) return;
-        if (carried && (!build.passed || carried.metrics.damage > build.metrics.damage)) {
+        if (carried && (!build.passed || buildValueOf(carried) > buildValueOf(build))) {
           row.build = carried;
           row.status = "same";
         } else {
@@ -21698,7 +22132,7 @@ export default function BuildRecommender() {
         if (mainBuild.passed) {
           for (let lower = 0; lower < index; lower += 1) {
             const target = rows[lower];
-            if (target.build && target.build.passed && target.build.metrics.damage < mainBuild.metrics.damage) {
+            if (target.build && target.build.passed && buildValueOf(target.build) < buildValueOf(mainBuild)) {
               target.build = { ...mainBuild, metrics: { ...mainBuild.metrics, minEhp: target.minEhp } };
               target.status = "same";
             }
@@ -21723,7 +22157,7 @@ export default function BuildRecommender() {
             // także dla nich (lista zostaje malejąca, jak powinna)
             for (let lower = 0; lower < index; lower += 1) {
               const target = rows[lower];
-              if (target.build && target.build.passed && target.build.metrics.damage < build.metrics.damage) {
+              if (target.build && target.build.passed && buildValueOf(target.build) < buildValueOf(build)) {
                 target.build = { ...build, metrics: { ...build.metrics, minEhp: target.minEhp } };
                 target.status = "same";
               }
@@ -22443,6 +22877,14 @@ export default function BuildRecommender() {
                         · final after <span className="tabular-nums">{build.stats.passes.count}</span> passes
                       </span>
                     )}
+                    {build.mode === "damage" && build.metrics.speedValue > 0 && Math.abs((build.metrics.speedFactor || 1) - 1) > 1e-6 && (
+                      <span title={`Walk speed is worth ${Math.round(build.metrics.speedValue * 100) / 10}% damage per +10% (counted up to +${SPEED_VALUE_CAP}%): builds were compared by the goal × ${build.metrics.speedFactor.toFixed(3)}. The damage shown is the real number. Change it under the Walk Speed range.`}>
+                        {" "}
+                        · walk speed {build.metrics.walkSpeed > 0 ? "+" : ""}
+                        {Math.round(build.metrics.walkSpeed)}% counted as {build.metrics.speedFactor >= 1 ? "+" : "−"}
+                        {Math.abs(Math.round((build.metrics.speedFactor - 1) * 1000) / 10)}%
+                      </span>
+                    )}
                     {build.cost && (
                       <span
                         title={`Trade Market prices (WynnVentory). Pinned items aren't counted.${build.cost.unknown.length > 0 ? ` No market price: ${build.cost.unknown.join(", ")}.` : ""}`}
@@ -22636,6 +23078,17 @@ export default function BuildRecommender() {
 // interfejs - testy nie mają własnej kopii wzorów. Dodatkowy eksport obok komponentu wyłącza tylko Fast Refresh
 // tego pliku w `npm run dev` (po zapisie strona przeładowuje się w całości).
 export const __engine = {
+  majorEntriesFor,
+  majorIdStatus,
+  majorIdName,
+  majorIdDescription,
+  optMajorPins,
+  countedMajor,
+  speedFactorOf,
+  buildValueOf,
+  MAJOR_IDS,
+  SPEED_VALUE_DEFAULT,
+  treeStateFor,
   armourWithPowderList,
   workspaceGaps,
   optItemsOf,

@@ -94,6 +94,36 @@ describe("range sliders keep the full search exact", () => {
   }
 });
 
+// 0.40 major IDs: their effects aren't in the search bounds, so the full search runs without them and then once per
+// item with a major ID pinned. Together that must equal every combination of the raw pool (majors included).
+describe("major IDs keep the full search exact", () => {
+  const cases = [
+    ["Archer", ["helmet", "boots"]],
+    ["Warrior", ["chestplate"]],
+  ];
+  for (const [playerClass, empty] of cases) {
+    it(`${playerClass}: ${empty.join(" + ")}`, async () => {
+      const { ws: start } = guideWorkspace(playerClass);
+      const ws = withEmpty(start, empty);
+      const params = paramsFor(ws);
+      const spec = E.optimizerSpec(ws, params);
+      const slots = E.optEmptySlots(spec);
+      const pins = E.optMajorPins(spec, slots);
+      expect(pins.length).toBeGreaterThan(0);
+      const all = E.optBranchAndBound(E.optContext(spec, spec.treeIds, slots), { noBound: true });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      let best = E.optBranchAndBound(E.optContext({ ...spec, excludeMajors: true }, spec.treeIds, slots), {}).best;
+      for (const pin of pins) {
+        const pinSpec = { ...spec, excludeMajors: true, fixed: [...spec.fixed.filter((entry) => entry.slotId !== pin.slotId), pin] };
+        const rest = slots.filter((slotId) => slotId !== pin.slotId);
+        const result = E.optBranchAndBound(E.optContext(pinSpec, spec.treeIds, rest), { incumbent: best });
+        if (result.best > best) best = result.best;
+      }
+      expect(Math.abs(best - all.best)).toBeLessThanOrEqual(1e-6 * Math.abs(all.best));
+    });
+  }
+});
+
 describe("Optimize keeps what the player picked", () => {
   it("Mage: empty boots + helmet, free AP, empty tomes and aspects - full search, changes only fill", async () => {
     const { ws: start } = guideWorkspace("Mage");

@@ -80,7 +80,7 @@ Useful variables (PowerShell: `$env:NAME="value"; npm run …`, cmd: `set NAME=v
 | `MATRIX_LEVELS` | `30,50,70,90,100` | levels of the matrix |
 | `MATRIX_VARIANTS` | `base,second,main,lowEhp,noCycle,pinned` | runs per archetype and level |
 | `MATRIX_AP_LOAN` | `0` | rank AP loan (2 = VIP+, 4 = HERO+) |
-| `MATRIX_RANGES` | – (Any) | `defaults` = the UI's default ranges in every scenario (mana balance 0 to +1 with a cycle, walk speed ≥ −20 %) |
+| `MATRIX_RANGES` | – (Any) | `defaults` = the UI's default ranges in every scenario (mana balance 0 to +1 with a cycle, walk speed ≥ 0 % since 0.40, ≥ −20 % before) |
 | `SP_SETS` / `SP_SEED` | `20000` / fixed | random sets for the skill point test |
 | `SOAK_MINUTES` | `0` (forever) | stop the soak run after N minutes |
 | `SOAK_SHARDS` | CPU cores − 1 (max 4) | parallel soak processes |
@@ -113,6 +113,7 @@ npm run update-guide-trees               # re-check the guide builds' trees agai
 npm run update-item-weights              # re-fetch the Wynnpool item weights
 npm run update-event-items               # re-fetch the list of limited-time event items (wiki + Wynncraft API)
 npm run update-tomes-aspects             # tomes, aspects and the guide builds' tomes/aspects for the tree data version
+npm run update-major-ids                 # major ID names, descriptions and effects for the item data version
 ```
 
 ## Trade Market prices (budget)
@@ -303,7 +304,7 @@ link (`useWynnbuilderLink`), also with *With the recommended tomes and aspects* 
 | --- | --- | --- | --- |
 | Mana balance (needs a spell cycle) | the cycle's mana per second: negative = drain, positive = surplus | 0 to +1 (full sustain, nothing wasted) | Full sustain, Raid buffs (−3 to +1), Burst (≥ −8), Any |
 | Life recovery | HP/s: Health Regen ÷ 4 + Life Steal from the cycle's M hits | Any | Any, Light, Strong sustain (10 % / 40 % of the slider's range) |
-| Walk Speed | % of the whole build (the number in the summary) | at least −20 % | Any, Default, No slowdown (≥ 0), Mobile (≥ +20), Fast (≥ +40) |
+| Walk Speed | % of the whole build (the number in the summary) | at least 0 % (0.40; −20 % before) | Any, Slow ok (≥ −20), Default (≥ 0), Mobile (≥ +20), Fast (≥ +40) |
 
 The maximum keeps the search from "completely oversustaining": stats above the mana or life you need go to damage or
 EHP instead. The generator treats a range like the EHP threshold: soft penalties while it searches, a hard cut at the
@@ -372,6 +373,53 @@ behaviour). All 30 default builds pass, with no warnings.
   damage-first search; what is left over is left over because it was free.
 - **Time.** When the *Any* build doesn't fit, the default run takes a median 1.2-1.3× as long (0.6-4.7× on a
   2-core machine running both shards at once).
+
+### Major IDs, walk speed in the score, build attack speed (0.40.0)
+
+**Major IDs: descriptions.** `src/major-ids.json` (`npm run update-major-ids`, from Wynnbuilder's `majid.json` for the
+item data version; the script fails if an item's major ID has no description) holds the 172 major IDs used by items
+(165) or set bonuses (7, e.g. the Relic sets): the name as in game, the description and the effects. Every place that
+showed a major ID now shows its real name (Saviour's Sacrifice, not "Hero") and the description with the element
+symbols: the card after Details (name in gold, description in grey, then whether it is counted), a ★ Major ID badge
+on the collapsed card (tooltip with name and description), the item browser rows (Other picks / Browse items), the
+identification filter (search matches descriptions too - "poison" finds Plague) and the set bonuses.
+
+**Major IDs: effects in the numbers.** 107 major IDs change something Wynnbuilder counts: 97 have effects (spell
+changes, flat bonuses, toggles, sliders) and 10 only change ability properties (hits, beams, charges...). They are
+merged into the ability tree like aspects, the way Wynnbuilder's `atree.js` does it: only for the build's class (or
+"Any"), only when their dependencies are in the tree, only onto abilities the tree has; the same major ID from two
+items counts once. Checked against Wynnbuilder's code: 102 of the 107, 120 builds, 1,069 numbers (HP, main attack,
+every spell; sliders at 0 and at their maximum, toggles off and on), 0 mismatches (the rest need nodes no valid tree
+has at once, or change nothing in Wynnbuilder either). The other 65 (poison spreading, pulling items, effects on
+kill) show their description with "Not counted in damage or EHP".
+- Toggles and sliders of major IDs appear in **Ability tree effects** in their own "Major IDs" group with the item
+  they come from; the card and the Damage panel use what you set there.
+- The generator counts sliders at **Major ID sliders** (Items › How builds are counted): 0 (default - it never picks an
+  item for a bonus you may not keep up), half or maximum. Toggles count when you turn them on, like the tree's.
+- The generator's quick (linear) scoring can't see major ID effects, so items with a counted major ID are always in the
+  candidate pools (beam, polishing, pair swaps); the polishing and the final check evaluate them exactly (every item in
+  every slot). With the old defaults the generator gives the same builds as 0.39 where no major ID is involved
+  (checked on 7 scenarios; forcing them into every beam step changed unrelated builds by −1 to −4 %).
+- **Optimizer, full search:** its bounds (tangent planes) can't see major ID effects either, so the full search runs
+  without those items and then once with each of them pinned (the effect is constant there, the bounds are exact
+  again). Test: equal to every combination of the raw pool. A build with two major ID items in empty slots at once is
+  found by the quick search and the swaps, not guaranteed by the full search.
+- The class preview and the list of spells to maximise come from the tree alone (a sample weapon's major ID used to
+  add e.g. Accretion Chain to Mage's goals).
+
+**Walk speed in the score** (feedback: "nobody wants to move like a snail; 4% damage for 68% walk speed is no loss").
+The generator compares builds by the goal × (1 + value × walk speed / 100), walk speed counted from −100% up to +50%;
+the default value is 1% damage per +10% walk speed (**Walk speed is worth**, under the Walk Speed range: nothing / 1%
+per +20% / per +10% / per +5%). The damage shown is always the real number; the build header says how walk speed was
+counted ("walk speed +42% counted as +4.2%"). The default Walk Speed minimum is now 0% (was −20%; the old value is the
+"Slow ok" preset). Example, Sharpshooter 120 with the Stratiformis tree: −3.1% damage for +62% walk speed (+42%
+instead of −20%). Comparisons between builds (List of builds, the mana/life suggestion) use the same value.
+
+**Only builds with the checked speeds** (under Weapon attack speed). Items change the weapon's attack speed by tiers
+(e.g. −1 tier turns a Normal bow into a Slow one). On: the whole build - weapon plus every attack speed bonus and
+penalty from items and sets - must end at a checked speed (a hard filter like the other minimums); off: only the
+weapon's own speed is checked, as before. Example: Shadestepper 106 with Normal-Super Fast checked picked Cataclysm
+(Super Fast) that ended Super Slow; with the box on the build stays Super Fast.
 
 ### Left panel fits, version in Info (0.39.2)
 
@@ -942,6 +990,7 @@ tomes need level 60, so one threshold covers both tabs.
 - `src/wynncraft-items.json`: 5,414 items (Wynnbuilder data 2.2.4.0) with `fixID`, the list of static IDs and the
   item's set, plus the 79 sets with their bonuses.
 - `src/guide-builds.json`: the guide builds (items, tomes, authors, Wynnbuilder links).
+- `src/major-ids.json`: major ID names, descriptions and effects (Wynnbuilder `majid.json`, `npm run update-major-ids`).
 - `src/tomes-aspects.json`: the tomes that still exist after 2.1 (88), every class's aspects with the tree nodes
   they improve and their effects in the tree-node format, and the tomes/aspects decoded from the guide builds'
   links (written by `scripts/update-tomes-aspects.mjs` from Wynnbuilder's tomes.json and aspects.json).
