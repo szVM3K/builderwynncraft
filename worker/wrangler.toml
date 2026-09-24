@@ -1,0 +1,18 @@
+# The site's small API. Deploy: see the steps you got with it (npx wrangler login, d1 create, secrets, deploy).
+name = "wbr-api"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+
+# Replace the id with the one "npx wrangler d1 create wbr" prints.
+[[d1_databases]]
+binding = "DB"
+database_name = "wbr"
+database_id = "REPLACE_WITH_DATABASE_ID"
+
+[vars]
+# Only this site may call the API from a browser (comma-separated; empty = any).
+ALLOWED_ORIGINS = "https://szvm3k.github.io,http://localhost:5173"
+
+# Once a day: forget visitor ids and salts older than two days.
+[triggers]
+crons = ["17 3 * * *"]

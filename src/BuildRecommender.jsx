@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import WYNNBUILDER_DATA from "./wynncraft-items.json";
 import GUIDE_DATA from "./guide-builds.json";
 import PRICE_DATA from "./item-prices.json";
+import API_CONFIG from "./api-config.json";
 import TREE_DATA from "./ability-trees.json";
 import EHP_RANGE from "./ehp-range.json";
 import GUIDE_TREES from "./guide-trees.json";
@@ -4159,6 +4160,37 @@ select.mc-input option{background:#000;color:#fff}
 .wbr-share-link:hover{text-decoration:underline}
 .wbr-share-quote{margin-top:4px;border-left:4px solid #4e5058;padding-left:10px}
 .wbr-sub{color:#FFAA00;font-weight:700}
+.wbr-trap{position:absolute;left:-9999px;width:1px;height:1px;opacity:0}
+.wbr-stat{display:flex;flex-direction:column;gap:2px;padding:10px 12px;background:#16131b;border:2px solid #000;box-shadow:inset 1px 1px 0 #3a3644}
+.wbr-stat-label{font-size:13px;color:#C9C4D6}
+.wbr-stat-value{font-size:30px;line-height:1.1;color:#F2F0F7;font-weight:700;font-variant-numeric:tabular-nums}
+.wbr-stat-big{font-size:52px}
+.wbr-stat-note{font-size:12px;color:#8c8899}
+.wbr-stat-hero{border-color:#FFAA00}
+.wbr-table th,.wbr-table td{padding:6px 8px;border-bottom:1px solid #2e2a38;text-align:right;font-variant-numeric:tabular-nums}
+.wbr-table th:first-child,.wbr-table thead th:first-child{text-align:left}
+.wbr-table thead th{color:#C9C4D6;font-weight:700;font-size:12px}
+.wbr-table tbody th{font-weight:700;color:#F2F0F7}
+.wbr-chart{position:relative;height:160px;padding-left:44px;border-bottom:1px solid #4a4556}
+.wbr-chart-tick{position:absolute;left:0;font-size:11px;color:#8c8899;font-variant-numeric:tabular-nums}
+.wbr-chart-bars{display:flex;align-items:flex-end;gap:2px;height:100%}
+.wbr-chart-slot{flex:1;height:100%;display:flex;align-items:flex-end;justify-content:center;cursor:default;outline:none}
+.wbr-chart-slot:focus-visible{box-shadow:inset 0 0 0 2px #55FFFF}
+.wbr-chart-bar{width:100%;max-width:20px;min-height:0;background:#C98400;border-radius:4px 4px 0 0}
+.wbr-chart-bar-on{background:#FFAA00}
+.wbr-dimrow{display:grid;grid-template-columns:minmax(0,9rem) minmax(0,1fr) 3.5rem;align-items:center;gap:8px}
+.wbr-dimbar{display:block;height:10px;background:#C98400;border-radius:0 4px 4px 0}
+.wbr-review-on{box-shadow:inset 0 0 0 2px #FFAA00}
+.wbr-mc[data-theme=light] .wbr-stat{background:#E2DFE8;box-shadow:inset 1px 1px 0 #FFFFFF}
+.wbr-mc[data-theme=light] .wbr-stat-label{color:#46434F}
+.wbr-mc[data-theme=light] .wbr-stat-value{color:#1C1A22}
+.wbr-mc[data-theme=light] .wbr-stat-note{color:#5E5A68}
+.wbr-mc[data-theme=light] .wbr-table th,.wbr-mc[data-theme=light] .wbr-table td{border-bottom-color:#C9C4D3}
+.wbr-mc[data-theme=light] .wbr-table thead th{color:#46434F}
+.wbr-mc[data-theme=light] .wbr-table tbody th{color:#1C1A22}
+.wbr-mc[data-theme=light] .wbr-chart{border-bottom-color:#9A95A6}
+.wbr-mc[data-theme=light] .wbr-chart-bar,.wbr-mc[data-theme=light] .wbr-dimbar{background:#B86E00}
+.wbr-mc[data-theme=light] .wbr-chart-bar-on{background:#854A00}
 .wbr-sep{height:6px;flex-shrink:0;margin:0 -16px;background:#15131b;box-shadow:inset 0 2px 0 #0b0a0e,inset 0 -2px 0 #2a2633}
 .wbr-sep-wide{margin:0 -20px}
 .wbr-mc[data-theme=light] .wbr-sub{color:#854A00}
@@ -9305,7 +9337,7 @@ function DamageForm({
       {treeIds.length > 0 && goals.length > 0 && (
         <div className="wbr-fade flex flex-col gap-1.5">
           <label htmlFor="new-goal" className={label}>
-            Maximise
+            Choose main skills
           </label>
           <select id="new-goal" value={goal ? (goal.kind === "multi" ? "multi" : String(goal.id)) : ""} onChange={(event) => event.target.value !== "multi" && set({ goal: event.target.value === DAMAGE_GOAL_MAIN || event.target.value === DAMAGE_GOAL_CYCLE ? event.target.value : Number(event.target.value) })} className="mc-input w-full">
             {goal && goal.kind === "multi" && <option value="multi">{goal.name} (sum)</option>}
@@ -9609,7 +9641,7 @@ const WIZARD_STEPS = [
   { id: "rank", label: "Rank" },
   { id: "level", label: "Level" },
   { id: "tree", label: "Ability tree" },
-  { id: "goal", label: "Maximise" },
+  { id: "goal", label: "Main skills" },
   { id: "ehp", label: "Effective HP" },
   { id: "mana", label: "Mana" },
   { id: "extras", label: "Extras" },
@@ -9688,7 +9720,7 @@ function GuideTreePresets({ playerClass, archetype, apCap, selected, onPick, com
             <button key={preset.id} type="button" onClick={() => onPick(preset)} title={title} className={`mc-btn mc-btn-sm w-full min-w-0 justify-start overflow-hidden text-left ${on ? "mc-btn-on" : ""}`}>
               <span className="min-w-0 truncate">
                 {preset.name}
-                <span className="text-zinc-500"> · {preset.weapons.slice(0, 2).join(", ")}{preset.weapons.length > 2 ? "…" : ""}{trimmed ? ` · trimmed to ${apCap} AP` : ""}</span>
+                <span className="text-zinc-500"> · {preset.community ? `community${preset.author ? `, ${preset.author}` : ""}` : `${preset.weapons.slice(0, 2).join(", ")}${preset.weapons.length > 2 ? "…" : ""}`}{trimmed ? ` · trimmed to ${apCap} AP` : ""}</span>
               </span>
             </button>
           ) : (
@@ -9698,10 +9730,17 @@ function GuideTreePresets({ playerClass, archetype, apCap, selected, onPick, com
                 {(query.trim() || !archetype) && <span className="ml-1.5 text-xs font-normal text-zinc-500">{preset.archetype}</span>}
               </span>
               {preset.aliases.length > 0 && <span className="text-xs text-zinc-400">also: {preset.aliases.join(", ")}</span>}
-              <span className="text-xs text-zinc-400">
-                with {preset.weapons.slice(0, 4).join(", ")}
-                {preset.weapons.length > 4 ? ` +${preset.weapons.length - 4}` : ""}
-              </span>
+              {preset.community ? (
+                <span className="text-xs text-zinc-400">
+                  Community tree{preset.author ? ` by ${preset.author}` : ""}
+                  {preset.description ? ` · ${preset.description.slice(0, 90)}${preset.description.length > 90 ? "…" : ""}` : ""}
+                </span>
+              ) : (
+                <span className="text-xs text-zinc-400">
+                  with {preset.weapons.slice(0, 4).join(", ")}
+                  {preset.weapons.length > 4 ? ` +${preset.weapons.length - 4}` : ""}
+                </span>
+              )}
               <span className="text-xs text-zinc-500">
                 {preset.masteries.length > 0 ? `${preset.masteries.join(" / ")} Mastery · ` : ""}
                 {trimmed ? `${preset.points} AP → your ${apCap} AP` : `${preset.points} AP`}
@@ -9721,6 +9760,7 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
   const classConfig = CLASSES[playerClass];
   const firstOpen = !rankConfirmed ? "rank" : !level ? "level" : treeIds.length === 0 ? "tree" : null;
   const [view, setView] = useState(null);
+  const [addTree, setAddTree] = useState(false); // okno "Add a guide tree"
   const active = view || firstOpen || "goal";
   const order = WIZARD_STEPS.map((entry) => entry.id);
   const next = (from) => setView(order[Math.min(order.length - 1, order.indexOf(from) + 1)]);
@@ -9813,7 +9853,7 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
     rank: ["Your rank", "Higher ranks lend ability points earlier (VIP+ 2 AP, HERO and above 4 AP)."],
     level: ["Your level", "Items above it are left out; skill points and ability points come from it."],
     tree: ["Ability tree", `Pick an archetype - its suggested tree for ${apCap} AP is shown below, where you can compare archetypes and click abilities to change it. "Use this tree" or Next goes on.`],
-    goal: ["What to maximise", "One spell (one cast, crits included), the main attack (damage per second) - or click several to maximise their sum. Numbers: with the best weapon for your level alone."],
+    goal: ["Choose main skills", "One spell (one cast, crits included), the main attack (damage per second) - or click several to maximise their sum. Numbers: with the best weapon for your level alone."],
     ehp: ["How tanky", `Effective HP range in 2% steps of the most your level can reach (${formatNumber(ehpMax)}). Builds outside it are thrown away; the maximum is optional.`],
     mana: ["Mana: spell cycle", "The spells (1-4) and main attacks (M) you do in a loop must pay for themselves (Mana Regen, Mana Steal from M hits, ability mana), within the mana balance range: the minimum is the drain you accept, the maximum stops the search from wasting stats on mana. Type your own cycle or pick a preset."],
     extras: ["Extras", "Optional filters - click to toggle."],
@@ -9978,6 +10018,15 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
               />
             </div>
           )}
+          {apiReady() && (
+            <div className="flex flex-wrap items-center gap-2 sm:col-span-2 xl:col-span-4">
+              <button type="button" className="mc-btn mc-btn-sm" onClick={() => setAddTree(true)} title="Share an ability tree: it's checked, then everyone sees it among the guide trees">
+                ＋ Add a guide tree
+              </button>
+              <span className="text-xs text-zinc-500">Share your tree with other players - it appears here after a check.</span>
+            </div>
+          )}
+          {addTree && <TreeSubmitDialog playerClass={playerClass} treeIds={treeIds} archetype={preset || null} onClose={() => setAddTree(false)} />}
           {treeIds.length > 0 && (
             <div className="flex flex-col gap-2 sm:col-span-2 xl:col-span-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -11932,7 +11981,7 @@ function InfoDialog({ onClose }) {
           </p>
 
           <section className="flex flex-col gap-2">
-            <h3 className="wbr-welcome-sub">Three modes (top bar)</h3>
+            <h3 className="wbr-welcome-sub">Modes (top bar)</h3>
             <ul className="flex flex-col gap-2 text-sm">
               <li className="wbr-welcome-source">{hl("Build Recommender")} - the generator builds everything from scratch (the steps below).</li>
               <li className="wbr-welcome-source">
@@ -11944,6 +11993,11 @@ function InfoDialog({ onClose }) {
                 {hl("Build Creator")} - a manual editor like Wynnbuilder: any item, rolls, powders (armour too), tree, tomes, aspects and free points by hand, live stats,
                 Wynnbuilder import and export, builds saved in this browser.
               </li>
+              <li className="wbr-welcome-source">
+                {hl("Build Library")} - builds other players published: filter by class, archetype, level and main skill, open one here or in Wynnbuilder. Save a build
+                and press Publish to add yours (it's checked first).
+              </li>
+              <li className="wbr-welcome-source">{hl("Build Solver")} - set the stats a build must reach and what matters most; it lists the best item sets for them.</li>
               <li className="wbr-welcome-source">Each mode keeps its own build. Edit in Creator and Send to Optimizer copy a build to the other mode; the ? next to a mode explains it.</li>
             </ul>
           </section>
@@ -12026,6 +12080,10 @@ function InfoDialog({ onClose }) {
             </ul>
           </section>
           <p className="wbr-welcome-muted text-sm">Once more: these are recommendations to start from. Your own judgement, the game and your team have the last word.</p>
+          <p className="wbr-welcome-muted text-xs">
+            Privacy: the site counts anonymously how it's used (builds generated, visitors) to improve it - no cookies, no accounts, no personal data; the server keeps
+            only a code that changes every day instead of your address.
+          </p>
         </div>
       </div>
     </div>
@@ -12714,10 +12772,26 @@ function SharePanel({ share: base, onClose }) {
         />
       )}
       <div className="flex flex-wrap gap-1.5">
-        <button type="button" className="mc-btn mc-btn-sm mc-btn-primary" onClick={() => copy(share.message, "Message")} title="Copies the title, the link and the item list as plain text">
+        <button
+          type="button"
+          className="mc-btn mc-btn-sm mc-btn-primary"
+          onClick={() => {
+            copy(share.message, "Message");
+            track("shared");
+          }}
+          title="Copies the title, the link and the item list as plain text"
+        >
           Copy message
         </button>
-        <button type="button" className="mc-btn mc-btn-sm" onClick={() => copy(share.url, "Link")} title="Copies only the address of this build on this site">
+        <button
+          type="button"
+          className="mc-btn mc-btn-sm"
+          onClick={() => {
+            copy(share.url, "Link");
+            track("shared");
+          }}
+          title="Copies only the address of this build on this site"
+        >
           Copy link only
         </button>
         {canSend && (
@@ -12725,6 +12799,7 @@ function SharePanel({ share: base, onClose }) {
             type="button"
             className="mc-btn mc-btn-sm"
             onClick={async () => {
+              track("shared");
               try {
                 await navigator.share({ title: share.title, text: share.message });
               } catch (error) {
@@ -12748,8 +12823,10 @@ function SharePanel({ share: base, onClose }) {
 
 // Przyciski w nagłówku buildu: Wynnbuilder ↗, Copy link (link Wynnbuildera), Share (link tej strony + wiadomość z
 // listą przedmiotów) i Save (lista zapisanych buildów w lewym panelu). Na telefonie przechodzą do wiersza pod tytułem.
-function BuildLinkBar({ wbUrl, shareUrl = null, share = null, onSave = null, saveName = "" }) {
+function BuildLinkBar({ wbUrl, shareUrl = null, share = null, onSave = null, saveName = "", publish = null, info = null }) {
   const [message, setMessage] = useState("");
+  const [savedOk, setSavedOk] = useState(false);
+  const [publishing, setPublishing] = useState(null);
   const [fallback, setFallback] = useState(null);
   const [naming, setNaming] = useState(false);
   const [shareData, setShareData] = useState(null);
@@ -12758,6 +12835,7 @@ function BuildLinkBar({ wbUrl, shareUrl = null, share = null, onSave = null, sav
     setMessage("");
     setFallback(null);
     setShareData(null);
+    setSavedOk(false);
   }, [wbUrl, shareUrl]);
   const copy = async (text, what) => {
     if (await copyToClipboard(text)) {
@@ -12771,10 +12849,18 @@ function BuildLinkBar({ wbUrl, shareUrl = null, share = null, onSave = null, sav
   return (
     <div className="flex w-full flex-col gap-1.5 sm:w-auto sm:items-end">
       <div className="flex flex-wrap gap-1.5">
-        <a href={wbUrl} target="_blank" rel="noreferrer" className="mc-btn mc-btn-sm" title="Open this build in wynnbuilder.github.io/builder in a new tab">
+        <a href={wbUrl} target="_blank" rel="noreferrer" className="mc-btn mc-btn-sm" title="Open this build in wynnbuilder.github.io/builder in a new tab" onClick={() => track("wb_export", info || {})}>
           Wynnbuilder ↗
         </a>
-        <button type="button" className="mc-btn mc-btn-sm" onClick={() => copy(wbUrl, "Wynnbuilder link")} title="Copy the Wynnbuilder link of this build">
+        <button
+          type="button"
+          className="mc-btn mc-btn-sm"
+          onClick={() => {
+            copy(wbUrl, "Wynnbuilder link");
+            track("wb_export", info || {});
+          }}
+          title="Copy the Wynnbuilder link of this build"
+        >
           Copy link
         </button>
         {(share || shareUrl) && (
@@ -12822,7 +12908,9 @@ function BuildLinkBar({ wbUrl, shareUrl = null, share = null, onSave = null, sav
             type="button"
             className="mc-btn mc-btn-sm mc-btn-primary"
             onClick={() => {
-              setMessage(onSave(name.trim() || saveName));
+              const text = onSave(name.trim() || saveName);
+              setMessage(text);
+              setSavedOk(/^Saved/.test(text));
               setNaming(false);
             }}
           >
@@ -12835,6 +12923,12 @@ function BuildLinkBar({ wbUrl, shareUrl = null, share = null, onSave = null, sav
       )}
       {shareData && <SharePanel share={shareData} onClose={() => setShareData(null)} />}
       {message && <p className="text-xs text-emerald-300">{message}</p>}
+      {savedOk && publish && apiReady() && (
+        <button type="button" className="mc-btn mc-btn-sm self-start sm:self-end" onClick={() => setPublishing(publish(name.trim() || saveName))} title="Send this build to the Build Library - it's published after a check">
+          Publish to Build Library…
+        </button>
+      )}
+      {publishing && <PublishDialog source={publishing} onClose={() => setPublishing(null)} />}
       {fallback && <input readOnly value={fallback} onFocus={(event) => event.target.select()} className="mc-input w-full text-xs" aria-label="Link to copy" />}
     </div>
   );
@@ -12853,6 +12947,7 @@ function WynnbuilderExport({ build, treeSettings, fixedExtras = null, link: shar
     setMessage("");
   }, [link.url]);
   const copy = async () => {
+    track("wb_export", buildInfo(build));
     try {
       await navigator.clipboard.writeText(link.url);
       setMessage("Link copied.");
@@ -12866,7 +12961,7 @@ function WynnbuilderExport({ build, treeSettings, fixedExtras = null, link: shar
   return (
     <div className="mt-2 flex flex-col gap-1.5">
       <div className="flex flex-col gap-2 sm:flex-row">
-        <a href={link.url} target="_blank" rel="noreferrer" className="mc-btn wbr-why-btn min-w-0 flex-1 whitespace-nowrap text-center" title="Opens this build in wynnbuilder.github.io/builder in a new tab">
+        <a href={link.url} target="_blank" rel="noreferrer" className="mc-btn wbr-why-btn min-w-0 flex-1 whitespace-nowrap text-center" title="Opens this build in wynnbuilder.github.io/builder in a new tab" onClick={() => track("wb_export", buildInfo(build))}>
           Open in Wynnbuilder ↗
         </a>
         <button type="button" className="mc-btn" onClick={copy} title="Copy the Wynnbuilder link of this build">
@@ -12916,6 +13011,7 @@ function storeSavedLinks(list) {
 function SavedBuildsPanel({ saved, storageOk, onOpen, onDelete, onImport, importMessage }) {
   const [text, setText] = useState("");
   const [sharing, setSharing] = useState(null); // { key, data }
+  const [publishing, setPublishing] = useState(null);
   const [message, setMessage] = useState("");
   const [fallback, setFallback] = useState(null);
   const exportAll = async () => {
@@ -12999,6 +13095,11 @@ function SavedBuildsPanel({ saved, storageOk, onOpen, onDelete, onImport, import
                 >
                   Share
                 </button>
+                {apiReady() && (
+                  <button type="button" className="mc-link whitespace-nowrap text-xs" onClick={() => setPublishing(publishSourceFromLink(entry.url, entry.name))} title="Send this build to the Build Library - it's published after a check">
+                    Publish
+                  </button>
+                )}
               </span>
               <button type="button" className="px-1 text-xs text-zinc-400 hover:text-white" aria-label={`Delete ${entry.name}`} onClick={() => onDelete(index)}>
                 ✕
@@ -13010,6 +13111,7 @@ function SavedBuildsPanel({ saved, storageOk, onOpen, onDelete, onImport, import
           })}
         </ul>
       )}
+      {publishing && <PublishDialog source={publishing} onClose={() => setPublishing(null)} />}
       {saved.length > 0 && (
         <div className="flex flex-col gap-1">
           <button type="button" className="mc-btn mc-btn-sm self-start" onClick={exportAll} title="Copy every saved link, one per line - paste them into Import on another computer">
@@ -13509,6 +13611,8 @@ function allTreePresets() {
     const tree = TREE_INDEX[preset.playerClass];
     preset.masteries = preset.ids.map((id) => tree.byId.get(id)).filter((node) => node && / Mastery$/.test(node.name)).map((node) => node.name.replace(" Mastery", ""));
   });
+  // drzewka graczy (po przeglądzie, z serwera strony) na końcu listy
+  presets.push(...communityTreePresets());
   TREE_PRESET_CACHE = presets;
   return presets;
 }
@@ -14764,7 +14868,7 @@ function solverBuildResult(candidate, solved, archetype) {
   };
 }
 
-function SolverPanel({ solver, onChange, level, result, running, onSolve, onShow, activeRank }) {
+function SolverPanel({ solver, onChange, level, onLevel = null, result, running, onSolve, onShow, activeRank }) {
   const playerClass = CLASSES[solver.playerClass] ? solver.playerClass : "Mage";
   const archetype = CLASSES[playerClass].archetypes.includes(solver.archetype) ? solver.archetype : CLASSES[playerClass].archetypes[0];
   const setTarget = (id, value) => onChange({ ...solver, targets: { ...solver.targets, [id]: value } });
@@ -14830,7 +14934,24 @@ function SolverPanel({ solver, onChange, level, result, running, onSolve, onShow
         pinned and excluded items apply) and lists the best sets that meet every target. If nothing does, it shows the closest ones and what they miss.
       </p>
 
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+      <div className={`grid grid-cols-1 gap-3 ${onLevel ? "md:grid-cols-4" : "md:grid-cols-3"}`}>
+        {onLevel && (
+          <label className="flex flex-col gap-1 text-xs text-zinc-300">
+            Level
+            <input
+              id="solver-level"
+              type="number"
+              min={1}
+              max={120}
+              value={level}
+              onChange={(event) => {
+                const value = Math.round(Number(event.target.value));
+                if (Number.isFinite(value) && value >= 1 && value <= 120) onLevel(value);
+              }}
+              className="mc-input w-full tabular-nums"
+            />
+          </label>
+        )}
         <label className="flex flex-col gap-1 text-xs text-zinc-300">
           Class
           <select value={playerClass} onChange={(event) => onChange({ ...solver, playerClass: event.target.value, archetype: CLASSES[event.target.value].archetypes[0] })} className="mc-input w-full">
@@ -18057,6 +18178,9 @@ const APP_MODES = [
   { id: "recommender", label: "Build Recommender", icon: "✦", who: "The generator", blurb: "A whole build from scratch" },
   { id: "optimizer", label: "Build Optimizer", icon: "⚒", who: "You + the generator", blurb: "Fills in the build you started" },
   { id: "creator", label: "Build Creator", icon: "✎", who: "Only you", blurb: "Put a build together by hand" },
+  // 0.39: Build Library (buildy graczy po przeglądzie) i Build Solver (wcześniej zakładka) jako osobne tryby
+  { id: "library", label: "Build Library", icon: "▤", who: "Players", blurb: "Published builds to browse" },
+  { id: "solver", label: "Build Solver", icon: "⚙", who: "Your stat targets", blurb: "Best sets for your goals" },
 ];
 const MODE_STORAGE_KEY = "wbr-mode-v1";
 const INTRO_KEYS = { optimizer: "wbr-intro-optimizer-v1", creator: "wbr-intro-creator-v1" };
@@ -18168,7 +18292,7 @@ function ModeBar({ mode, onMode, onHelp }) {
               </span>
             </span>
           </button>
-          {entry.id !== "recommender" && (
+          {MODE_INTROS[entry.id] && (
             <button type="button" className="wbr-mode-help" onClick={() => onHelp(entry.id)} aria-label={`What is the ${entry.label}?`} title={`What is the ${entry.label}?`}>
               ?
             </button>
@@ -18702,6 +18826,8 @@ function CreatorFiles({ ws, onWs, onLoad }) {
   const [importText, setImportText] = useState("");
   const [importNotes, setImportNotes] = useState([]);
   const [sharing, setSharing] = useState(null); // { name, data } - panel Share pod zapisanym buildem
+  const [publishing, setPublishing] = useState(null);
+  const [justSaved, setJustSaved] = useState(null);
   const save = () => {
     const name = (ws.name || "").trim() || `${ws.playerClass || "Build"} ${ws.level || 120}`;
     const entry = { name, savedAt: Date.now(), ws: { ...ws, name } };
@@ -18710,6 +18836,8 @@ function CreatorFiles({ ws, onWs, onLoad }) {
       setSaved(next);
       onWs((current) => ({ ...current, name }));
       setMessage(`Saved "${name}" in this browser.`);
+      setJustSaved(entry);
+      track("created", { cls: ws.playerClass, arch: ws.archetype || "", lvl: ws.level || 120, mode: "creator" });
     } else setMessage("This browser doesn't allow saving (private mode?).");
   };
   const remove = (name) => {
@@ -18722,6 +18850,7 @@ function CreatorFiles({ ws, onWs, onLoad }) {
     try {
       const { ws: loaded, notes } = workspaceFromWynnbuilderLink(importText);
       onLoad({ ...loaded, rank: ws.rank }, "the Wynnbuilder link");
+      track("wb_import", { cls: loaded.playerClass || "", lvl: loaded.level, mode: "creator" });
       setImportNotes(notes);
       setImportText("");
       setMessage(`Imported from Wynnbuilder${loaded.playerClass ? ` (${loaded.playerClass}, level ${loaded.level})` : ""}.`);
@@ -18759,6 +18888,11 @@ function CreatorFiles({ ws, onWs, onLoad }) {
                     <button type="button" onClick={() => onLoad(sanitizeWorkspace(entry.ws), `"${entry.name}"`)} className="mc-btn mc-btn-sm">
                       Load
                     </button>
+                    {apiReady() && (
+                      <button type="button" onClick={() => setPublishing(publishSourceFromWorkspace({ ...sanitizeWorkspace(entry.ws), name: entry.name }))} className="mc-btn mc-btn-sm" title="Send this build to the Build Library - it's published after a check">
+                        Publish
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => setSharing(sharing && sharing.name === entry.name ? null : { name: entry.name, data: workspaceShare({ ...sanitizeWorkspace(entry.ws), name: entry.name }) })}
@@ -18789,6 +18923,12 @@ function CreatorFiles({ ws, onWs, onLoad }) {
         </div>
       </label>
       {message && <p className="text-xs text-emerald-300">{message}</p>}
+      {justSaved && apiReady() && message.startsWith("Saved") && (
+        <button type="button" className="mc-btn mc-btn-sm self-start" onClick={() => setPublishing(publishSourceFromWorkspace({ ...sanitizeWorkspace(justSaved.ws), name: justSaved.name }))}>
+          Publish to Build Library…
+        </button>
+      )}
+      {publishing && <PublishDialog source={publishing} onClose={() => setPublishing(null)} />}
       {importNotes.map((note) => (
         <p key={note} className="text-xs text-amber-300">
           {note}
@@ -19277,7 +19417,6 @@ const WORKSPACE_TABS = [
   ["aspects", "Aspects", "✧"],
   ["tomes", "Tomes", "❖"],
   ["guides", "Guide builds", "★"],
-  ["solver", "Build Solver", "⚙"],
   ["info", "Build info", "☰"],
 ];
 
@@ -19608,7 +19747,6 @@ function ManualWorkspace({ mode, ws, onWs, tab, onTab, onSendToOptimizer = null,
             />
           </>
         )}
-        {tab === "solver" && renderSolver && renderSolver((solverBuild) => load({ ...workspaceFromBuild(solverBuild, { rank: ws.rank }), name: `Solver #${solverBuild.rank || ""}`.trim() }, "the Build Solver result"))}
         {tab === "info" && !(ws.playerClass && build) && <NeedsPick what="a class" why="Build info uses the build's spells, tree and powders." />}
         {tab === "info" && ws.playerClass && build && stats && (
           <BuildInfoPanel playerClass={build.playerClass} archetype={build.archetype} build={build} stats={stats} treeSettings={build.treeSettings} onOpenTree={() => onTab("tree")} />
@@ -19658,12 +19796,1149 @@ function ManualWorkspace({ mode, ws, onWs, tab, onTab, onSendToOptimizer = null,
   );
 }
 
+// ============================ SERWER STRONY: Build Library, drzewka graczy, liczniki ============================
+// Mały serwer (Cloudflare Worker + D1, katalog worker/) - adres w src/api-config.json ("base"); pusty = funkcje
+// serwera wyłączone (strona działa jak wcześniej). window.WBR_API nadpisuje adres (testy, podgląd lokalny).
+const API_TIMEOUT = 12000;
+function apiBase() {
+  try {
+    if (typeof window !== "undefined" && window.WBR_API) return String(window.WBR_API).replace(/\/+$/, "");
+  } catch (error) {
+    // brak window (testy)
+  }
+  return String((API_CONFIG && API_CONFIG.base) || "").replace(/\/+$/, "");
+}
+function apiReady() {
+  return Boolean(apiBase());
+}
+async function apiCall(path, { method = "GET", body = undefined, token = null, keepalive = false } = {}) {
+  const base = apiBase();
+  if (!base) throw new Error("The site's server isn't connected yet.");
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), API_TIMEOUT) : null;
+  try {
+    const response = await fetch(`${base}${path}`, {
+      method,
+      headers: { ...(body !== undefined ? { "Content-Type": "application/json" } : {}), ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: controller ? controller.signal : undefined,
+      keepalive,
+    });
+    let data = null;
+    try {
+      data = await response.json();
+    } catch (error) {
+      data = null;
+    }
+    if (!response.ok || !data || data.ok === false) {
+      const failure = new Error((data && data.error) || `The server answered ${response.status}.`);
+      failure.status = response.status;
+      throw failure;
+    }
+    return data;
+  } catch (error) {
+    if (error && error.name === "AbortError") throw new Error("The server didn't answer - try again.");
+    if (error instanceof TypeError) throw new Error("Can't reach the server right now.");
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+// Anonimowe liczniki: co się dzieje na stronie (bez ciasteczek i danych osobowych; serwer liczy odwiedzających po
+// skrócie z solą zmienianą codziennie). Zdarzenia idą paczkami, obecność - co 2 minuty, gdy karta jest widoczna.
+const TELEMETRY = { queue: [], timer: null, mode: "recommender", started: false, interval: null };
+function track(type, info = {}) {
+  if (!apiReady()) return;
+  TELEMETRY.queue.push({ type, cls: info.cls || "", arch: info.arch || "", lvl: Number(info.lvl) || 0, skill: info.skill ? String(info.skill).slice(0, 40) : "", mode: info.mode || TELEMETRY.mode });
+  if (TELEMETRY.queue.length >= 20) flushTelemetry();
+  else if (!TELEMETRY.timer) TELEMETRY.timer = setTimeout(flushTelemetry, 8000);
+}
+function flushTelemetry() {
+  if (TELEMETRY.timer) {
+    clearTimeout(TELEMETRY.timer);
+    TELEMETRY.timer = null;
+  }
+  const events = TELEMETRY.queue.splice(0, 25);
+  if (events.length === 0 || !apiReady()) return;
+  apiCall("/api/events", { method: "POST", body: { events }, keepalive: true }).catch(() => {});
+  if (TELEMETRY.queue.length > 0) TELEMETRY.timer = setTimeout(flushTelemetry, 1000);
+}
+function startPresence() {
+  if (TELEMETRY.started || typeof window === "undefined" || typeof document === "undefined" || !apiReady()) return;
+  TELEMETRY.started = true;
+  const ping = () => {
+    if (document.visibilityState !== "hidden") apiCall("/api/ping", { method: "POST", body: { mode: TELEMETRY.mode } }).catch(() => {});
+  };
+  ping();
+  TELEMETRY.interval = setInterval(ping, 120000);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") ping();
+    else flushTelemetry();
+  });
+}
+// dane buildu do liczników: klasa, archetyp, poziom, główna umiejętność
+function buildInfo(build, extra = {}) {
+  if (!build) return extra;
+  return { cls: build.playerClass, arch: build.archetype, lvl: build.level, skill: build.goalName || "", ...extra };
+}
+
+// Drzewka graczy (opublikowane po przeglądzie): dołączane do listy "Guide trees" (allTreePresets).
+const COMMUNITY = { trees: [], loading: null };
+function loadCommunityTrees() {
+  if (!apiReady()) return Promise.resolve([]);
+  if (COMMUNITY.loading) return COMMUNITY.loading;
+  COMMUNITY.loading = apiCall("/api/trees")
+    .then((data) => {
+      COMMUNITY.trees = Array.isArray(data.list) ? data.list : [];
+      TREE_PRESET_CACHE = null;
+      return COMMUNITY.trees;
+    })
+    .catch(() => {
+      COMMUNITY.loading = null;
+      return [];
+    });
+  return COMMUNITY.loading;
+}
+function communityTreePresets() {
+  const out = [];
+  COMMUNITY.trees.forEach((entry) => {
+    const tree = TREE_INDEX[entry.playerClass];
+    if (!tree) return;
+    const ids = decodeTreeHash(entry.playerClass, entry.code);
+    if (!ids || ids.length === 0) return;
+    const resolved = resolveTree(tree, ids);
+    if (resolved.invalid.length > 0) return;
+    const archetype = CLASSES[entry.playerClass].archetypes.includes(entry.archetype) ? entry.archetype : CLASSES[entry.playerClass].archetypes[0];
+    out.push({
+      id: `community:${entry.id}`,
+      playerClass: entry.playerClass,
+      archetype,
+      ids,
+      signature: `community:${entry.id}`,
+      points: resolved.points,
+      aliasWeapons: new Map(),
+      weapons: [],
+      builds: [`${entry.name}${entry.author ? ` by ${entry.author}` : ""}`],
+      extra: false,
+      community: true,
+      name: entry.name,
+      aliases: [],
+      cycle: null,
+      masteries: ids.map((id) => tree.byId.get(id)).filter((node) => node && / Mastery$/.test(node.name)).map((node) => node.name.replace(" Mastery", "")),
+      author: entry.author || "",
+      description: entry.description || "",
+      ap: entry.ap,
+    });
+  });
+  return out;
+}
+
+// Pola formularzy zgłoszeń: nick zapamiętany w przeglądarce
+const AUTHOR_KEY = "wbr-author-v1";
+function loadAuthor() {
+  try {
+    return window.localStorage.getItem(AUTHOR_KEY) || "";
+  } catch (error) {
+    return "";
+  }
+}
+function storeAuthor(name) {
+  try {
+    window.localStorage.setItem(AUTHOR_KEY, name);
+  } catch (error) {
+    // bez zapisu
+  }
+}
+function DialogShell({ title, label, onClose, children, wide = false }) {
+  useEffect(() => {
+    const onKey = (event) => event.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div className="wbr-backdrop fixed inset-0 z-50 flex items-start justify-center overflow-y-auto px-4 py-8" role="dialog" aria-modal="true" aria-label={label || title} onClick={(event) => event.target === event.currentTarget && onClose()}>
+      <div className={`wbr-pop mc-panel flex w-full flex-col gap-3 p-4 ${wide ? "max-w-5xl" : "max-w-xl"}`}>
+        <div className="flex items-start justify-between gap-3">
+          <h2 className="mc-title text-lg">{title}</h2>
+          <button type="button" className="mc-btn mc-btn-sm" onClick={onClose} aria-label="Close">
+            ✕
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+const FIELD = "flex flex-col gap-1 text-xs text-zinc-300";
+
+// Źródło zgłoszenia buildu: build (sloty), kod Wynnbuildera, ustawienia (s, opcjonalnie), nazwa i główna umiejętność.
+function publishSourceFromBuild(build, code, settings = "", name = "") {
+  if (!build || !code) return { error: "Nothing to publish yet." };
+  if (!build.slots.some((slot) => slot.id === "weapon" && slot.item)) return { error: "Add a weapon first - the build's class comes from it." };
+  const spells = (CLASS_SPELL_NAMES[build.playerClass] || []).slice(0, 4);
+  const skillOptions = [...new Set([build.goalName, ...spells, "Main attack"].filter(Boolean))];
+  return { build, code, settings: settings || "", name: name || `${build.archetype || build.playerClass} lv ${build.level}`, mainSkill: build.goalName || spells[0] || "Main attack", skillOptions };
+}
+function publishSourceFromLink(link, name = "") {
+  const parsed = parseBuildHash(link);
+  if (!parsed) return { error: "This saved link can't be read." };
+  try {
+    const { build } = buildFromShare(parsed);
+    return publishSourceFromBuild(build, parsed.b, parsed.s || "", parsed.n || name);
+  } catch (error) {
+    return { error: error.message };
+  }
+}
+function publishSourceFromWorkspace(ws) {
+  const build = manualBuild(ws);
+  if (!build) return { error: "Nothing to publish yet." };
+  const link = wynnbuilderLinkFor(build, build.treeSettings, false, workspaceExtras(ws));
+  return publishSourceFromBuild(build, link.url.slice(link.url.indexOf("#") + 1), "", ws.name || "");
+}
+
+// "Publish to Build Library": zgłoszenie idzie do przeglądu; po zatwierdzeniu build jest w zakładce Build Library.
+function PublishDialog({ source, onClose }) {
+  const [name, setName] = useState(source && !source.error ? source.name.slice(0, 60) : "");
+  const [author, setAuthor] = useState(loadAuthor);
+  const [skill, setSkill] = useState(source && !source.error ? source.mainSkill : "");
+  const [description, setDescription] = useState("");
+  const [website, setWebsite] = useState("");
+  const [state, setState] = useState({ sending: false, done: null, error: null });
+  if (!source || source.error) {
+    return (
+      <DialogShell title="Publish to Build Library" onClose={onClose}>
+        <p className="text-sm text-amber-300">{source ? source.error : "Nothing to publish yet."}</p>
+      </DialogShell>
+    );
+  }
+  const build = source.build;
+  const items = SLOTS.map((slot) => {
+    const found = build.slots.find((entry) => entry.id === slot.id);
+    return found && found.item ? found.item.name : "";
+  });
+  const send = async () => {
+    setState({ sending: true, done: null, error: null });
+    storeAuthor(author.trim());
+    try {
+      const data = await apiCall("/api/submit", {
+        method: "POST",
+        body: { kind: "build", name: name.trim(), author: author.trim(), description: description.trim(), playerClass: build.playerClass, archetype: build.archetype || "", level: build.level, mainSkill: skill, code: source.code, settings: source.settings || "", items, website },
+      });
+      setState({ sending: false, done: data.duplicate ? (data.status === "approved" ? "This build is already in the Build Library." : "This build is already waiting for review.") : "Sent for review. Once it's approved it shows in the Build Library.", error: null });
+    } catch (error) {
+      setState({ sending: false, done: null, error: error.message });
+    }
+  };
+  return (
+    <DialogShell title="Publish to Build Library" onClose={onClose}>
+      <p className="text-sm text-zinc-400">
+        {build.archetype} {build.playerClass} · level {build.level} · {items.filter(Boolean).length}/9 items. Every build is checked before it appears in the Build Library.
+      </p>
+      {!apiReady() ? (
+        <p className="text-sm text-amber-300">The Build Library isn't connected yet - try again later.</p>
+      ) : state.done ? (
+        <p className="text-sm text-emerald-300" role="status">
+          {state.done}
+        </p>
+      ) : (
+        <>
+          <label className={FIELD}>
+            Build name
+            <input value={name} onChange={(event) => setName(event.target.value.slice(0, 60))} className="mc-input w-full" maxLength={60} aria-label="Build name" />
+          </label>
+          <label className={FIELD}>
+            Your name (optional)
+            <input value={author} onChange={(event) => setAuthor(event.target.value.slice(0, 24))} className="mc-input w-full" maxLength={24} placeholder="shown as the author" aria-label="Your name" />
+          </label>
+          <label className={FIELD}>
+            Main skill
+            <select value={skill} onChange={(event) => setSkill(event.target.value)} className="mc-input w-full" aria-label="Main skill">
+              {source.skillOptions.map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className={FIELD}>
+            Description (optional)
+            <textarea value={description} onChange={(event) => setDescription(event.target.value.slice(0, 500))} className="mc-input h-24 w-full" maxLength={500} placeholder="What it's for, how to play it, what to swap" aria-label="Description" />
+          </label>
+          {/* pole-pułapka na boty (niewidoczne dla ludzi) */}
+          <input value={website} onChange={(event) => setWebsite(event.target.value)} tabIndex={-1} autoComplete="off" aria-hidden="true" className="wbr-trap" name="website" />
+          {state.error && <p className="text-sm text-red-400">{state.error}</p>}
+          <div className="flex flex-wrap gap-2">
+            <button type="button" className="mc-btn mc-btn-primary" disabled={state.sending || !name.trim()} onClick={send}>
+              {state.sending ? "Sending…" : "Send for review"}
+            </button>
+            <button type="button" className="mc-btn" onClick={onClose}>
+              Cancel
+            </button>
+          </div>
+        </>
+      )}
+    </DialogShell>
+  );
+}
+
+// Krok "Ability tree" w kreatorze: "Add a guide tree" - drzewko (obecne albo wklejone), AP 1-50, nazwa, archetyp.
+function TreeSubmitDialog({ playerClass, treeIds, archetype, onClose }) {
+  const classConfig = CLASSES[playerClass];
+  const [from, setFrom] = useState(treeIds.length > 0 ? "current" : "paste");
+  const [pasted, setPasted] = useState("");
+  const [name, setName] = useState("");
+  const [arch, setArch] = useState(archetype && classConfig.archetypes.includes(archetype) ? archetype : classConfig.archetypes[0]);
+  const [author, setAuthor] = useState(loadAuthor);
+  const [description, setDescription] = useState("");
+  const [website, setWebsite] = useState("");
+  const [state, setState] = useState({ sending: false, done: null, error: null });
+  const tree = TREE_INDEX[playerClass];
+  const pastedIds = useMemo(() => {
+    const text = pasted.trim();
+    if (!text) return null;
+    if (/wynnbuilder|#/i.test(text)) {
+      try {
+        const { ws } = workspaceFromWynnbuilderLink(text);
+        return ws.playerClass === playerClass && ws.tree && ws.tree.length > 0 ? ws.tree : null;
+      } catch (error) {
+        return null;
+      }
+    }
+    return decodeTreeHash(playerClass, text);
+  }, [pasted, playerClass]);
+  const ids = from === "current" ? treeIds : pastedIds;
+  const resolved = ids && tree ? resolveTree(tree, ids) : null;
+  const points = resolved ? resolved.points : 0;
+  const [ap, setAp] = useState(() => Math.max(1, Math.min(50, treeIds.length > 0 && tree ? resolveTree(tree, treeIds).points : 45)));
+  const problem = !ids || ids.length <= 1 ? (from === "paste" ? (pasted.trim() ? `That isn't a ${playerClass} tree code or Wynnbuilder link.` : "Paste a Wynnbuilder link or tree code.") : "Pick a tree first.") : resolved && resolved.invalid.length > 0 ? "This tree has abilities that can't be reached - fix it in the Ability tree tab." : ap < points ? `The tree uses ${points} AP - set at least ${points}.` : !name.trim() ? "Give the tree a name." : null;
+  const send = async () => {
+    setState({ sending: true, done: null, error: null });
+    storeAuthor(author.trim());
+    try {
+      const data = await apiCall("/api/submit", { method: "POST", body: { kind: "tree", name: name.trim(), author: author.trim(), description: description.trim(), playerClass, archetype: arch, ap, code: encodeTreeHash(playerClass, ids), website } });
+      setState({ sending: false, done: data.duplicate ? "This tree is already published or waiting for review." : "Sent for review. Once it's approved it shows among the guide trees for everyone.", error: null });
+    } catch (error) {
+      setState({ sending: false, done: null, error: error.message });
+    }
+  };
+  return (
+    <DialogShell title="Add a guide tree" onClose={onClose}>
+      <p className="text-sm text-zinc-400">Share an ability tree for {playerClass}. It's checked before it appears in the guide tree list.</p>
+      {!apiReady() ? (
+        <p className="text-sm text-amber-300">Adding trees isn't connected yet - try again later.</p>
+      ) : state.done ? (
+        <p className="text-sm text-emerald-300" role="status">
+          {state.done}
+        </p>
+      ) : (
+        <>
+          <div className="flex flex-col gap-1.5" role="radiogroup" aria-label="Which tree">
+            <label className="flex items-center gap-2 text-sm text-zinc-200">
+              <input type="radio" name="tree-from" checked={from === "current"} disabled={treeIds.length === 0} onChange={() => setFrom("current")} />
+              The tree picked above{treeIds.length > 0 && tree ? ` (${treeIds.length} abilities, ${resolveTree(tree, treeIds).points} AP)` : " (none yet)"}
+            </label>
+            <label className="flex items-center gap-2 text-sm text-zinc-200">
+              <input type="radio" name="tree-from" checked={from === "paste"} onChange={() => setFrom("paste")} />
+              Paste a Wynnbuilder link or tree code
+            </label>
+            {from === "paste" && (
+              <input value={pasted} onChange={(event) => setPasted(event.target.value)} className="mc-input w-full text-xs" placeholder="https://wynnbuilder.github.io/builder/#… or the tree code" spellCheck={false} aria-label="Wynnbuilder link or tree code" />
+            )}
+            {ids && resolved && resolved.invalid.length === 0 && ids.length > 1 && <p className="text-xs text-emerald-300">{ids.length} abilities · {points} AP</p>}
+          </div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <label className={FIELD}>
+              Ability points it's for (1-50)
+              <input type="number" min={1} max={50} value={ap} onChange={(event) => setAp(Math.max(1, Math.min(50, Math.round(Number(event.target.value) || 1))))} className="mc-input w-full tabular-nums" aria-label="Ability points" />
+            </label>
+            <label className={FIELD}>
+              Archetype
+              <select value={arch} onChange={(event) => setArch(event.target.value)} className="mc-input w-full" aria-label="Archetype">
+                {classConfig.archetypes.map((entry) => (
+                  <option key={entry} value={entry}>
+                    {entry}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <label className={FIELD}>
+            Tree name
+            <input value={name} onChange={(event) => setName(event.target.value.slice(0, 60))} className="mc-input w-full" maxLength={60} placeholder="e.g. Rift meteor hybrid" aria-label="Tree name" />
+          </label>
+          <label className={FIELD}>
+            Your name (optional)
+            <input value={author} onChange={(event) => setAuthor(event.target.value.slice(0, 24))} className="mc-input w-full" maxLength={24} aria-label="Your name" />
+          </label>
+          <label className={FIELD}>
+            Description (optional)
+            <textarea value={description} onChange={(event) => setDescription(event.target.value.slice(0, 500))} className="mc-input h-20 w-full" maxLength={500} placeholder="What it's for and how to play it" aria-label="Description" />
+          </label>
+          <input value={website} onChange={(event) => setWebsite(event.target.value)} tabIndex={-1} autoComplete="off" aria-hidden="true" className="wbr-trap" name="website" />
+          {problem && <p className="text-xs text-amber-300">{problem}</p>}
+          {state.error && <p className="text-sm text-red-400">{state.error}</p>}
+          <div className="flex flex-wrap gap-2">
+            <button type="button" className="mc-btn mc-btn-primary" disabled={Boolean(problem) || state.sending} onClick={send}>
+              {state.sending ? "Sending…" : "Send for review"}
+            </button>
+            <button type="button" className="mc-btn" onClick={onClose}>
+              Cancel
+            </button>
+          </div>
+        </>
+      )}
+    </DialogShell>
+  );
+}
+
+// Nazwy przedmiotów buildu z kodu Wynnbuildera (lista w Build Library i w przeglądzie)
+const LIBRARY_ITEMS_CACHE = new Map();
+function itemsFromCode(code, fallback = []) {
+  if (LIBRARY_ITEMS_CACHE.has(code)) return LIBRARY_ITEMS_CACHE.get(code);
+  let names;
+  try {
+    const { ws } = workspaceFromWynnbuilderLink(code);
+    names = SLOTS.map((slot) => ws.items[slot.id] || "");
+  } catch (error) {
+    names = SLOTS.map((slot, index) => fallback[index] || "");
+  }
+  LIBRARY_ITEMS_CACHE.set(code, names);
+  return names;
+}
+const LEVEL_UI = {
+  label: "Level",
+  unit: "",
+  lo: 1,
+  hi: 120,
+  step: 1,
+  digits: 0,
+  signed: false,
+  accent: "#55FFFF",
+  presets: [
+    ["Any", { min: null, max: null }, "Every level"],
+    ["1-50", { min: 1, max: 50 }, "Levels 1 to 50"],
+    ["51-99", { min: 51, max: 99 }, "Levels 51 to 99"],
+    ["100-105", { min: 100, max: 105 }, "Levels 100 to 105"],
+    ["106+", { min: 106, max: null }, "Level 106 and above"],
+  ],
+};
+
+// Zakładka Build Library: opublikowane buildy graczy - filtr klasy, archetypu, poziomu i głównej umiejętności.
+function LibraryPanel({ onOpen, onEditInCreator }) {
+  const [state, setState] = useState({ loading: true, error: null, list: [] });
+  const [cls, setCls] = useState("");
+  const [arch, setArch] = useState("");
+  const [levels, setLevels] = useState({ min: null, max: null });
+  const [skill, setSkill] = useState("");
+  const [query, setQuery] = useState("");
+  const [sort, setSort] = useState("new");
+  const [sharing, setSharing] = useState(null);
+  const load = () => {
+    if (!apiReady()) {
+      setState({ loading: false, error: null, list: [] });
+      return;
+    }
+    setState((current) => ({ ...current, loading: true, error: null }));
+    apiCall("/api/library")
+      .then((data) => setState({ loading: false, error: null, list: Array.isArray(data.list) ? data.list : [] }))
+      .catch((error) => setState({ loading: false, error: error.message, list: [] }));
+  };
+  useEffect(() => {
+    load();
+    track("library_view", { mode: "library" });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const skills = useMemo(() => [...new Set(state.list.filter((entry) => !cls || entry.playerClass === cls).map((entry) => entry.mainSkill).filter(Boolean))].sort(), [state.list, cls]);
+  const range = normalizeRange(levels);
+  const text = query.trim().toLowerCase();
+  const shown = state.list
+    .filter((entry) => !cls || entry.playerClass === cls)
+    .filter((entry) => !arch || entry.archetype === arch)
+    .filter((entry) => !range || inRange(entry.level, range))
+    .filter((entry) => !skill || entry.mainSkill === skill)
+    .filter((entry) => !text || [entry.name, entry.author, entry.description, entry.mainSkill, ...itemsFromCode(entry.code, entry.items)].join(" ").toLowerCase().includes(text))
+    .sort((a, b) => (sort === "level" ? b.level - a.level || b.publishedAt - a.publishedAt : sort === "level-up" ? a.level - b.level || b.publishedAt - a.publishedAt : sort === "name" ? a.name.localeCompare(b.name) : b.publishedAt - a.publishedAt));
+  const chip = (on, onClick, label, key) => (
+    <ToggleChip key={key} pressed={on} onClick={onClick}>
+      {label}
+    </ToggleChip>
+  );
+  return (
+    <section className="flex flex-col gap-4 lg:grid lg:grid-cols-12 lg:items-start">
+      <aside className="mc-panel flex flex-col gap-3.5 p-4 lg:col-span-4 xl:col-span-3" aria-label="Build Library filters">
+        <h2 className="mc-title text-xs uppercase">Filters</h2>
+        <label className={FIELD}>
+          Search
+          <input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="name, author, item…" className="mc-input w-full" aria-label="Search the Build Library" />
+        </label>
+        <SectionBar />
+        <span className={SUB_HEAD}>Class</span>
+        <div className="flex flex-wrap gap-1" role="group" aria-label="Class">
+          {chip(!cls, () => {
+            setCls("");
+            setArch("");
+            setSkill("");
+          }, "All", "all")}
+          {Object.keys(CLASSES).map((name) =>
+            chip(cls === name, () => {
+              setCls(cls === name ? "" : name);
+              setArch("");
+              setSkill("");
+            }, name, name)
+          )}
+        </div>
+        {cls && (
+          <>
+            <span className={SUB_HEAD}>Archetype</span>
+            <div className="flex flex-wrap gap-1" role="group" aria-label="Archetype">
+              {chip(!arch, () => setArch(""), "All", "all")}
+              {CLASSES[cls].archetypes.map((name) => chip(arch === name, () => setArch(arch === name ? "" : name), name, name))}
+            </div>
+          </>
+        )}
+        <SectionBar />
+        <RangeControl id="library-level" kind="level" ui={LEVEL_UI} value={levels} onChange={setLevels} />
+        <SectionBar />
+        <label className={FIELD}>
+          <span className={SUB_HEAD}>Main skill</span>
+          <select value={skill} onChange={(event) => setSkill(event.target.value)} className="mc-input w-full" aria-label="Main skill">
+            <option value="">Any</option>
+            {skills.map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className={FIELD}>
+          <span className={SUB_HEAD}>Sort</span>
+          <select value={sort} onChange={(event) => setSort(event.target.value)} className="mc-input w-full" aria-label="Sort">
+            <option value="new">Newest first</option>
+            <option value="level">Highest level first</option>
+            <option value="level-up">Lowest level first</option>
+            <option value="name">Name A-Z</option>
+          </select>
+        </label>
+      </aside>
+      <main className="flex flex-col gap-3 lg:col-span-8 xl:col-span-9" aria-live="polite">
+        <div className="mc-panel flex flex-wrap items-baseline justify-between gap-2 p-4">
+          <h2 className="mc-title text-xl">Build Library</h2>
+          <p className="text-sm text-zinc-400">
+            {state.loading ? "Loading…" : `${shown.length} of ${state.list.length} build${state.list.length === 1 ? "" : "s"}`}
+            {!state.loading && apiReady() && (
+              <>
+                {" · "}
+                <button type="button" className="mc-link" onClick={load}>
+                  Refresh
+                </button>
+              </>
+            )}
+          </p>
+          <p className="w-full text-sm text-zinc-400">Builds players made and published: save a build (Recommender or Creator), then Publish - it shows here after a check.</p>
+        </div>
+        {!apiReady() && <p className="mc-panel p-4 text-sm text-amber-300">The Build Library isn't connected yet - it opens soon.</p>}
+        {state.error && (
+          <p className="mc-panel p-4 text-sm text-red-400">
+            {state.error}{" "}
+            <button type="button" className="mc-link" onClick={load}>
+              Try again
+            </button>
+          </p>
+        )}
+        {apiReady() && !state.loading && !state.error && state.list.length === 0 && <p className="mc-panel p-4 text-sm text-zinc-400">No builds published yet. Save a build and press Publish - it shows here after review.</p>}
+        {state.list.length > 0 && shown.length === 0 && <p className="mc-panel p-4 text-sm text-zinc-400">No build matches these filters.</p>}
+        <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+          {shown.map((entry) => {
+            const names = itemsFromCode(entry.code, entry.items);
+            const link = shareUrlFor({ code: entry.code, s: entry.settings || null, name: entry.name });
+            return (
+              <article key={entry.id} className="mc-panel flex flex-col gap-2 p-4" aria-label={entry.name}>
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <h3 className="mc-title text-lg">{entry.name}</h3>
+                  <span className="text-xs text-zinc-500">{entry.publishedAt ? new Date(entry.publishedAt * 1000).toLocaleDateString("en-GB") : ""}</span>
+                </div>
+                <p className="text-sm text-zinc-300">
+                  {entry.archetype} {entry.playerClass} · level {entry.level}
+                  {entry.mainSkill ? (
+                    <>
+                      {" · "}
+                      <span className="wbr-sub">{entry.mainSkill}</span>
+                    </>
+                  ) : null}
+                  {entry.author ? <span className="text-zinc-500"> · by {entry.author}</span> : null}
+                </p>
+                {entry.description && <p className="whitespace-pre-line text-sm text-zinc-400">{entry.description}</p>}
+                <ul className="grid grid-cols-1 gap-x-3 text-xs text-zinc-300 sm:grid-cols-2">
+                  {SLOTS.map((slot, index) => {
+                    const item = names[index] ? ITEM_BY_NAME.get(names[index]) : null;
+                    return (
+                      <li key={slot.id} className="truncate">
+                        <span className="text-zinc-500">{slot.label}: </span>
+                        <span style={ts({ color: item ? RARITY_COLORS[item.tier] || RARITY_COLORS.Normal : "#8c8c8c" })}>{names[index] || "—"}</span>
+                      </li>
+                    );
+                  })}
+                </ul>
+                <div className="flex flex-wrap gap-1.5">
+                  <button type="button" className="mc-btn mc-btn-sm mc-btn-primary" onClick={() => onOpen(entry)}>
+                    Open
+                  </button>
+                  <a href={WB_BUILDER_URL + entry.code} target="_blank" rel="noreferrer" className="mc-btn mc-btn-sm" onClick={() => track("wb_export", { cls: entry.playerClass, arch: entry.archetype, lvl: entry.level, skill: entry.mainSkill, mode: "library" })}>
+                    Wynnbuilder ↗
+                  </a>
+                  <button type="button" className="mc-btn mc-btn-sm" onClick={() => onEditInCreator(entry)}>
+                    Edit in Creator ✎
+                  </button>
+                  <button type="button" className={`mc-btn mc-btn-sm ${sharing === entry.id ? "mc-btn-on" : ""}`} aria-expanded={sharing === entry.id} onClick={() => setSharing(sharing === entry.id ? null : entry.id)}>
+                    Share
+                  </button>
+                </div>
+                {sharing === entry.id && <SharePanel share={linkShare(link, entry.name)} onClose={() => setSharing(null)} />}
+              </article>
+            );
+          })}
+        </div>
+      </main>
+    </section>
+  );
+}
+
+// ============================ PANEL PRZEGLĄDU (F4) ============================
+const REVIEW_TOKEN_KEY = "wbr-rt";
+const STAT_TILES = [
+  ["generated", "Builds generated", "Recommender: Generate, Exclude, Other picks"],
+  ["recommended", "Builds recommended", "Build Solver runs"],
+  ["optimized", "Builds optimized", "Optimizer runs"],
+  ["created", "Builds created", "Creator: saved builds"],
+  ["published_build", "Builds published", "approved for the Build Library"],
+  ["submitted_build", "Builds submitted", "sent for review"],
+  ["published_tree", "Trees published", "approved guide trees"],
+  ["submitted_tree", "Trees submitted", "sent for review"],
+  ["wb_export", "Wynnbuilder exports", "Wynnbuilder ↗ and Copy link"],
+  ["wb_import", "Wynnbuilder imports", "Wynnbuilder links opened or imported"],
+  ["shared", "Shared", "Share: message or link copied"],
+  ["library_view", "Library visits", "Build Library opened"],
+  ["visitor", "Visitors", "anonymous, counted once a day"],
+];
+const DIM_GROUPS = [
+  ["class", "Class"],
+  ["arch", "Archetype"],
+  ["lvl", "Level"],
+  ["skill", "Main skill"],
+  ["mode", "Mode"],
+];
+function compactNumber(value) {
+  const n = Number(value) || 0;
+  if (n >= 1e6) return `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M`;
+  if (n >= 1e4) return `${(n / 1e3).toFixed(n >= 1e5 ? 0 : 1)}K`;
+  return n.toLocaleString("en-US");
+}
+function ReviewChart({ series, event }) {
+  const [hover, setHover] = useState(null);
+  const days = [];
+  const today = new Date();
+  for (let i = 29; i >= 0; i -= 1) days.push(new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - i)).toISOString().slice(0, 10));
+  const byDay = new Map(series.filter((row) => row.event === event).map((row) => [row.day, row.n]));
+  const values = days.map((day) => byDay.get(day) || 0);
+  const max = Math.max(1, ...values);
+  const top = Math.max(1, Math.ceil(max / Math.pow(10, Math.floor(Math.log10(max)))) * Math.pow(10, Math.floor(Math.log10(max))));
+  const shown = hover !== null ? hover : values.length - 1;
+  return (
+    <div className="flex flex-col gap-1">
+      <p className="text-xs text-zinc-400" aria-live="polite">
+        {days[shown]}: <span className="tabular-nums text-zinc-100">{values[shown].toLocaleString("en-US")}</span>
+      </p>
+      <div className="wbr-chart" role="img" aria-label={`Per day, last 30 days: ${values.join(", ")}`} onMouseLeave={() => setHover(null)}>
+        <span className="wbr-chart-tick" style={{ top: 0 }}>
+          {top.toLocaleString("en-US")}
+        </span>
+        <span className="wbr-chart-tick" style={{ bottom: 0 }}>
+          0
+        </span>
+        <div className="wbr-chart-bars">
+          {values.map((value, index) => (
+            <div key={days[index]} className="wbr-chart-slot" onMouseEnter={() => setHover(index)} onFocus={() => setHover(index)} tabIndex={0} title={`${days[index]}: ${value}`}>
+              <div className={`wbr-chart-bar ${hover === index ? "wbr-chart-bar-on" : ""}`} style={{ height: `${(value / top) * 100}%` }} />
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="flex justify-between text-xs text-zinc-500">
+        <span>{days[0]}</span>
+        <span>{days[days.length - 1]}</span>
+      </div>
+    </div>
+  );
+}
+function ReviewCard({ entry, kind, selected, onSelect, onAction, busy }) {
+  const [name, setName] = useState(entry.name);
+  const [description, setDescription] = useState(entry.description);
+  const [skill, setSkill] = useState(entry.mainSkill || "");
+  const [note, setNote] = useState(entry.note || "");
+  const tree = kind === "tree" ? TREE_INDEX[entry.playerClass] : null;
+  const ids = tree ? decodeTreeHash(entry.playerClass, entry.code) : null;
+  const resolved = tree && ids ? resolveTree(tree, ids) : null;
+  const names = kind === "build" ? itemsFromCode(entry.code, entry.items) : [];
+  const edits = { name, description, note, ...(kind === "build" ? { mainSkill: skill } : {}) };
+  const link = kind === "build" ? shareUrlFor({ code: entry.code, s: entry.settings || null, name: entry.name }) : null;
+  return (
+    <article className={`mc-panel flex flex-col gap-2 p-3 ${selected ? "wbr-review-on" : ""}`} aria-label={entry.name}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <label className="flex min-w-0 items-center gap-2">
+          <input type="checkbox" className="mc-check" checked={selected} onChange={() => onSelect(entry.id)} aria-label={`Select ${entry.name}`} />
+          <span className="mc-title min-w-0 truncate text-base">{entry.name}</span>
+        </label>
+        <span className="text-xs text-zinc-500">
+          #{entry.id} · {new Date((entry.createdAt || entry.publishedAt || 0) * 1000).toLocaleString("en-GB")} · visitor {entry.submitter}
+        </span>
+      </div>
+      <p className="text-sm text-zinc-300">
+        {entry.archetype} {entry.playerClass}
+        {kind === "build" ? ` · level ${entry.level}` : ` · ${entry.ap} AP`}
+        {entry.author ? <span className="text-zinc-500"> · by {entry.author}</span> : null}
+        <span className="text-zinc-500"> · {entry.status}</span>
+      </p>
+      {kind === "build" ? (
+        <ul className="grid grid-cols-1 gap-x-3 text-xs sm:grid-cols-3">
+          {SLOTS.map((slot, index) => (
+            <li key={slot.id} className="truncate">
+              <span className="text-zinc-500">{slot.label}: </span>
+              <span className="text-zinc-200">{names[index] || "—"}</span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-xs text-zinc-300">
+          {!resolved ? (
+            <span className="text-red-400">The tree code doesn't decode for {entry.playerClass}.</span>
+          ) : (
+            <>
+              {ids.length} abilities · {resolved.points} AP
+              {resolved.invalid.length > 0 ? <span className="text-red-400"> · {resolved.invalid.length} unreachable</span> : null}
+              {resolved.points > entry.ap ? <span className="text-amber-300"> · needs more AP than the {entry.ap} given</span> : null}
+              <details className="mt-1">
+                <summary className="mc-link cursor-pointer">Abilities</summary>
+                <span className="text-zinc-400">{ids.map((id) => (tree.byId.get(id) || { name: `#${id}` }).name).join(", ")}</span>
+              </details>
+            </>
+          )}
+        </p>
+      )}
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <label className={FIELD}>
+          Name
+          <input value={name} onChange={(event) => setName(event.target.value.slice(0, 60))} className="mc-input w-full text-sm" />
+        </label>
+        {kind === "build" ? (
+          <label className={FIELD}>
+            Main skill
+            <input value={skill} onChange={(event) => setSkill(event.target.value.slice(0, 60))} className="mc-input w-full text-sm" />
+          </label>
+        ) : (
+          <span />
+        )}
+      </div>
+      <label className={FIELD}>
+        Description
+        <textarea value={description} onChange={(event) => setDescription(event.target.value.slice(0, 500))} className="mc-input h-16 w-full text-sm" />
+      </label>
+      <label className={FIELD}>
+        Note (only here)
+        <input value={note} onChange={(event) => setNote(event.target.value.slice(0, 300))} className="mc-input w-full text-sm" placeholder="why rejected, what to check…" />
+      </label>
+      <div className="flex flex-wrap gap-1.5">
+        {entry.status !== "approved" && (
+          <button type="button" className="mc-btn mc-btn-sm mc-btn-primary" disabled={busy} onClick={() => onAction(entry.id, "approve", edits)}>
+            Approve & publish
+          </button>
+        )}
+        {entry.status === "approved" && (
+          <button type="button" className="mc-btn mc-btn-sm" disabled={busy} onClick={() => onAction(entry.id, "unpublish", edits)}>
+            Unpublish
+          </button>
+        )}
+        {entry.status !== "rejected" && (
+          <button type="button" className="mc-btn mc-btn-sm" disabled={busy} onClick={() => onAction(entry.id, "reject", edits)}>
+            Reject
+          </button>
+        )}
+        <button type="button" className="mc-btn mc-btn-sm" disabled={busy} onClick={() => onAction(entry.id, "update", edits)}>
+          Save edits
+        </button>
+        {link && (
+          <>
+            <a href={link} target="_blank" rel="noreferrer" className="mc-btn mc-btn-sm">
+              Open ↗
+            </a>
+            <a href={WB_BUILDER_URL + entry.code} target="_blank" rel="noreferrer" className="mc-btn mc-btn-sm">
+              Wynnbuilder ↗
+            </a>
+          </>
+        )}
+        <button type="button" className="mc-btn mc-btn-sm" disabled={busy} onClick={() => onAction(entry.id, "delete", {})}>
+          Delete
+        </button>
+      </div>
+    </article>
+  );
+}
+function ReviewPanel({ onClose }) {
+  const [token, setToken] = useState(() => {
+    try {
+      const saved = window.sessionStorage.getItem(REVIEW_TOKEN_KEY);
+      return saved && Number(saved.split(".")[0]) > Date.now() / 1000 ? saved : null;
+    } catch (error) {
+      return null;
+    }
+  });
+  const [user, setUser] = useState("");
+  const [password, setPassword] = useState("");
+  const [loginState, setLoginState] = useState({ busy: false, error: null });
+  const [tab, setTab] = useState("overview");
+  const [status, setStatus] = useState("pending");
+  const [overview, setOverview] = useState(null);
+  const [list, setList] = useState({ loading: false, items: [], error: null });
+  const [selected, setSelected] = useState(new Set());
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState(null);
+  const [chartEvent, setChartEvent] = useState("generated");
+  const [dimEvent, setDimEvent] = useState("generated");
+  const signOut = () => {
+    try {
+      window.sessionStorage.removeItem(REVIEW_TOKEN_KEY);
+    } catch (error) {
+      // bez zapisu
+    }
+    setToken(null);
+    setOverview(null);
+  };
+  const guard = (error) => {
+    if (error && error.status === 401) signOut();
+    setMessage({ text: error.message, error: true });
+  };
+  const loadOverview = () =>
+    apiCall("/api/admin/overview", { token })
+      .then(setOverview)
+      .catch(guard);
+  const kind = tab === "trees" || tab === "published-trees" ? "tree" : "build";
+  const loadList = () => {
+    setList((current) => ({ ...current, loading: true, error: null }));
+    apiCall(`/api/admin/submissions?kind=${kind}&status=${tab.startsWith("published") ? (status === "pending" ? "approved" : status) : status}`, { token })
+      .then((data) => {
+        setList({ loading: false, items: data.list, error: null });
+        setSelected(new Set());
+      })
+      .catch((error) => {
+        setList({ loading: false, items: [], error: error.message });
+        guard(error);
+      });
+  };
+  useEffect(() => {
+    if (!token) return undefined;
+    if (tab === "overview") loadOverview();
+    else if (tab !== "data") loadList();
+    return undefined;
+  }, [token, tab, status]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!token || tab !== "overview") return undefined;
+    const timer = setInterval(loadOverview, 30000);
+    return () => clearInterval(timer);
+  }, [token, tab]); // eslint-disable-line react-hooks/exhaustive-deps
+  const signIn = async (event) => {
+    event.preventDefault();
+    setLoginState({ busy: true, error: null });
+    try {
+      const data = await apiCall("/api/admin/login", { method: "POST", body: { username: user, password } });
+      try {
+        window.sessionStorage.setItem(REVIEW_TOKEN_KEY, data.token);
+      } catch (error) {
+        // tylko w pamięci
+      }
+      setPassword("");
+      setToken(data.token);
+      setLoginState({ busy: false, error: null });
+    } catch (error) {
+      setLoginState({ busy: false, error: error.message });
+    }
+  };
+  const act = async (ids, action, edits = {}) => {
+    setBusy(true);
+    setMessage(null);
+    try {
+      for (const id of ids) await apiCall("/api/admin/review", { method: "POST", token, body: { id, action, ...edits } });
+      setMessage({ text: `${action} · ${ids.length} done`, error: false });
+      if (action === "approve" || action === "unpublish") COMMUNITY.loading = null;
+      loadList();
+    } catch (error) {
+      guard(error);
+    }
+    setBusy(false);
+  };
+  const exportAll = async () => {
+    try {
+      const data = await apiCall("/api/admin/export", { token });
+      const blob = new Blob([JSON.stringify(data, null, 1)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `wbr-export-${new Date().toISOString().slice(0, 10)}.json`;
+      anchor.click();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      setMessage({ text: `Exported ${data.submissions.length} submissions and ${data.counters.length} counter rows.`, error: false });
+    } catch (error) {
+      guard(error);
+    }
+  };
+  const totals = overview ? Object.fromEntries(overview.totals.map((row) => [row.event, row])) : {};
+  const queueCount = (k, s) => (overview ? (overview.queue.find((row) => row.kind === k && row.status === s) || { n: 0 }).n : 0);
+  const dimRows = (group) => (overview ? overview.breakdown.filter((row) => row.event === dimEvent && row.dim.startsWith(`${group}:`)).slice(0, 12) : []);
+  const tabs = [
+    ["overview", "Statistics"],
+    ["builds", `Builds to review${overview ? ` (${queueCount("build", "pending")})` : ""}`],
+    ["trees", `Trees to review${overview ? ` (${queueCount("tree", "pending")})` : ""}`],
+    ["published-builds", "Published builds"],
+    ["published-trees", "Published trees"],
+    ["data", "Data"],
+  ];
+  return (
+    <div className="wbr-backdrop fixed inset-0 z-[70] flex items-start justify-center overflow-y-auto px-3 py-6" role="dialog" aria-modal="true" aria-label="Review" onKeyDown={(event) => event.key === "Escape" && onClose()}>
+      <div className="wbr-pop mc-panel flex w-full max-w-6xl flex-col gap-3 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="mc-title text-xl">Review</h2>
+          <div className="flex gap-1.5">
+            {token && (
+              <button type="button" className="mc-btn mc-btn-sm" onClick={signOut}>
+                Sign out
+              </button>
+            )}
+            <button type="button" className="mc-btn mc-btn-sm" onClick={onClose} aria-label="Close">
+              ✕
+            </button>
+          </div>
+        </div>
+        {!apiReady() ? (
+          <p className="text-sm text-amber-300">The server isn't connected: put its address in src/api-config.json.</p>
+        ) : !token ? (
+          <form className="flex max-w-sm flex-col gap-2" onSubmit={signIn}>
+            <label className={FIELD}>
+              Username
+              <input value={user} onChange={(event) => setUser(event.target.value)} className="mc-input w-full" autoComplete="username" autoFocus aria-label="Username" />
+            </label>
+            <label className={FIELD}>
+              Password
+              <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} className="mc-input w-full" autoComplete="current-password" aria-label="Password" />
+            </label>
+            {loginState.error && <p className="text-sm text-red-400">{loginState.error}</p>}
+            <button type="submit" className="mc-btn mc-btn-primary self-start" disabled={loginState.busy || !user || !password}>
+              {loginState.busy ? "Signing in…" : "Sign in"}
+            </button>
+          </form>
+        ) : (
+          <>
+            <div className="wbr-tabs" role="tablist" aria-label="Review views">
+              {tabs.map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  role="tab"
+                  aria-selected={tab === id}
+                  className={`wbr-tab ${tab === id ? "wbr-tab-on" : ""}`}
+                  onClick={() => {
+                    setTab(id);
+                    setStatus(id.startsWith("published") ? "approved" : "pending");
+                    setMessage(null);
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            {message && <p className={`text-sm ${message.error ? "text-red-400" : "text-emerald-300"}`}>{message.text}</p>}
+            {tab === "overview" && !overview && <p className="text-sm text-zinc-400">Loading…</p>}
+            {tab === "overview" && overview && (
+              <div className="flex flex-col gap-4">
+                <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+                  <div className="wbr-stat wbr-stat-hero">
+                    <span className="wbr-stat-label">On the site now</span>
+                    <span className="wbr-stat-value wbr-stat-big">{overview.activeNow}</span>
+                    <span className="wbr-stat-note">{overview.activeByMode.map((row) => `${row.mode || "?"} ${row.n}`).join(" · ") || "no one"}</span>
+                  </div>
+                  <div className="wbr-stat">
+                    <span className="wbr-stat-label">Active in the last 24 h</span>
+                    <span className="wbr-stat-value">{compactNumber(overview.active24h)}</span>
+                    <span className="wbr-stat-note">anonymous visitors</span>
+                  </div>
+                  <div className="wbr-stat">
+                    <span className="wbr-stat-label">Waiting for review</span>
+                    <span className="wbr-stat-value">{compactNumber(queueCount("build", "pending") + queueCount("tree", "pending"))}</span>
+                    <span className="wbr-stat-note">
+                      {queueCount("build", "pending")} builds · {queueCount("tree", "pending")} trees
+                    </span>
+                  </div>
+                  <div className="wbr-stat">
+                    <span className="wbr-stat-label">Published</span>
+                    <span className="wbr-stat-value">{compactNumber(queueCount("build", "approved") + queueCount("tree", "approved"))}</span>
+                    <span className="wbr-stat-note">
+                      {queueCount("build", "approved")} builds · {queueCount("tree", "approved")} trees
+                    </span>
+                  </div>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="wbr-table w-full text-sm">
+                    <thead>
+                      <tr>
+                        <th scope="col">What</th>
+                        <th scope="col">Today</th>
+                        <th scope="col">7 days</th>
+                        <th scope="col">30 days</th>
+                        <th scope="col">All time</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {STAT_TILES.map(([event, label, note]) => {
+                        const row = totals[event] || {};
+                        return (
+                          <tr key={event}>
+                            <th scope="row" title={note}>
+                              {label}
+                              <span className="block text-xs font-normal text-zinc-500">{note}</span>
+                            </th>
+                            <td>{(row.today || 0).toLocaleString("en-US")}</td>
+                            <td>{(row.week || 0).toLocaleString("en-US")}</td>
+                            <td>{(row.month || 0).toLocaleString("en-US")}</td>
+                            <td>{(row.total || 0).toLocaleString("en-US")}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <SectionBar />
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className={SECTION_HEAD}>Per day, last 30 days</h3>
+                  <select value={chartEvent} onChange={(event) => setChartEvent(event.target.value)} className="mc-input text-sm" aria-label="What to show per day">
+                    {STAT_TILES.map(([event, label]) => (
+                      <option key={event} value={event}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <ReviewChart series={overview.series} event={chartEvent} />
+                <SectionBar />
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className={SECTION_HEAD}>Who and what, last 30 days</h3>
+                  <select value={dimEvent} onChange={(event) => setDimEvent(event.target.value)} className="mc-input text-sm" aria-label="Which count to split">
+                    {STAT_TILES.filter(([event]) => event !== "visitor").map(([event, label]) => (
+                      <option key={event} value={event}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                  {DIM_GROUPS.map(([group, label]) => {
+                    const rows = dimRows(group);
+                    const top = Math.max(1, ...rows.map((row) => row.n));
+                    return (
+                      <div key={group} className="flex flex-col gap-1">
+                        <span className={SUB_HEAD}>{label}</span>
+                        {rows.length === 0 ? (
+                          <span className="text-xs text-zinc-500">nothing yet</span>
+                        ) : (
+                          rows.map((row) => (
+                            <div key={row.dim} className="wbr-dimrow text-xs" title={`${row.dim.split(":").slice(1).join(":")}: ${row.n}`}>
+                              <span className="min-w-0 truncate text-zinc-200">{row.dim.split(":").slice(1).join(":")}</span>
+                              <span className="wbr-dimbar" style={{ width: `${Math.max(2, (row.n / top) * 100)}%` }} />
+                              <span className="tabular-nums text-zinc-300">{row.n.toLocaleString("en-US")}</span>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+                <p className="text-xs text-zinc-500">Updated {new Date(overview.at * 1000).toLocaleTimeString("en-GB")} (every 30 s while open). Visitors are counted anonymously: no cookies, the server keeps only a hash that changes every day.</p>
+              </div>
+            )}
+            {tab !== "overview" && tab !== "data" && (
+              <div className="flex flex-col gap-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <select value={status} onChange={(event) => setStatus(event.target.value)} className="mc-input text-sm" aria-label="Status">
+                    <option value="pending">Waiting</option>
+                    <option value="approved">Published</option>
+                    <option value="rejected">Rejected</option>
+                  </select>
+                  <button type="button" className="mc-btn mc-btn-sm" onClick={() => setSelected(selected.size === list.items.length ? new Set() : new Set(list.items.map((entry) => entry.id)))} disabled={list.items.length === 0}>
+                    {selected.size === list.items.length && list.items.length > 0 ? "Select none" : "Select all"}
+                  </button>
+                  {selected.size > 0 && (
+                    <>
+                      <span className="text-sm text-zinc-400">{selected.size} selected:</span>
+                      <button type="button" className="mc-btn mc-btn-sm mc-btn-primary" disabled={busy} onClick={() => act([...selected], "approve")}>
+                        Approve
+                      </button>
+                      <button type="button" className="mc-btn mc-btn-sm" disabled={busy} onClick={() => act([...selected], "reject")}>
+                        Reject
+                      </button>
+                      <button type="button" className="mc-btn mc-btn-sm" disabled={busy} onClick={() => act([...selected], "delete")}>
+                        Delete
+                      </button>
+                    </>
+                  )}
+                  <button type="button" className="mc-link text-sm" onClick={loadList}>
+                    Refresh
+                  </button>
+                </div>
+                {list.loading && <p className="text-sm text-zinc-400">Loading…</p>}
+                {!list.loading && list.items.length === 0 && <p className="text-sm text-zinc-400">Nothing here.</p>}
+                <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                  {list.items.map((entry) => (
+                    <ReviewCard
+                      key={`${entry.id}-${entry.status}`}
+                      entry={entry}
+                      kind={kind}
+                      selected={selected.has(entry.id)}
+                      busy={busy}
+                      onSelect={(id) =>
+                        setSelected((current) => {
+                          const next = new Set(current);
+                          if (next.has(id)) next.delete(id);
+                          else next.add(id);
+                          return next;
+                        })
+                      }
+                      onAction={(id, action, edits) => act([id], action, edits)}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+            {tab === "data" && (
+              <div className="flex flex-col gap-2">
+                <p className="text-sm text-zinc-300">Every submission (with its status and notes) and every daily counter as one JSON file - a backup, or data to look at elsewhere.</p>
+                <button type="button" className="mc-btn self-start" onClick={exportAll}>
+                  Download everything (JSON)
+                </button>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function BuildRecommender() {
   // Tryb strony (Recommender / Optimizer / Creator) i buildy gracza w Optimizerze i Creatorze (osobne, w przeglądarce)
-  const [appMode, setAppMode] = useState(loadSavedMode);
+  const [appMode, setAppMode] = useState(() => {
+    const mode = loadSavedMode();
+    TELEMETRY.mode = mode;
+    return mode;
+  });
   const [introFor, setIntroFor] = useState(() => {
     const saved = loadSavedMode();
-    return saved !== "recommender" && !readIntroSeen(saved) ? saved : null;
+    return MODE_INTROS[saved] && !readIntroSeen(saved) ? saved : null;
   });
   const [workspaces, setWorkspaces] = useState(() => ({ creator: loadWorkspace("creator"), optimizer: loadWorkspace("optimizer") }));
   const [modeTabs, setModeTabs] = useState({ creator: "build", optimizer: "build" });
@@ -19678,9 +20953,10 @@ export default function BuildRecommender() {
   }, [workspaces]);
   const setWorkspace = (mode) => (next) => setWorkspaces((current) => ({ ...current, [mode]: typeof next === "function" ? next(current[mode]) : next }));
   function switchMode(next) {
+    TELEMETRY.mode = next;
     setAppMode(next);
     saveMode(next);
-    if (next !== "recommender" && !readIntroSeen(next)) setIntroFor(next);
+    if (MODE_INTROS[next] && !readIntroSeen(next)) setIntroFor(next);
     if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
   }
   function closeIntro() {
@@ -19754,6 +21030,7 @@ export default function BuildRecommender() {
             }))
           ),
       });
+      track("optimized", { cls: ws.playerClass, arch: ws.archetype || "", lvl: ws.level || 120, mode: "optimizer" });
       setOptProposal({ result, params, baseWs: ws, checked: Object.fromEntries([...result.changes.map((change) => [change.id, true]), ...result.swaps.map((swap) => [swap.id, false])]) });
       setOptLast(fingerprint);
       setOptRun(null);
@@ -19837,6 +21114,27 @@ export default function BuildRecommender() {
   const [rollsFor, setRollsFor] = useState(null);
   const [solver, setSolver] = useState({ ...DEFAULT_SOLVER, playerClass: "Mage", archetype: "Riftwalker" });
   const [solverResult, setSolverResult] = useState(null);
+  const [solverLevel, setSolverLevel] = useState(106); // poziom w trybie Build Solver
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [, setCommunityTick] = useState(0);
+  // serwer strony: obecność i liczniki (anonimowo), drzewka graczy do listy guide trees
+  useEffect(() => {
+    startPresence();
+    loadCommunityTrees().then((list) => list.length > 0 && setCommunityTick((tick) => tick + 1));
+    const onKey = (event) => {
+      if (event.key === "F4") {
+        event.preventDefault();
+        setReviewOpen((open) => !open);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    const onHide = () => flushTelemetry();
+    window.addEventListener("pagehide", onHide);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("pagehide", onHide);
+    };
+  }, []);
   const [solverRunning, setSolverRunning] = useState(false);
   const [solverView, setSolverView] = useState(null); // kandydat solvera pokazany w siatce
   // build z linku (#b=...&s=... albo link Wynnbuildera): { b, s, ws, notes, build }
@@ -20006,6 +21304,14 @@ export default function BuildRecommender() {
     const short = buildShareMessage({ ...common, url: shortUrl });
     return { ...short, withSettings: shareUrl && shareUrl !== shortUrl && /&s=/.test(shareUrl) ? buildShareMessage({ ...common, url: shareUrl, shortUrl }) : null };
   };
+  // Publish (po zapisie): build na ekranie z kodem Wynnbuildera i - dla buildu z generatora - ustawieniami
+  const publishFor = (savedName = "") =>
+    publishSourceFromBuild(
+      build,
+      sharedView ? sharedView.b : headerLink ? headerLink.hash : null,
+      sharedView ? sharedView.s || "" : result && result.settings && !solverView && !guideView ? encodeShareSettings(result.settings) : "",
+      savedName || (sharedView && sharedView.name ? sharedView.name : solverView ? `Solver #${solverView.candidate.rank} · ${build ? build.playerClass : ""}` : saveName)
+    );
   const formGoalId = damageGoal && build && build.playerClass === playerClass ? damageGoal.id : null;
   const extrasEnv = useMemo(
     () => (build && extrasTabVisible && !extrasLocked(build.level) ? extrasEnvFor(build, buildTreeSettings, formGoalId, formCycle) : null),
@@ -20211,6 +21517,7 @@ export default function BuildRecommender() {
         stopRef.current = false;
         const build = await runDamageGeneration({ ...params, seeds, minEhp: damageMinEhp }, { onProgress: setDamageProgress, cancelRef: stopRef });
         setResult({ build, run: (result ? result.run : 0) + 1, ms: Math.max(1, Math.round(performance.now() - started)), at: new Date(), settings: settingsSnapshot });
+        track("generated", buildInfo(build, { mode: "recommender" }));
         sweepAfterGenerate(key, params, build);
         setGuideView(null);
         setSolverView(null);
@@ -20460,6 +21767,7 @@ export default function BuildRecommender() {
   }
   function importLink(text) {
     const parsed = parseBuildHash(text);
+    if (parsed && /wynnbuilder/i.test(String(text))) track("wb_import", { mode: "recommender" });
     if (!parsed) {
       setShareNotice({ text: "That doesn't look like a build link: paste this site's address with #b=… or a Wynnbuilder builder link.", error: true });
       return;
@@ -20521,7 +21829,9 @@ export default function BuildRecommender() {
     setSolverRunning(true);
     setTimeout(() => {
       try {
-        setSolverResult(solveBuilds(Number.isFinite(levelOverride) ? levelOverride : effectiveLevel, solver, options));
+        const solvedLevel = Number.isFinite(levelOverride) ? levelOverride : effectiveLevel;
+        setSolverResult(solveBuilds(solvedLevel, solver, options));
+        track("recommended", { cls: solver.playerClass, arch: solver.archetype, lvl: solvedLevel, mode: "solver" });
         setBuildError(null);
       } catch (error) {
         setBuildError(error.message);
@@ -20575,7 +21885,41 @@ export default function BuildRecommender() {
 
         <ModeBar mode={appMode} onMode={switchMode} onHelp={(mode) => setIntroFor(mode)} />
 
-        {appMode !== "recommender" && (
+        {appMode === "library" && (
+          <LibraryPanel
+            onOpen={(entry) => {
+              if (openShare({ b: entry.code, s: entry.settings || null, n: entry.name }, "Build Library entry") && typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
+            }}
+            onEditInCreator={(entry) => {
+              try {
+                copyToMode("creator", { ...workspaceFromWynnbuilderLink(entry.code).ws, name: entry.name }, "the Build Library");
+              } catch (error) {
+                setShareNotice({ text: `Couldn't open it: ${error.message}`, error: true });
+              }
+            }}
+          />
+        )}
+
+        {appMode === "solver" && (
+          <main className="flex flex-col gap-4" aria-live="polite">
+            <SolverPanel
+              solver={solver}
+              onChange={setSolver}
+              level={solverLevel}
+              onLevel={setSolverLevel}
+              result={solverResult}
+              running={solverRunning}
+              onSolve={() => runSolver(solverLevel)}
+              onShow={(candidate) => {
+                showSolverBuild(candidate);
+                switchMode("recommender");
+              }}
+              activeRank={solverView && solverView.solved === solverResult ? solverView.candidate.rank : null}
+            />
+          </main>
+        )}
+
+        {(appMode === "creator" || appMode === "optimizer") && (
           <ManualWorkspace
             key={`${appMode}-${transfer.count}`}
             mode={appMode}
@@ -20617,18 +21961,6 @@ export default function BuildRecommender() {
             }
             onSendToOptimizer={appMode === "creator" ? (ws) => copyToMode("optimizer", ws, "the Creator") : null}
             onEditInCreator={appMode === "optimizer" ? (ws) => copyToMode("creator", ws, "the Optimizer") : null}
-            renderSolver={(onLoad) => (
-              <SolverPanel
-                solver={solver}
-                onChange={setSolver}
-                level={workspaces[appMode].level || 120}
-                result={solverResult}
-                running={solverRunning}
-                onSolve={() => runSolver(workspaces[appMode].level || 120)}
-                onShow={(candidate) => onLoad({ ...solverBuildResult(candidate, solverResult, solverResult.archetype), rank: candidate.rank })}
-                activeRank={null}
-              />
-            )}
           />
         )}
 
@@ -20710,7 +22042,6 @@ export default function BuildRecommender() {
                 ["aspects", "Aspects", extrasTabLocked ? `lv ${RAID_CONTENT_MIN_LEVEL}+` : null, "✧"],
                 ["tomes", "Tomes", extrasTabLocked ? `lv ${RAID_CONTENT_MIN_LEVEL}+` : null, "❖"],
                 ["guides", "Guide builds", archetype, "★"],
-                ["solver", "Build Solver", null, "⚙"],
                 ["info", "Build info", build ? build.archetype : archetype, "☰"],
               ].map(([id, label, context, icon]) => (
                 <button
@@ -20795,18 +22126,6 @@ export default function BuildRecommender() {
                 stats={buildStats}
                 treeSettings={buildTreeSettings}
                 onOpenTree={() => setTab("tree")}
-              />
-            )}
-            {tab === "solver" && (
-              <SolverPanel
-                solver={solver}
-                onChange={setSolver}
-                level={effectiveLevel}
-                result={solverResult}
-                running={solverRunning}
-                onSolve={runSolver}
-                onShow={showSolverBuild}
-                activeRank={solverView && solverView.solved === solverResult ? solverView.candidate.rank : null}
               />
             )}
 
@@ -20898,7 +22217,7 @@ export default function BuildRecommender() {
                     <h2 className="mc-title text-xl">
                       #{solverView.candidate.rank} · {build.playerClass} level {build.level}
                     </h2>
-                    {headerLink && <BuildLinkBar wbUrl={headerLink.url} shareUrl={shareUrl} share={shareFor} onSave={saveCurrentBuild} saveName={`Solver #${solverView.candidate.rank} · ${build.playerClass} lv ${build.level}`} />}
+                    {headerLink && <BuildLinkBar wbUrl={headerLink.url} shareUrl={shareUrl} share={shareFor} onSave={saveCurrentBuild} saveName={`Solver #${solverView.candidate.rank} · ${build.playerClass} lv ${build.level}`} publish={publishFor} info={buildInfo(build)} />}
                   </div>
                   <div className="flex flex-wrap items-baseline justify-between gap-2">
                     <p className="text-sm text-zinc-400">
@@ -20915,7 +22234,7 @@ export default function BuildRecommender() {
                     <button type="button" onClick={() => setSolverView(null)} className="mc-btn mc-btn-primary">
                       Back to generated build
                     </button>
-                    <button type="button" onClick={() => setTab("solver")} className="mc-btn">
+                    <button type="button" onClick={() => switchMode("solver")} className="mc-btn">
                       Back to solver results
                     </button>
                   </div>
@@ -20928,7 +22247,7 @@ export default function BuildRecommender() {
                       {sharedView.name ? `${sharedView.name} · ` : ""}
                       {build.archetype} {build.playerClass} <span className="text-zinc-400">· level {build.level}</span>
                     </h2>
-                    <BuildLinkBar wbUrl={WB_BUILDER_URL + sharedView.b} shareUrl={shareUrl} share={shareFor} onSave={saveCurrentBuild} saveName={sharedView.name || saveName} />
+                    <BuildLinkBar wbUrl={WB_BUILDER_URL + sharedView.b} shareUrl={shareUrl} share={shareFor} onSave={saveCurrentBuild} saveName={sharedView.name || saveName} publish={publishFor} info={buildInfo(build)} />
                   </div>
                   <p className="text-sm text-zinc-400">
                     {sharedView.s
@@ -21002,7 +22321,7 @@ export default function BuildRecommender() {
                     <h2 className="mc-title text-xl">
                       {build.archetype} {build.playerClass} <span className="text-zinc-400">· level {build.level}</span>
                     </h2>
-                    {headerLink && <BuildLinkBar wbUrl={headerLink.url} shareUrl={shareUrl} share={shareFor} onSave={saveCurrentBuild} saveName={saveName} />}
+                    {headerLink && <BuildLinkBar wbUrl={headerLink.url} shareUrl={shareUrl} share={shareFor} onSave={saveCurrentBuild} saveName={saveName} publish={publishFor} info={buildInfo(build)} />}
                   </div>
                   <p className="text-sm text-zinc-400">
                     {build.mode === "damage" ? (
@@ -21179,6 +22498,7 @@ export default function BuildRecommender() {
         )}
       </div>
       {introFor && <ModeIntroDialog mode={introFor} onClose={closeIntro} />}
+      {reviewOpen && <ReviewPanel onClose={() => setReviewOpen(false)} />}
       {appMode === "optimizer" && optDialog && (
         <OptimizeDialog
           ws={optWs}

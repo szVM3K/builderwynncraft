@@ -2,8 +2,9 @@
 
 Pick a level, class and ability-tree archetype and get a full 9-slot build (Helmet, Chestplate, Leggings, Boots,
 2× Ring, Bracelet, Necklace, Weapon) chosen from every item in Wynnbuilder's database and validated against the
-game's skill-point rules. Two more modes share the page: the **Build Optimizer** fills in a build you started (and
-never changes what you picked) and the **Build Creator** is a manual editor like Wynnbuilder. Every build has its
+game's skill-point rules. Four more modes share the page: the **Build Optimizer** fills in a build you started (and
+never changes what you picked), the **Build Creator** is a manual editor like Wynnbuilder, the **Build Library**
+lists builds players published and the **Build Solver** finds item sets for stat targets. Every build has its
 own address (`#b=<Wynnbuilder code>&s=<settings>`), so it can be shared, saved in the browser and compared in tabs;
 **Share** copies a short link to the build and a ready message with the item list.
 
@@ -163,7 +164,8 @@ A bar under the header switches between three modes. Each mode keeps **its own b
 builds are saved in the browser: `wbr-ws-optimizer-v1`, `wbr-ws-creator-v1`), so switching never loses anything.
 **Edit in Creator** (under a Recommender build and in the Optimizer) and **Send to Optimizer** (in the Creator)
 *copy* the build to the other mode; the build that was there can be brought back with **Undo**. The sub-tabs (Build,
-Ability tree, Aspects, Tomes, Guide builds, Build Solver, Build info) are the same in all three modes. The first
+Ability tree, Aspects, Tomes, Guide builds, Build info) are the same in all three modes (since 0.39 the Build Solver
+and the Build Library are modes of their own, see 0.39.0). The first
 visit to the Optimizer and to the Creator opens a short popup (what the mode is, how it works in four steps, how it
 differs from the other two; remembered as `wbr-intro-optimizer-v1` / `wbr-intro-creator-v1`), and the **?** next to
 the mode's name opens it again.
@@ -370,6 +372,36 @@ behaviour). All 30 default builds pass, with no warnings.
   damage-first search; what is left over is left over because it was free.
 - **Time.** When the *Any* build doesn't fit, the default run takes a median 1.2-1.3× as long (0.6-4.7× on a
   2-core machine running both shards at once).
+
+### Build Library, Build Solver mode and community trees (0.39.0)
+
+**Build Solver** moved from the Recommender's tabs to the mode bar (Recommender · Optimizer · Creator · Build Library ·
+Build Solver). It has its own level field; *Show build* opens the chosen set in the Recommender (with *Back to solver
+results*), and *Edit in Creator* takes it from there.
+
+**Build Library** (mode between Creator and Solver): builds players published. Filters: search (name, author, item),
+class, archetype, a level range slider (presets 1-50, 51-99, 100-105, 106+) and main skill; sorted by newest, level or
+name. Each card shows the author, description and the nine items (read from the build's Wynnbuilder code), with
+**Open** (the Shared build view, name in the title), **Wynnbuilder ↗**, **Edit in Creator ✎** and **Share**.
+Publishing: **Save** a build (Recommender header, or Save in the Creator), then **Publish to Build Library…** (also
+*Publish* in both Saved builds lists): name, your name (optional, remembered), main skill and a description go out
+for a check; the build shows in the Library once it is approved. The same build twice is recognised.
+
+**Add a guide tree** (setup guide, step 4 *Ability tree*): share the tree picked above or paste a Wynnbuilder link /
+tree code, with the ability points it is for (1-50, at least what the tree uses), a name, the archetype, your name
+and a description. After a check it appears for everyone in the guide tree lists as a *Community tree*.
+
+**Choose main skills**: the left panel's *Maximise* is now *Choose main skills*; the setup guide step is *Main skills*.
+
+**The server behind it** (`worker/`): a Cloudflare Worker with a D1 (SQLite) database - submissions, published
+builds and trees, and anonymous daily counts of what the site is used for. Its address goes into
+`src/api-config.json` (`"base"`); while it is empty the Library shows "not connected yet" and the Publish / Add a
+guide tree buttons are hidden, so the site works exactly as before. Counting is anonymous: no cookies, no accounts;
+the server keeps a hash of (salt of the day, IP, browser) instead of the address and deletes the salt after two days,
+so a visitor can't be followed across days. Submissions are plain text (length-limited, control characters removed,
+shown as text), at most 10 a day per visitor, with a hidden field that catches bots. `worker/scripts/api-test.mjs`
+tests the API against `wrangler dev --local`; `app/ui_library.mjs`-style UI tests run the site against it
+(`window.WBR_API` overrides the address).
 
 ### Share, Effective HP range and section headings (0.38.0)
 
@@ -873,6 +905,9 @@ tomes need level 60, so one threshold covers both tabs.
   `OptimizeResult`, `ModeBar`. 0.37: the range sliders (`normalizeRange`, `RangeControl`, `McRangePair`), the build
   link in the address (`encodeShareSettings`, `decodeShareSettings`, `parseBuildHash`, `buildFromShare`,
   `decodeWynnbuilderHash`), `SavedBuildsPanel`, `BuildLinkBar`.
+- `src/api-config.json`: the address of the site's server (empty = its features off).
+- `worker/`: the site's server (Cloudflare Worker + D1): `src/index.js`, `schema.sql`, `wrangler.toml`,
+  `scripts/api-test.mjs` (API test against `wrangler dev --local`).
 - `scripts/compare-defaults.mjs`: the new default ranges vs Any on the matrix scenarios.
 - `scripts/bench-optimizer.mjs`: the full-search benchmark (`npm run bench:optimizer`).
 - `src/wynncraft-items.json`: 5,414 items (Wynnbuilder data 2.2.4.0) with `fixID`, the list of static IDs and the

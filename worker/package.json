@@ -1,0 +1,16 @@
+{
+  "name": "wbr-api",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --local",
+    "deploy": "wrangler deploy",
+    "db:init": "wrangler d1 execute wbr --remote --file=schema.sql",
+    "db:init:local": "wrangler d1 execute wbr --local --file=schema.sql",
+    "hash": "node scripts/hash-password.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
