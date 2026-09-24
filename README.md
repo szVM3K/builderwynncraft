@@ -2,7 +2,8 @@
 
 Pick a level, class and ability-tree archetype and get a full 9-slot build (Helmet, Chestplate, Leggings, Boots,
 2× Ring, Bracelet, Necklace, Weapon) chosen from every item in Wynnbuilder's database and validated against the
-game's skill-point rules.
+game's skill-point rules. Two more modes share the page: the **Build Optimizer** fills in a build you started (and
+never changes what you picked) and the **Build Creator** is a manual editor like Wynnbuilder.
 
 ## Live site (GitHub Pages)
 
@@ -34,6 +35,8 @@ npm run test:wynnbuilder  # "Open in Wynnbuilder" links: 10 builds encoded and d
 npm run test:stable  # same settings twice = same build (5 scenarios), a few minutes
 npm run test:workers # Web Worker tasks give the same build as one thread (2 scenarios), a few minutes
 npm run test:discord # Discord feedback fixes: rolls, Mana/Life Steal from M hits, poison, drain, life recovery, whole cycle, guide tree presets
+npm run test:optimizer # Optimizer/Creator: full search = every combination, your picks stay, full >= quick, Wynnbuilder import/export round trip, ~2-3 min
+npm run bench:optimizer -- 45 Warrior,Mage 106  # full-search benchmark: 1-9 empty slots per class vs the beam (seconds per run, classes, level)
 npm run test:deep    # deep optimality certificate: exhaustive pair swaps + triples for 8 builds, ~15-20 min
 npm run test:matrix  # the matrix only
 npm run test:soak    # endless random scenarios in parallel shards until Ctrl+C
@@ -144,6 +147,126 @@ what goes into the math (damage, rolls, skill points, EHP, mana and life formula
 poison unless turned on, powder specials, tomes and aspects, spell durations, crafted items, enemies' resistances
 and team buffs) and how the search works. It starts and ends with the reminder that every build and number is a
 suggestion, a recommendation from a model of the game - not a guarantee.
+
+### Three modes: Recommender, Optimizer, Creator (0.36.0)
+
+A bar under the header switches between three modes. Each mode keeps **its own build** (the Optimizer and Creator
+builds are saved in the browser: `wbr-ws-optimizer-v1`, `wbr-ws-creator-v1`), so switching never loses anything.
+**Edit in Creator** (under a Recommender build and in the Optimizer) and **Send to Optimizer** (in the Creator)
+*copy* the build to the other mode; the build that was there can be brought back with **Undo**. The sub-tabs (Build,
+Ability tree, Aspects, Tomes, Guide builds, Build Solver, Build info) are the same in all three modes. The first
+visit to the Optimizer and to the Creator opens a short popup (what the mode is, how it works in four steps, how it
+differs from the other two; remembered as `wbr-intro-optimizer-v1` / `wbr-intro-creator-v1`), and the **?** next to
+the mode's name opens it again.
+
+| Mode | Who builds | What it does |
+| --- | --- | --- |
+| Build Recommender | the generator | the whole build from scratch (everything below) |
+| Build Optimizer | you + the generator | you pick part of the build, Optimize fills the rest and lists the changes for you to accept |
+| Build Creator | only you | a manual editor like Wynnbuilder, no automation |
+
+**Build Creator.** Setup: class (or pick a weapon first - its class becomes yours), rank, level (empty = 120) and,
+optionally, the archetype (Build info and guide builds). Nine slots with a chooser over the whole database (5,414
+items) and filters: slot, level (the maximum can go above your level - the build then shows a warning), rarity,
+**requirements** (only items that need nothing outside the checked skills, and at most N in each), name and
+identifications. Rolls are max by default (like Wynnbuilder) and can be set per identification (Rolls). Powders
+per item in any order and mix, **armour too** (each powder adds its element's defence and health and lowers the
+opposite element's defence - the numbers of the Powders panel). Ability tree, tomes (the slots your level opens,
+tomes up to your level) and aspects (the slots your level opens, one of each, tier I-IV) by hand. Required skill
+points are calculated in the game's equip order like Wynnbuilder (Guild tomes' points count as bonuses); the free
+points are yours to spread with + / −. Damage, Survivability (EHP, defences), tree effects, skill points and totals
+update live, with tomes and aspects in the numbers. Problems are **warnings, never blocks**: items above your level,
+a weapon of another class, too many skill points, more than 100 assigned in a skill, two copies of a ring that can
+be worn once, set pieces that can't be worn together, a tree above your AP (trimmed, the full tree is kept),
+disconnected abilities, tomes/aspects above what the level opens, two Mythic aspects. **Open in Wynnbuilder** exports
+the build (items with every powder, tomes, aspects, skill points, level, tree); **Import from Wynnbuilder** reads a
+builder link back (the binary format 12 - crafted and custom items are skipped with a note and their slot stays
+empty; more powders than the item has slots today are cut, with a note). All 126 guide links decode, and every one
+survives import → export → import unchanged. Builds can be **saved in the browser** under your own names
+(`wbr-creator-saved-v1`), and the Guide builds and Build Solver tabs load a build into the editor.
+
+**Build Optimizer.** The rule: *Optimize never changes what you picked.* Setup in the order class → archetype → rank
+→ level → ability tree (rank and level decide the AP, the tree may be incomplete), then any items. Every place it can
+fill says so ("Free AP: 12. Optimize will fill them for your goal, without touching your nodes."; empty slots, free
+skill points, empty tome and aspect slots, a weapon without powders). **Optimize** opens the parameters: damage goal
+(spells and / or main attack, several = their sum; spells that are not in your tree yet are marked +), damage
+element focus (the picked weapon deals it; powders use it), **Damage ↔ EHP** (0-100 %: the goal becomes
+damage^(1-b) × EHP^b), mana (cycle, clicks per second, allowed drain; Mana Steal only from M hits), life sustain,
+avoid negative defences, Trade Market listed today, attack speed (only for an empty weapon slot), spend free skill
+points, no untradeable / no limited-time items (only for the items it picks), and **what it may change**: empty item
+slots, free AP, tomes, aspects, skill points, weapon powders, swap recommendations (all on by default). The search
+runs in Web Workers (CPU cores − 1, up to 8) with a progress bar through the stages **Tree → Items → Tomes → Aspects →
+Check**, a "checked / all combinations" counter, the estimated time and **Stop** (the result then comes from the best
+build found so far, marked as not a full search).
+
+- Tree: your nodes stay; the free AP go to the paths that raise the goal most (the damage model with your items,
+  plus how often guide trees take them). After the items, a second pass with the finished items (Check).
+- Items: **full search** - every item that fits an empty slot (slot type, class weapon, level, filters) is a
+  candidate, the two rings as pairs without repeats; see below. Before the full search starts you see the
+  estimate; **over 2 minutes** you choose *Continue full search* or *Quick mode* (the Recommender's beam around your
+  items: seconds, no guarantee).
+- Tomes and aspects: only empty slots (the tomes' and aspects' own evaluation, with yours already in).
+- Check: the second tree pass, free skill points (on top of the ones you assigned), and for every item of yours the
+  best swap with the rest of the build as it is.
+
+The result is a **list of changes**, not a new build: rows per area (Items: "Boots: empty → Landscour", Ability
+tree: "+6 abilities: …", Tomes, Aspects, Skill points, Powders) each with a short *why* (how much of the goal and EHP
+it adds), and a Stats row (goal, EHP, mana/s, life/s before → after). Every row can be unchecked; the cards and all
+panels show the build with the checked rows while you decide. **You could also swap** lists better items for your
+own - unchecked by default; checking one and pressing **Accept changes** is the only way an item of yours is
+replaced. **Discard** goes back to the build before Optimize. With nothing changed since the last run (items, tree,
+level, parameters - a fingerprint of the inputs) Optimize shows a lock: "Change the build or the parameters to
+optimize again". If nothing can be improved: "Your build is already the best for these parameters".
+
+**How the full search works** (`optContext`, `optBranchAndBound` in `src/BuildRecommender.jsx`):
+
+1. **Dominated items out.** An item is dropped when another item of the same slot is at least as good in every
+   statistic the model uses for this goal (directions probed on the build), has no higher requirements and no
+   lower skill point bonuses (sets and major IDs are never dropped; a ring only when two others beat it). Swapping
+   for a dominating item never makes a build worse, so nothing better is lost. Typically 45-75 % stay.
+2. **Start from the beam.** The Recommender's search with your items pinned gives a strong first record in a
+   second or two, so branches are cut from the start.
+3. **Branch and bound.** Slots one by one (weapon first, rings last as a pair). A branch is skipped when even its
+   best case can't beat the record. The best case comes from **tangent planes**: with attack speed and Crit Damage
+   held at their highest possible values, the logarithm of the goal is concave in the summed item statistics and in
+   the Str/Dex/Int (and Def/Agi without EHP in the goal) points, so a plane touching it at one point lies above it
+   everywhere. Under the plane every slot contributes on its own (the best g·x of its pool), and the skill points
+   become a small linear program (every skill at least its minimum, the rest of the level's budget where the plane
+   rises fastest); with two or more slots left, a Lagrangian version prices each candidate's own requirements and
+   negative bonuses. Planes are anchored at the root and the first level (with the skill ceiling and speeds of that
+   branch) and have 1 % slack for the numeric slopes. A simpler bound ("ideal item": the best value of every
+   statistic in each remaining pool) is the fallback.
+4. **Fast last slot.** Candidates of the last slot are scanned in order of g·x with a two-line bound each (no damage
+   formula); the scan stops when the bound falls under the record, and only the survivors get the full evaluation
+   (exact skill points in the game's equip order, the goal, the mana and life filters, free points).
+5. **Workers.** The candidates of the first slot are split into chunks run on all threads, each with the current
+   record.
+
+Checked against exhaustive search (every combination evaluated): 75 cases (5 classes × 5 slot sets of 1-2 empty
+slots × pure damage, Damage↔EHP 40 % and a mana cycle) - the same best build every time
+(`npm run test:optimizer` keeps five of them).
+
+**Benchmark** (`npm run bench:optimizer`): each class's guide build at level 106, slots emptied in the order boots,
+helmet, chestplate, leggings, necklace, bracelet, ring 1, ring 2, weapon; goal = the strongest spell, max rolls, one
+thread (the site uses CPU cores − 1, up to 8, so divide by about 4-6); a run was stopped after 45 s and the time
+extrapolated from the share of combinations it had covered.
+
+| Empty slots | Combinations (after dropping dominated / all) | Quick mode (beam) | Full search, 1 thread | Full search vs beam (5 classes) |
+| --- | --- | --- | --- | --- |
+| 1 (boots) | 270 / 405 | 0.4-2.2 s | < 0.1 s | same in 4, +0.17 % in 1 |
+| 2 (+ helmet) | 81 thousand / 193 thousand | 0.5-1.2 s | 0.1-0.8 s | same in 1; +1.2 % and +2.7 %; in 2 the beam found nothing that fits the skill points, the full search did |
+| 3 (+ chestplate) | 25 million / 88 million | 0.3-1.7 s | 6 s - about 2 min | +0.4 % and +2.5 % in 2 |
+| 4 (+ leggings) | 7.4 billion / 35 billion | 0.7-2.6 s | about 17 min - 7 h (estimated) | nothing better in the first 45 s |
+| 5 (+ necklace) | 980 billion / 8 trillion | 1.2-2.6 s | about 5 h - 38 days (estimated) | +0.3 % in 1 within 45 s |
+| 6-9 (+ bracelet, rings, weapon) | 10^14 - 10^21 | 0.7-7.4 s | years and more | - |
+
+The estimates for 4+ slots extrapolate the first 45 s; the start of the search (the strongest candidates first)
+is the slowest part, so they are on the high side. The one-minute target holds up to **3 empty slots** (a few to about 30 s on 4-8 threads); 4 empty
+slots are minutes to hours, 5 or more are far beyond any practical time (every slot multiplies the combinations by
+about 300). That is what the **2-minute limit** is for: above it the Optimizer asks whether to continue the full
+search or use quick mode, which the table shows is usually as good or within a few % (but can miss builds that fit
+the skill points). With 1-3 empty slots (15 cases) the full search found a better build than the beam in 5, and
+in 2 more a build that fits where the beam found none.
 
 ### Generating a build
 
@@ -581,7 +704,12 @@ tomes need level 60, so one threshold covers both tabs.
 ## Where things are
 
 - `src/BuildRecommender.jsx`: data normalisation, the damage-first generator (`generateDamageBuild()`) with skill
-  point validation, the stat weights it pre-scores candidates with (`ARCHETYPES`), and the whole UI.
+  point validation, the stat weights it pre-scores candidates with (`ARCHETYPES`), and the whole UI. The Creator and
+  Optimizer parts: `manualBuild()` (a player's workspace → a build in the generator's shape, with the warnings),
+  `workspaceFromWynnbuilderLink()` (link import), `optimizerSpec()` / `runOptimizer()` (the Optimize stages),
+  `optContext()` / `optBranchAndBound()` / `optPlane()` (the full search), `ManualWorkspace`, `OptimizeDialog`,
+  `OptimizeResult`, `ModeBar`.
+- `scripts/bench-optimizer.mjs`: the full-search benchmark (`npm run bench:optimizer`).
 - `src/wynncraft-items.json`: 5,414 items (Wynnbuilder data 2.2.4.0) with `fixID`, the list of static IDs and the
   item's set, plus the 79 sets with their bonuses.
 - `src/guide-builds.json`: the guide builds (items, tomes, authors, Wynnbuilder links).

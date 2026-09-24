@@ -61,6 +61,7 @@ import WB_IDS from "./wynnbuilder-ids.json";
  */
 
 const SKILLS = ["str", "dex", "int", "def", "agi"];
+const SKILL_INDEX = { str: 0, dex: 1, int: 2, def: 3, agi: 4 };
 const SKILL_LABELS = { str: "Strength", dex: "Dexterity", int: "Intelligence", def: "Defence", agi: "Agility" };
 const ELEMENTS = ["earth", "thunder", "water", "fire", "air"];
 
@@ -1936,6 +1937,8 @@ function normalizeCycle(cycle) {
     drain: Math.max(0, Number(cycle && cycle.drain) || 0),
     // mana z buffów w raidzie (Advanced, mana/s): dodatkowy dochód many cyklu
     buff: Math.max(0, Number(cycle && cycle.buff) || 0),
+    // Optimizer, suwak Damage ↔ EHP (0-1): cel = obrażenia^(1-b) × EHP^b (0 = same obrażenia, 1 = samo EHP)
+    blend: Math.max(0, Math.min(1, Number(cycle && cycle.blend) || 0)),
   };
 }
 // Mana wystarcza, gdy bilans nie spada poniżej dopuszczalnego drenu.
@@ -2061,6 +2064,12 @@ function evaluateGoal(ctx, items, weapon, skillTotals, goal, cycle, altGoals = n
   result.manaNet = result.manaIncome + result.manaGain - result.manaUsed;
   // dopuszczalny dren many (mana/s, suwak "Allowed mana drain"): zestaw przechodzi, gdy manaNet >= -drain
   result.manaDrain = Math.max(0, (cycle && cycle.drain) || 0);
+  // Optimizer: cel mieszany obrażenia ↔ EHP (surowe obrażenia zostają w rawDamage)
+  const blend = cycle && cycle.blend > 0 ? Math.min(1, cycle.blend) : 0;
+  if (blend > 0) {
+    result.rawDamage = result.damage;
+    result.damage = result.damage > 0 ? Math.pow(result.damage, 1 - blend) * Math.pow(Math.max(1, result.ehp), blend) : 0;
+  }
   return result;
 }
 
@@ -2174,7 +2183,7 @@ function yieldToBrowser() {
   });
 }
 
-async function generateDamageBuild({ playerClass, level, archetype = null, treeSettings, goal, cycle, minEhp = 0, requireSustain = false, minSustain = 0, options = DEFAULT_OPTIONS, items = ITEM_DB, powders = "auto", objective = "damage", onProgress = null, seeds = [], excludeEvents = true, tradeableOnly = false, effort = "full", spendFreeSkillPoints = true, task = null, parallel = null, caches = null, rollPercent = 100 }) {
+async function generateDamageBuild({ playerClass, level, archetype = null, treeSettings, goal, cycle, minEhp = 0, requireSustain = false, minSustain = 0, options = DEFAULT_OPTIONS, items = ITEM_DB, powders = "auto", objective = "damage", onProgress = null, seeds = [], excludeEvents = true, tradeableOnly = false, effort = "full", spendFreeSkillPoints = true, task = null, parallel = null, caches = null, rollPercent = 100, spReserve = 0 }) {
   // "Realistic rolls": wszystkie losowane ID przy podanym rollu (np. 50%) zamiast maksymalnych
   if (rollPercent < 100) items = rolledItems(items, rollPercent);
   // effort "quick" (lista buildów dla każdego progu EHP): bez wiązki z zapasem EHP i wiązek pod inne czary,
@@ -2190,6 +2199,8 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
   const classConfig = CLASSES[playerClass];
   if (!classConfig) throw new Error(`Unknown class: ${playerClass}`);
   const ctx = damageGoalContext(playerClass, level, treeSettings);
+  // Optimizer: wolne punkty, które gracz już przydzielił, zmniejszają budżet (build musi się zmieścić razem z nimi)
+  if (spReserve > 0) ctx.available = Math.max(0, ctx.available - spReserve);
   const normalized = normalizeOptions(options);
   const lockedNames = new Set(Object.values(normalized.locked || {}));
   const excluded = new Set(normalized.excluded || []);
@@ -3536,7 +3547,8 @@ function strongestElement(totals) {
 
 // Tomy: w każdym typie slotu po kolei bierzemy tom, który najbardziej poprawia build razem z już wybranymi
 // (dwa takie same tomy są w grze dozwolone i często najlepsze, np. 2x Harvester's). Tom Guild dodaje Skill Pointy.
-function pickTomes(build, env) {
+// fixed (Optimizer): { slotId: [nazwa | null, ...] } - tomy gracza zostają na swoich miejscach, dobieramy resztę.
+function pickTomes(build, env, fixed = null) {
   const level = build.level;
   if (extrasLocked(level) || !build.skillPoints) return { locked: extrasLocked(level), groups: [], before: null, after: null };
   const { items, weapon, totals, cycle } = extrasBase(build, env);
@@ -3549,14 +3561,24 @@ function pickTomes(build, env) {
     }));
     return evaluateGoal(ctx, [...items, ...tomes.filter((tome) => SKILLS.every((skill) => !tome.ids[skill]))], weapon, skills, env.goal, cycle);
   };
-  const start = evaluate([]);
+  const fixedAt = (slotId, index) => {
+    const name = fixed && fixed[slotId] ? fixed[slotId][index] : null;
+    return name ? TOME_DB.find((tome) => tome.name === name) || null : null;
+  };
+  const chosen = [];
+  if (fixed) TOME_SLOTS.forEach((slot) => slot.unlocks.forEach((unlock, index) => {
+    const tome = fixedAt(slot.id, index);
+    if (tome) chosen.push(tome);
+  }));
+  const start = evaluate(chosen);
   delete start.stats;
   let current = start;
-  const chosen = [];
   const groups = TOME_SLOTS.map((slot) => {
     const open = tomeSlotsOpen(slot, level);
     const pool = TOME_DB.filter((tome) => tome.tomeSlot === slot.id && tome.level <= level);
     const picks = slot.unlocks.map((unlock, index) => {
+      const own = fixedAt(slot.id, index);
+      if (own) return { index, unlock, tome: own, fixed: true };
       if (index >= open) return { index, unlock, tome: null, reason: `Unlocks at level ${unlock}` };
       if (pool.length === 0) return { index, unlock, tome: null, reason: `No ${slot.label.toLowerCase()} tome up to level ${level}` };
       let best = null;
@@ -3629,7 +3651,8 @@ function aspectRelevance(aspect, focus, env) {
 const ASPECT_RARITY_WEIGHT = { Legendary: 1, Fabled: 1.25, Mythic: 1.6 };
 const ASPECT_MODEL_WEIGHT = 100; // +1% obrażeń celu = 1 punkt, tyle co jeden aktywny węzeł spoza archetypu
 
-function pickAspects(build, env) {
+// fixed (Optimizer): [[aspekt, tier] | null, ...] po slotach - aspekty gracza zostają, dobieramy puste sloty.
+function pickAspects(build, env, fixed = null) {
   const level = build.level;
   if (extrasLocked(level) || !build.skillPoints) return { locked: extrasLocked(level), slots: [], before: null, after: null };
   const pool = ASPECT_DB[build.playerClass] || [];
@@ -3646,11 +3669,13 @@ function pickAspects(build, env) {
   // Aspekt zmienia liczby tylko, gdy ma efekty dla zdolności, które są w drzewku (i ich deps są aktywne).
   const touchesModel = (aspect) =>
     aspect.tiers[aspect.tiers.length - 1].abilities.some((ability) => (ability.base === MELEE_ABILITY_ID || focus.active.has(ability.base)) && (ability.deps || []).every((id) => focus.active.has(id)));
-  const start = evaluate([]);
+  const chosen = (fixed || []).filter(Boolean).map(([aspect, tier]) => [aspect, tier]);
+  const start = evaluate(chosen);
   let current = start;
-  const chosen = [];
   const relevance = new Map(pool.map((aspect) => [aspect.name, aspectRelevance(aspect, focus, env)]));
   const slots = ASPECT_SLOT_UNLOCKS.map((unlock, index) => {
+    const own = fixed && fixed[index] ? fixed[index] : null;
+    if (own) return { index, unlock, aspect: own[0], tier: own[1], fixed: true };
     if (index >= open) return { index, unlock, aspect: null, reason: `Unlocks at level ${unlock}` };
     const hasMythic = chosen.some(([aspect]) => aspect.tier === "Mythic");
     let best = null;
@@ -4217,6 +4242,26 @@ select.mc-input option{background:#000;color:#fff}
 .wbr-mc[data-theme=light] .wbr-card .mc-btn:hover{background:#7286c7;box-shadow:inset 2px 2px 0 #b4c2f2,inset -2px -2px 0 #3a4677;color:#FFFFA0}
 .wbr-mc[data-theme=light] .wbr-card .mc-btn-on,.wbr-mc[data-theme=light] .wbr-card .mc-btn-on:hover{background:#2f2d36;box-shadow:inset 2px 2px 0 #161419,inset -2px -2px 0 #5a5566;color:#FFAA00}
 .wbr-mc[data-theme=light] .wbr-card .border-zinc-600,.wbr-mc[data-theme=light] .wbr-card .border-zinc-700{border-color:#55525e}
+.wbr-modes{display:flex;flex-wrap:wrap;gap:8px}
+.wbr-mode-wrap{position:relative;display:flex;flex:1 1 15rem;min-width:0}
+.wbr-mc .wbr-mode{flex:1;display:flex;align-items:center;gap:12px;min-width:0;text-align:left;font-family:inherit;padding:10px 44px 10px 14px;color:#C9C4D6;background:#211d29;border:2px solid #000;box-shadow:inset 2px 2px 0 #4a4556,inset -2px -2px 0 #16131b;cursor:pointer;transition:background .12s,color .12s}
+.wbr-mc .wbr-mode:hover{background:#2e2939;color:#FFFFA0}
+.wbr-mc .wbr-mode:focus-visible{outline:2px solid #fff;outline-offset:-4px}
+.wbr-mc .wbr-mode-on,.wbr-mc .wbr-mode-on:hover{color:#FFAA00;background:#2a2112;box-shadow:inset 2px 2px 0 #4a4556,inset -2px -2px 0 #16131b,inset 0 -4px 0 #FFAA00}
+.wbr-mode-icon{font-size:24px;line-height:1;width:26px;text-align:center}
+.wbr-mode-name{font-size:18px;font-weight:700;line-height:1.15}
+.wbr-mode-sub{font-size:12px;color:#8c8c8c;line-height:1.3}
+.wbr-mode-on .wbr-mode-sub{color:#d8c9a8}
+.wbr-mc .wbr-mode-help{position:absolute;right:10px;top:50%;transform:translateY(-50%);width:26px;height:26px;display:inline-flex;align-items:center;justify-content:center;font-family:inherit;font-weight:700;font-size:15px;color:#101228;background:#55FFFF;border:2px solid #000;border-radius:50%;cursor:pointer;text-shadow:none}
+.wbr-mc .wbr-mode-help:hover{background:#FFFF55}
+.wbr-mc .wbr-mode-help:focus-visible{outline:2px solid #fff;outline-offset:2px}
+.wbr-mc .wbr-fill-hint{color:#55FFFF;border-left:3px solid #55FFFF;padding:5px 9px;background:rgba(85,255,255,.07)}
+.wbr-mc[data-theme=light] .wbr-mode{color:#46434F;background:#D8D5DE;border-color:#3A3644;box-shadow:inset 2px 2px 0 #F7F6FA,inset -2px -2px 0 #9A95A6}
+.wbr-mc[data-theme=light] .wbr-mode:hover{background:#C3CFF3;color:#10163A}
+.wbr-mc[data-theme=light] .wbr-mode-on,.wbr-mc[data-theme=light] .wbr-mode-on:hover{color:#854A00;background:#FBEFCF;box-shadow:inset 2px 2px 0 #FFFFFF,inset -2px -2px 0 #BDB8C8,inset 0 -4px 0 #D98A00}
+.wbr-mc[data-theme=light] .wbr-mode-sub{color:#57545F}
+.wbr-mc[data-theme=light] .wbr-fill-hint{color:#05636C;border-left-color:#05636C;background:rgba(5,99,108,.08)}
+@media (max-width:640px){.wbr-mode-name{font-size:16px}.wbr-mode-sub{display:none}}
 `;
 const PIXEL_ICONS = {
   tome: [
@@ -4647,12 +4692,14 @@ function PowderSlots({ count, recommended = null, applied = null, level = 120 })
     <div className="grid flex-shrink-0 gap-1" style={ts({ gridTemplateColumns: `repeat(${Math.min(3, count)}, 16px)` })} aria-label={title} title={title}>
       {Array.from({ length: count }, (_, index) => {
         // Mieszanka powderów: każdy slot w kolorze swojego żywiołu.
-        const slotStyle = applied && applied.list && applied.list[index] ? ELEMENT_STYLE[applied.list[index].element] : style;
+        // (Creator: powderów może być mniej niż slotów - reszta slotów zostaje pusta)
+        const slotStyle = applied && applied.list ? (applied.list[index] ? ELEMENT_STYLE[applied.list[index].element] : null) : style;
+        const on = Boolean(applied && slotStyle);
         return (
           <span
             key={index}
             className="flex h-4 w-4 items-center justify-center text-xs leading-none"
-            style={ts({ background: applied ? mixColor(slotStyle.color, "#0A0C1E", 0.7) : "#0A0C1E", border: "2px solid", borderColor: applied ? `${slotStyle.color} #050612 #050612 ${slotStyle.color}` : "#050612 #2C3160 #2C3160 #050612", color: slotStyle ? slotStyle.color : "transparent", opacity: applied ? 1 : 0.8 })}
+            style={ts({ background: on ? mixColor(slotStyle.color, "#0A0C1E", 0.7) : "#0A0C1E", border: "2px solid", borderColor: on ? `${slotStyle.color} #050612 #050612 ${slotStyle.color}` : "#050612 #2C3160 #2C3160 #050612", color: slotStyle ? slotStyle.color : "transparent", opacity: on ? 1 : 0.8 })}
           >
             {slotStyle ? slotStyle.symbol : ""}
           </span>
@@ -5239,6 +5286,22 @@ function ItemCardInner({ slot, build, actions, powder = null, open = true, onTog
       </article>
     );
   }
+  if (!slot.item && actions && actions.onChoose) {
+    // Creator / Optimizer: pusty slot gracza - wybór przedmiotu (i w Optimizerze informacja, że Optimize go uzupełni)
+    return (
+      <article
+        className={`wbr-card flex flex-col items-start justify-center gap-2 border-2 border-dashed border-zinc-600 p-4 text-sm ${wide}`}
+        style={ts({ fontFamily: CARD_FONT, background: TOOLTIP.bg2 })}
+      >
+        <span className="text-xs uppercase tracking-widest text-zinc-500">{slot.label}</span>
+        <p className="text-zinc-300">Empty slot</p>
+        {actions.emptyHint && <p className="wbr-fill-hint text-xs">{actions.emptyHint}</p>}
+        <button type="button" onClick={() => actions.onChoose(slot.id)} className="mc-btn mc-btn-sm mc-btn-primary">
+          Choose {slot.type === "weapon" ? "weapon" : slot.type === "ring" ? "ring" : slot.label.toLowerCase()}
+        </button>
+      </article>
+    );
+  }
   if (!slot.item) {
     const speedFiltered = slot.id === "weapon" && attackSpeeds.length > 0;
     return (
@@ -5306,8 +5369,15 @@ function ItemCardInner({ slot, build, actions, powder = null, open = true, onTog
         <span>
           {slot.label}
           {pinned && <span style={ts({ color: "#FFAA00" })}> · pinned</span>}
+          {slot.proposed && (
+            <span style={ts({ color: "#55FF55" })} title={slot.previous ? `Proposed by Optimize instead of ${slot.previous}` : "Proposed by Optimize for an empty slot"}>
+              {" "}
+              · proposed
+            </span>
+          )}
         </span>
         <MarketDot item={item} />
+        {build && build.mode === "manual" ? null : (
         <button
           type="button"
           className="tabular-nums normal-case tracking-normal hover:text-white focus:outline-none focus:ring-2 focus:ring-amber-500"
@@ -5322,6 +5392,7 @@ function ItemCardInner({ slot, build, actions, powder = null, open = true, onTog
         >
           {build && build.mode === "damage" ? "dmg" : "score"} {buildScoreText(build, slot.score)}
         </button>
+        )}
       </div>
       <div className="flex flex-1 flex-col gap-2.5 p-3">
         <div className="flex items-start gap-3">
@@ -5422,6 +5493,27 @@ function ItemCardInner({ slot, build, actions, powder = null, open = true, onTog
           )}
           {actions && (
             <div className="flex flex-wrap gap-2 border-t pt-3" style={ts({ borderColor: "#1C2044" })}>
+              {actions.onChoose && (
+                <button
+                  type="button"
+                  onClick={() => actions.onChoose(slot.id)}
+                  className="border px-2 py-1 text-xs hover:text-white focus:outline-none focus:ring-2 focus:ring-amber-500"
+                  style={ts({ borderColor: color, color: TOOLTIP.text })}
+                >
+                  Change
+                </button>
+              )}
+              {actions.onPowders && item.slots > 0 && (slot.id === "weapon" || ["helmet", "chestplate", "leggings", "boots"].includes(slot.id)) && (
+                <button
+                  type="button"
+                  onClick={() => actions.onPowders(slot.id)}
+                  title="Put powders in this item's slots (any order and mix)"
+                  className="border px-2 py-1 text-xs hover:text-white focus:outline-none focus:ring-2 focus:ring-amber-500"
+                  style={ts({ borderColor: "#3B3F6A", color: item.powders ? "#FFAA00" : TOOLTIP.muted })}
+                >
+                  Powders{item.powders ? ` ${item.powders.list.length}/${item.slots}` : ""}
+                </button>
+              )}
               {actions.onAlternatives && (
                 <button
                   type="button"
@@ -5441,6 +5533,17 @@ function ItemCardInner({ slot, build, actions, powder = null, open = true, onTog
                   style={ts({ borderColor: "#3B3F6A", color: item.rolls ? "#FFAA00" : TOOLTIP.muted })}
                 >
                   Rolls{item.rolls ? " ✎" : ""}
+                </button>
+              )}
+              {actions.onRemove && (
+                <button
+                  type="button"
+                  onClick={() => actions.onRemove(slot.id)}
+                  title="Empty this slot"
+                  className="border px-2 py-1 text-xs hover:text-white focus:outline-none focus:ring-2 focus:ring-amber-500"
+                  style={ts({ borderColor: "#3B3F6A", color: TOOLTIP.muted })}
+                >
+                  Remove
                 </button>
               )}
               {!actions.onExclude ? null : pinned ? (
@@ -5917,7 +6020,9 @@ function slotForItem(item, locked = {}) {
   return item.type;
 }
 
-function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, onPick, onClose, pickLabel = "Use" }) {
+// manual (Creator / Optimizer): bez ocen i propozycji; bez klasy widać bronie wszystkich klas (klasa wynika z broni),
+// a maksymalny poziom można podnieść ponad poziom postaci (taki przedmiot dostaje ostrzeżenie, nie blokadę).
+function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, onPick, onClose, pickLabel = "Use", manual = false, currentName = null }) {
   const slot = slotId ? SLOTS.find((entry) => entry.id === slotId) : null;
   const weaponType = playerClass ? CLASSES[playerClass].weapon : null;
   const normalized = normalizeOptions(options);
@@ -5935,24 +6040,30 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
   const [showAll, setShowAll] = useState(false);
   const [affixFilters, setAffixFilters] = useState([]); // [{ id, min }]
   const [affixMode, setAffixMode] = useState("all");
+  // Wymagania: tylko przedmioty wymagające wyłącznie zaznaczonych umiejętności i / lub najwyżej N w każdej
+  const [reqSkills, setReqSkills] = useState([]);
+  const [reqMax, setReqMax] = useState("");
   const changeAffixes = (next) => {
     if (next.length > 0 && affixFilters.length === 0 && !build) setSort("affix");
     if (next.length === 0 && sort === "affix") setSort(build ? "score" : slot && slot.type === "weapon" ? "dps" : "level");
     setAffixFilters(next);
   };
   const needle = query.trim().toLowerCase();
-  const filtering = (Boolean(build) && sort !== "score") || needle.length > 0 || elements.length > 0 || tiers.length > 0 || speeds.length > 0 || levelMin !== "" || levelMax !== "" || minDps !== "" || affixFilters.length > 0 || onlyListed || onlyRated || (!slot && types.length > 0);
+  const filtering = (Boolean(build) && sort !== "score") || needle.length > 0 || elements.length > 0 || tiers.length > 0 || speeds.length > 0 || levelMin !== "" || levelMax !== "" || minDps !== "" || affixFilters.length > 0 || onlyListed || onlyRated || reqSkills.length > 0 || reqMax !== "" || (!slot && types.length > 0);
   const weaponsOnly = slot ? slot.type === "weapon" : types.length > 0 && types.every((type) => type === "weapon");
 
   const results = useMemo(() => {
     const min = levelMin === "" ? 1 : clampLevel(levelMin);
-    const max = levelMax === "" ? level : Math.min(level, clampLevel(levelMax));
+    const max = levelMax === "" ? level : manual ? clampLevel(levelMax) : Math.min(level, clampLevel(levelMax));
     const dpsFloor = minDps === "" ? 0 : Number(minDps) || 0;
+    const reqCap = reqMax === "" ? null : Math.max(0, Number(reqMax) || 0);
     const wantedTypes = slot ? [slot.type] : types;
     const matches = ITEM_DB.filter((item) => {
       if (item.level > max || item.level < min) return false;
       if (item.category === "weapon" && weaponType && item.type !== weaponType) return false;
-      if (item.category === "weapon" && !weaponType) return false;
+      if (item.category === "weapon" && !weaponType && !manual) return false;
+      if (reqSkills.length > 0 && SKILLS.some((skill) => (item.reqs[skill] || 0) > 0 && !reqSkills.includes(skill))) return false;
+      if (reqCap !== null && SKILLS.some((skill) => (item.reqs[skill] || 0) > reqCap)) return false;
       const typeKey = item.category === "weapon" ? "weapon" : item.type;
       if (wantedTypes.length > 0 && !wantedTypes.includes(typeKey)) return false;
       if (needle && !item.name.toLowerCase().includes(needle)) return false;
@@ -6018,9 +6129,9 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
     });
     const rows = shown.map((item) => scored.get(item.name) || { item, score: null, contributions: [], deltas: [], overflow: 0, current: true });
     return { rows, total: matches.length, currentScore: null, suggested: false };
-  }, [build, slotId, slot, types, elements, tiers, speeds, levelMin, levelMax, minDps, needle, sort, level, weaponType, filtering, showAll, normalized.excluded, normalized.locked, affixFilters, affixMode, onlyListed, onlyRated]);
+  }, [build, slotId, slot, types, elements, tiers, speeds, levelMin, levelMax, minDps, needle, sort, level, weaponType, filtering, showAll, normalized.excluded, normalized.locked, affixFilters, affixMode, onlyListed, onlyRated, manual, reqSkills, reqMax]);
 
-  const current = slot && build ? build.slots.find((entry) => entry.id === slotId).item : null;
+  const current = slot && build ? build.slots.find((entry) => entry.id === slotId).item : currentName ? ITEM_BY_NAME.get(currentName) || null : null;
   const chip = (pressed, color, onClick, label, key) => (
     <ToggleChip key={key} pressed={pressed} color={color} onClick={onClick}>
       {label}
@@ -6031,13 +6142,13 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
       className="wbr-backdrop fixed inset-0 z-50 flex items-start justify-center overflow-y-auto px-4 py-6"
       role="dialog"
       aria-modal="true"
-      aria-label={slot ? `Other picks for ${slot.label}` : "Browse items"}
+      aria-label={slot ? (manual ? `Choose ${slot.label}` : `Other picks for ${slot.label}`) : "Browse items"}
       onKeyDown={(event) => event.key === "Escape" && onClose()}
     >
       <div className="wbr-pop mc-panel flex w-full max-w-4xl flex-col gap-3 p-4">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <h2 className="mc-title text-lg">{slot ? `Other picks for ${slot.label}` : "Browse items"}</h2>
+            <h2 className="mc-title text-lg">{slot ? (manual ? `Choose ${slot.label}` : `Other picks for ${slot.label}`) : "Browse items"}</h2>
             <p className="text-sm text-zinc-400">
               {current ? (
                 <>
@@ -6045,7 +6156,9 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
                   {results.currentScore !== null ? ` (${build && build.mode === "damage" ? `${formatNumber(Math.round(results.currentScore))} ${build.goalName || "damage"}` : `score ${formatScore(results.currentScore)}`})` : ""}.{" "}
                 </>
               ) : null}
-              {build && slot
+              {manual
+                ? `Every ${slot && slot.type === "weapon" ? (weaponType || "weapon of any class - the weapon sets your class") : slot ? slot.label.toLowerCase() : "item"} up to level ${level}. Type a higher max level to see items above yours (the build then shows a warning). Nothing is picked for you.`
+                : build && slot
                 ? `With nothing typed the list is the ${build.archetype} ranking for the slot; type or filter to search every ${weaponType ? `${weaponType}, ` : ""}armour piece and accessory up to level ${level} - still scored in this build. Using one pins it here and re-fits the other slots around it.`
                 : build
                   ? `Every ${weaponType ? `${weaponType}, ` : ""}armour piece and accessory up to level ${level}, scored in the current ${build.archetype} build (the arrow shows the slot it would take). Picking one pins it to its slot and re-fits the rest.`
@@ -6110,8 +6223,18 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
               </>
             )}
           </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs text-zinc-500" title="Show only items whose skill point requirements are all among the checked skills (none checked = any), and at most this many points in each.">
+              Requirements
+            </span>
+            {SKILLS.map((skill) => chip(reqSkills.includes(skill), SKILL_STYLE[skill].color, () => setReqSkills(toggleValue(reqSkills, skill)), `${SKILL_STYLE[skill].symbol} ${SKILL_STYLE[skill].short}`, `req-${skill}`))}
+            <label className="ml-2 flex items-center gap-1 text-xs text-zinc-300">
+              max
+              <input value={reqMax} onChange={(event) => setReqMax(event.target.value.replace(/[^0-9]/g, ""))} placeholder="any" inputMode="numeric" className="mc-input w-16 text-right" aria-label="Maximum requirement per skill" />
+            </label>
+          </div>
           <AffixPicker selected={affixFilters} onChange={changeAffixes} mode={affixMode} onModeChange={setAffixMode} />
-          {(weaponsOnly || (!slot && types.length === 0)) && weaponType && (
+          {(weaponsOnly || (!slot && types.length === 0)) && (weaponType || manual) && (
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-xs text-zinc-500">Attack speed</span>
               {ATTACK_SPEEDS.map((speed) => chip(speeds.includes(speed), null, () => setSpeeds(toggleValue(speeds, speed)), ATTACK_SPEED_LABELS[speed], speed))}
@@ -7281,12 +7404,14 @@ function weaponPowderSpecial(weapon, stats, critChance) {
 }
 
 function computeBuildStats(build, treeSettings = null) {
-  const items = build.slots.filter((slot) => slot.item).map((slot) => slot.item);
+  // tomy gracza (Creator / Optimizer: build.tomes) liczą się jak przedmioty z samymi identyfikacjami
+  const items = [...build.slots.filter((slot) => slot.item).map((slot) => slot.item), ...(build.tomes || [])];
   const weapon = (build.slots.find((slot) => slot.id === "weapon") || {}).item;
   const ids = collectIds(items);
   const skills = build.skillPoints.totals;
   const stats = buildStatMap(build, items, weapon);
-  const tree = treeStateFor(build.playerClass, (treeSettings && treeSettings.selected) || []);
+  // aspekty (treeSettings.aspects: pary [aspekt, tier]) doklejają się do zdolności drzewka jak w generatorze
+  const tree = treeStateFor(build.playerClass, (treeSettings && treeSettings.selected) || [], (treeSettings && treeSettings.aspects) || []);
   treeRawStats(tree.merged, stats);
   const preStats = copyStats(stats);
   const scaled = applyTreeScaling(tree.merged, preStats, tree.interactives, treeSettings);
@@ -9215,14 +9340,14 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
 
   return (
     <section className="mc-panel wbr-fade flex flex-col gap-4 p-5">
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <button type="button" className="mc-btn min-w-[6.5rem] justify-center" onClick={() => previous(active)} title={active === "rank" ? "Back to the class choice" : `Back to: ${(WIZARD_STEPS[order.indexOf(active) - 1] || {}).label || ""}`}>
           ‹ Previous
         </button>
         <span className="hidden text-xs text-zinc-500 sm:block">
           Step {order.indexOf(active) + 1} of {order.length}
         </span>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
           {active !== "rank" && active !== "generate" && firstOpen === null && (
             <button type="button" className="mc-btn min-w-[6.5rem] justify-center" onClick={onGenerate} disabled={running} title="Everything after the tree has a sensible default - you can generate right away.">
               {running ? "Searching…" : "Generate now"}
@@ -11455,6 +11580,23 @@ function InfoDialog({ onClose }) {
           </p>
 
           <section className="flex flex-col gap-2">
+            <h3 className="wbr-welcome-sub">Three modes (top bar)</h3>
+            <ul className="flex flex-col gap-2 text-sm">
+              <li className="wbr-welcome-source">{hl("Build Recommender")} - the generator builds everything from scratch (the steps below).</li>
+              <li className="wbr-welcome-source">
+                {hl("Build Optimizer")} - you pick part of the build (items, tree, tomes, aspects, points), Optimize fills the empty places and recommends swaps. Nothing of
+                yours changes; every change is listed with a why and applied only after Accept changes. The full search checks every item that fits an empty slot (the time
+                estimate comes first; over 2 minutes you can pick quick mode).
+              </li>
+              <li className="wbr-welcome-source">
+                {hl("Build Creator")} - a manual editor like Wynnbuilder: any item, rolls, powders (armour too), tree, tomes, aspects and free points by hand, live stats,
+                Wynnbuilder import and export, builds saved in this browser.
+              </li>
+              <li className="wbr-welcome-source">Each mode keeps its own build. Edit in Creator and Send to Optimizer copy a build to the other mode; the ? next to a mode explains it.</li>
+            </ul>
+          </section>
+
+          <section className="flex flex-col gap-2">
             <h3 className="wbr-welcome-sub">Step by step</h3>
             <ol className="wbr-info-list">
               <li>{hl("Class, rank, level.")} The rank lends ability points earlier; items above your level are left out, and skill and ability points come from the level.</li>
@@ -12038,18 +12180,19 @@ function WhyRow({ label, value, good = null, hint = null }) {
 
 // Przycisk "Open in Wynnbuilder": ten sam build (przedmioty, powdery broni, skill pointy razem z wolnymi, poziom,
 // drzewko) jako link Wynnbuildera; opcjonalnie z tomami i aspektami poleconymi w zakładkach Tomes / Aspects.
-function WynnbuilderExport({ build, treeSettings }) {
-  const canExtras = !extrasLocked(build.level);
+// fixedExtras (Creator / Optimizer): tomy i aspekty gracza - bez przełącznika "recommended".
+function WynnbuilderExport({ build, treeSettings, fixedExtras = null }) {
+  const canExtras = !extrasLocked(build.level) && !fixedExtras;
   const [withExtras, setWithExtras] = useState(false);
   const [message, setMessage] = useState("");
   const [showLink, setShowLink] = useState(false);
   const link = useMemo(() => {
-    const extras = withExtras && canExtras ? wynnbuilderExtras(build, extrasEnvFor(build, treeSettings, null, null)) : null;
+    const extras = fixedExtras || (withExtras && canExtras ? wynnbuilderExtras(build, extrasEnvFor(build, treeSettings, null, null)) : null);
     const result = wynnbuilderLink(build, (treeSettings && treeSettings.selected) || [], extras);
     const tomes = extras ? Object.values(extras.tomes).flat().filter(Boolean).length : 0;
     const aspects = extras ? extras.aspects.filter(Boolean).length : 0;
     return { ...result, tomes, aspects };
-  }, [build, treeSettings, withExtras, canExtras]);
+  }, [build, treeSettings, withExtras, canExtras, fixedExtras]);
   useEffect(() => {
     setMessage("");
   }, [link.url]);
@@ -12080,7 +12223,9 @@ function WynnbuilderExport({ build, treeSettings }) {
         </label>
       )}
       <p className="text-xs text-zinc-500">
-        {`9 items, weapon powders, skill points (with the free ones), level ${build.level} and your ability tree (${treeCount} abilities)`}
+        {fixedExtras
+          ? `9 items with their powders, skill points (with the free ones), level ${build.level}, your ability tree (${treeCount} abilities), ${link.tomes} tomes and ${link.aspects} aspects`
+          : `9 items, weapon powders, skill points (with the free ones), level ${build.level} and your ability tree (${treeCount} abilities)`}
         {withExtras && canExtras ? ` + ${link.tomes} tomes and ${link.aspects} aspects` : ""}
         {` · Wynnbuilder data ${WB_IDS.version}.`}
         {link.missing.length > 0 ? ` Not in Wynnbuilder's list, left empty: ${link.missing.join(", ")}.` : ""}
@@ -12658,7 +12803,9 @@ function fitTreeToCap(playerClass, ids, cap) {
   return suggestAbilityTree(playerClass, arch, cap, new Set(ids)).ids;
 }
 
-function suggestAbilityTree(playerClass, archetype, cap, only = null) {
+// seed (Optimizer): węzły gracza zostają (liczą się do AP), a propozycja dokłada resztę. pathValue(ścieżka, aktywne):
+// własna wartość ścieżki (Optimizer: zysk celu z modelu obrażeń + wagi heurystyczne) zamiast sumy wag.
+function suggestAbilityTree(playerClass, archetype, cap, only = null, seed = null, pathValue = null) {
   const fullTree = TREE_INDEX[playerClass];
   // only: przycinanie istniejącego drzewka - wybór tylko spośród jego węzłów (każdy z nich coś jest wart,
   // archetyp decyduje o kolejności), więc wynik to podzbiór drzewka gracza mieszczący się w limicie AP.
@@ -12677,6 +12824,21 @@ function suggestAbilityTree(playerClass, archetype, cap, only = null) {
     points += node.cost;
     if (node.arch) counts[node.arch] = (counts[node.arch] || 0) + 1;
   };
+  if (seed && seed.length > 0) {
+    // węzły gracza w kolejności, w jakiej da się je odblokować (resolveTree pomija te bez połączenia)
+    const start = resolveTree(tree, seed);
+    let pending = seed.filter((id) => start.reachable.has(id));
+    for (let guard = 0; guard < 400 && pending.length > 0; guard += 1) {
+      const next = [];
+      pending.forEach((id) => {
+        const node = tree.byId.get(id);
+        if (canUnlock(tree, node, active, counts, Infinity).ok) unlock(id);
+        else next.push(id);
+      });
+      if (next.length === pending.length) break;
+      pending = next;
+    }
+  }
   // Czy dany ciąg węzłów da się odblokować po kolei (zasady jak canUnlock, bez limitu AP)?
   const feasible = (ids) => {
     const reach = new Set(active);
@@ -12692,7 +12854,7 @@ function suggestAbilityTree(playerClass, archetype, cap, only = null) {
   for (let guard = 0; guard < 200; guard += 1) {
     let best = null;
     tree.nodes.forEach((target) => {
-      if (active.has(target.id) || !(weights.get(target.id) > 0)) return;
+      if (active.has(target.id) || (!pathValue && !(weights.get(target.id) > 0))) return;
       let path = cheapestTreePath(tree, children, active, target.id);
       if (!path) return;
       // Zależności (dependencies) spoza ścieżki idą przed nią.
@@ -12708,7 +12870,9 @@ function suggestAbilityTree(playerClass, archetype, cap, only = null) {
       }
       const cost = path.reduce((sum, id) => sum + tree.byId.get(id).cost, 0);
       if (points + cost > cap || !feasible(path)) return;
-      const value = path.reduce((sum, id) => sum + (weights.get(id) || 0), 0);
+      const heuristic = path.reduce((sum, id) => sum + (weights.get(id) || 0), 0);
+      const value = pathValue ? pathValue(path, active, heuristic) : heuristic;
+      if (pathValue && !(value > 0)) return;
       const ratio = value / cost;
       const better =
         !best ||
@@ -12943,7 +13107,8 @@ function wynnbuilderLink(build, treeIds, extras = null) {
     const id = item ? WB_IDS.items[item.name] : undefined;
     if (item && id === undefined) missing.push(item.name);
     out.append(id === undefined ? 0 : id + 1, enc.ITEM_ID_BITLEN);
-    if (index <= 3 || slot.id === "weapon") wbAppendPowders(out, slot.id === "weapon" && id !== undefined ? wbPowderIds(item) : []);
+    // powdery broni i pancerza (pancerz ma je tylko w Creatorze / Optimizerze - generator ich nie zakłada)
+    if (index <= 3 || slot.id === "weapon") wbAppendPowders(out, id !== undefined ? wbPowderIds(item) : []);
   });
   // Tomy
   const tomeSkills = Object.fromEntries(SKILLS.map((skill) => [skill, 0]));
@@ -12965,7 +13130,9 @@ function wynnbuilderLink(build, treeIds, extras = null) {
   out.flag("SP_FLAG", "ASSIGNED");
   SKILLS.forEach((skill) => {
     out.flag("SP_ELEMENT_FLAG", "ELEMENT_ASSIGNED");
-    out.append(Math.round((totals[skill] || 0) + tomeSkills[skill]) & ((1 << enc.MAX_SP_BITLEN) - 1), enc.MAX_SP_BITLEN);
+    // build z Creatora / Optimizera ma już tomy w sumach (skillPoints.tomesIncluded)
+    const withTomes = (totals[skill] || 0) + (build.skillPoints && build.skillPoints.tomesIncluded ? 0 : tomeSkills[skill]);
+    out.append(Math.round(withTomes) & ((1 << enc.MAX_SP_BITLEN) - 1), enc.MAX_SP_BITLEN);
   });
   // Poziom
   if (build.level === enc.MAX_LEVEL) out.flag("LEVEL_FLAG", "MAX");
@@ -14290,7 +14457,7 @@ function TomesPanel({ build, env }) {
   );
 }
 
-function GuideBuilds({ archetype, activeUrl, onShow }) {
+function GuideBuilds({ archetype, activeUrl, onShow, showLabel = "Show" }) {
   const builds = GUIDE_DATA.builds.filter((build) => build.archetype === archetype);
   return (
     <section className="mc-panel flex flex-col gap-3 p-4">
@@ -14326,7 +14493,7 @@ function GuideBuilds({ archetype, activeUrl, onShow }) {
                     onClick={() => onShow(build)}
                     className={`mc-btn mc-btn-sm ${active ? "mc-btn-on" : ""}`}
                   >
-                    {active ? "Showing" : "Show"}
+                    {active ? "Showing" : showLabel}
                   </button>
                   <a
                     href={build.url}
@@ -14411,6 +14578,16 @@ export function startEngineWorker(scope) {
         scope.postMessage({ type: "done", id, build });
       } catch (error) {
         scope.postMessage({ type: "error", id, message: String((error && error.message) || error) });
+      }
+      return;
+    }
+    if (message.type === "optTask") {
+      // Optimizer: plan / quick / bnb / finish (optRunTask); postęp przeszukiwania wraca w optProgress
+      try {
+        const result = await optRunTask(message.kind, message.payload, (progress) => scope.postMessage({ type: "optProgress", id: message.id, progress }));
+        scope.postMessage({ type: "optDone", id: message.id, result });
+      } catch (error) {
+        scope.postMessage({ type: "optError", id: message.id, message: String((error && error.message) || error) });
       }
       return;
     }
@@ -14682,7 +14859,3845 @@ async function runDamageGeneration(params, { onProgress = null, cancelRef = null
   return build;
 }
 
+// ============================ BUILD CREATOR / BUILD OPTIMIZER: build składany przez gracza ============================
+// Spec "Build Optimizer i Build Creator": obok Recommendera dwa tryby z własnym buildem gracza (workspace).
+// Workspace to czyste dane (nazwy przedmiotów, powdery jako tekst, rolle, drzewko, tomy, aspekty, wolne skill pointy),
+// więc da się go zapisać w przeglądarce, skopiować do innego trybu i wysłać do wątku generatora. manualBuild() robi
+// z niego obiekt buildu w tym samym kształcie, co generator - dzięki temu działają wszystkie panele (Damage,
+// Survivability, Skill points, Build info, eksport do Wynnbuildera).
+const TOME_BY_NAME = new Map(TOME_DB.map((tome) => [tome.name, tome]));
+const TOME_BY_ID = new Map(TOME_DB.map((tome) => [tome.tomeId, tome]));
+const ARMOUR_SLOT_IDS = ["helmet", "chestplate", "leggings", "boots"];
+
+function emptyWorkspace() {
+  return { playerClass: "", rank: "", level: null, archetype: "", tree: [], treeFx: {}, items: {}, powders: {}, rolls: {}, tomes: {}, aspects: [], freeSp: {}, name: "" };
+}
+function workspaceHasContent(ws) {
+  return Boolean(ws && (ws.playerClass || Object.values(ws.items || {}).some(Boolean) || (ws.tree || []).length > 0));
+}
+
+// Powdery gracza jako tekst "t6 t6 e5" (jak "Custom mix"): kolejność i mieszanka dowolna, najwyżej tyle, ile slotów;
+// tier powyżej dozwolonego dla poziomu przedmiotu jest obcinany (jak w grze nie da się go nałożyć).
+function powderListFromText(text, item) {
+  if (!item || !(item.slots > 0) || !text) return [];
+  const pattern = parsePowderMix(text);
+  if (!pattern) return [];
+  const maxTier = powderTierFor(item.level);
+  return pattern.slice(0, item.slots).map((entry) => ({ element: entry.element, tier: Math.min(entry.tier || maxTier, maxTier) }));
+}
+function powderText(list) {
+  return (list || []).map((powder) => `${powder.element.charAt(0)}${powder.tier}`).join(" ");
+}
+function powderInfo(list) {
+  return { element: list[0].element, tier: list[0].tier, count: list.length, list, mixed: list.some((powder) => powder.element !== list[0].element || powder.tier !== list[0].tier) };
+}
+// Broń z dowolną listą powderów (także mniej niż slotów): te same zakresy co powderedWeapon.
+function weaponWithPowderList(item, list) {
+  if (!item || !list || list.length === 0) return item;
+  const ranges = powderWeaponRanges(weaponDamageRanges(item), list);
+  const round = (value) => Math.round(value * 10000) / 10000;
+  const damageRanges = {};
+  const damage = {};
+  ranges.forEach(([min, max], index) => {
+    if (max > 0) {
+      damageRanges[DAMAGE_ELEMENTS[index]] = `${Math.round(min)}-${Math.round(max)}`;
+      damage[DAMAGE_ELEMENTS[index]] = (min + max) / 2;
+    }
+  });
+  const dps = Math.round(Object.values(damage).reduce((sum, value) => sum + value, 0) * (HITS_PER_SECOND[item.atkSpd] || 0));
+  return {
+    ...item,
+    damageRanges,
+    damage,
+    dps,
+    powderedRanges: ranges.map(([min, max]) => [round(min), round(max)]),
+    powders: powderInfo(list),
+    baseWeapon: { damageRanges: item.damageRanges, damage: item.damage, dps: item.dps },
+  };
+}
+// Pancerz z powderami: każdy dodaje obronę swojego żywiołu i zdrowie, odejmuje obronę żywiołu przeciwnego
+// (wiki: Powders; te same liczby co podpowiedź "Recommended powders").
+function armourWithPowderList(item, list) {
+  if (!item || !list || list.length === 0) return item;
+  const base = { ...item.base };
+  let health = 0;
+  list.forEach(({ element, tier }) => {
+    const spec = POWDERS[element];
+    const own = `${element.charAt(0)}Def`;
+    const counter = `${spec.counter.charAt(0)}Def`;
+    base[own] = (base[own] || 0) + spec.defence[tier - 1];
+    base[counter] = (base[counter] || 0) - spec.counterDefence[tier - 1];
+    health += POWDER_HEALTH[tier - 1];
+  });
+  base.hp = (base.hp || 0) + health;
+  const stats = { ...item.stats, hp: (item.stats.hp || 0) + health };
+  ELEMENTS.forEach((element) => {
+    const key = `${element.charAt(0)}Def`;
+    if (base[key]) stats[key] = base[key];
+    else delete stats[key];
+  });
+  return { ...item, base, stats, powders: powderInfo(list), armourPowders: true };
+}
+function applyPowderList(slotId, item, list) {
+  if (!item || !list || list.length === 0) return item;
+  if (slotId === "weapon") return weaponWithPowderList(item, list);
+  if (ARMOUR_SLOT_IDS.includes(slotId)) return armourWithPowderList(item, list);
+  return item;
+}
+
+// Przedmiot slotu workspace'u z rollami i powderami gracza.
+function workspaceItem(ws, slotId) {
+  const name = ws.items && ws.items[slotId];
+  if (!name) return null;
+  const base = ITEM_BY_NAME.get(name);
+  if (!base) return null;
+  const rolled = ws.rolls && ws.rolls[name] ? withRolls(base, ws.rolls[name]) : base;
+  return applyPowderList(slotId, rolled, powderListFromText(ws.powders && ws.powders[slotId], rolled));
+}
+function workspaceTomes(ws) {
+  const out = [];
+  TOME_SLOTS.forEach((slot) => {
+    ((ws.tomes && ws.tomes[slot.id]) || []).forEach((name, index) => {
+      const tome = name ? TOME_BY_NAME.get(name) : null;
+      if (tome) out.push({ ...tome, tomeIndex: index });
+    });
+  });
+  return out;
+}
+function workspaceAspects(ws) {
+  const pool = ASPECT_DB[ws.playerClass] || [];
+  return (ws.aspects || [])
+    .map((entry) => {
+      if (!entry || !entry.name) return null;
+      const aspect = pool.find((candidate) => candidate.name === entry.name);
+      return aspect ? [aspect, Math.max(1, Math.min(aspect.tiers.length, entry.tier || aspect.tiers.length))] : null;
+    })
+    .filter(Boolean);
+}
+function workspaceRank(ws) {
+  return RANKS.find((entry) => entry.id === ws.rank) || RANKS[0];
+}
+function workspaceApCap(ws) {
+  // bez wpisanego poziomu jak w manualBuild: 120
+  return abilityPointCap(ws.level || 120, workspaceRank(ws).loan);
+}
+// Archetyp workspace'u: wybrany albo ten, do którego należy najwięcej węzłów drzewka.
+function workspaceArchetype(ws) {
+  const archetypes = ws.playerClass ? CLASSES[ws.playerClass].archetypes : [];
+  if (ws.archetype && archetypes.includes(ws.archetype)) return ws.archetype;
+  const tree = TREE_INDEX[ws.playerClass];
+  if (tree && (ws.tree || []).length > 0) {
+    const counts = {};
+    ws.tree.forEach((id) => {
+      const node = tree.byId.get(id);
+      if (node && node.arch) counts[node.arch] = (counts[node.arch] || 0) + 1;
+    });
+    const best = Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0];
+    if (best && archetypes.includes(best)) return best;
+  }
+  return archetypes[0] || "";
+}
+// Drzewko workspace'u przycięte do AP poziomu i rangi (jak w Recommenderze); pełne zostaje zapisane w ws.tree.
+function workspaceTreeIds(ws) {
+  if (!ws || !ws.playerClass || !TREE_INDEX[ws.playerClass]) return [];
+  return fitTreeToCap(ws.playerClass, ws.tree || [], workspaceApCap(ws));
+}
+function workspaceTreeSettings(ws) {
+  const aspects = workspaceAspects(ws);
+  return { selected: workspaceTreeIds(ws), ...(ws.treeFx || {}), ...(aspects.length > 0 ? { aspects } : {}) };
+}
+
+// Build gracza w kształcie buildu generatora. Ostrzeżenia zamiast blokad: za wysoki poziom, za mało skill pointów,
+// dwie kopie przedmiotu, który można mieć raz, zestawy nie do noszenia razem, za dużo AP, zablokowane tomy/aspekty.
+function manualBuild(ws) {
+  if (!ws || !ws.playerClass || !CLASSES[ws.playerClass]) return null;
+  const level = ws.level || 120;
+  const archetype = workspaceArchetype(ws);
+  const options = normalizeOptions({});
+  const picks = {};
+  const missing = [];
+  SLOTS.forEach((slot) => {
+    const name = ws.items && ws.items[slot.id];
+    const item = workspaceItem(ws, slot.id);
+    if (name && !item) missing.push(name);
+    picks[slot.id] = item;
+  });
+  const all = SLOTS.map((slot) => picks[slot.id]).filter(Boolean);
+  const tomes = workspaceTomes(ws);
+  const aspects = workspaceAspects(ws);
+  // tomy z punktami umiejętności (Guild) działają jak przedmioty bez wymagań: ich bonusy też spełniają wymagania
+  const skillTomes = tomes.filter((tome) => SKILLS.some((skill) => tome.ids && tome.ids[skill]));
+  const sp = computeSkillPoints([...all, ...skillTomes], true);
+  const extra = Object.fromEntries(SKILLS.map((skill) => [skill, Math.max(0, Math.round(Number(ws.freeSp && ws.freeSp[skill]) || 0))]));
+  const tomeSkills = Object.fromEntries(SKILLS.map((skill) => [skill, skillTomes.reduce((sum, tome) => sum + ((tome.ids && tome.ids[skill]) || 0), 0)]));
+  const assigned = Object.fromEntries(SKILLS.map((skill) => [skill, (sp.assigned[skill] || 0) + extra[skill]]));
+  const totals = Object.fromEntries(SKILLS.map((skill) => [skill, (sp.totals[skill] || 0) + extra[skill]]));
+  const available = availableSkillPoints(level);
+  const extraSum = SKILLS.reduce((sum, skill) => sum + extra[skill], 0);
+  const spent = sp.total + extraSum;
+  const overCap = SKILLS.filter((skill) => assigned[skill] > MAX_ASSIGNED_PER_SKILL);
+  const valid = spent <= available && sp.capOverflow === 0 && overCap.length === 0;
+  const warnings = [];
+  missing.forEach((name) => warnings.push(`${name} isn't in the item database ${WYNNBUILDER_DATA.version}.`));
+  SLOTS.forEach((slot) => {
+    const item = picks[slot.id];
+    if (!item) return;
+    if (item.level > level) warnings.push(`${item.name} (${slot.label}) needs level ${item.level}; you are level ${level}.`);
+    if (slot.id === "weapon" && WEAPON_CLASS[item.type] !== ws.playerClass) warnings.push(`${item.name} is a ${item.type} - a ${WEAPON_CLASS[item.type]} weapon, not ${ws.playerClass}.`);
+  });
+  if (picks.ring1 && picks.ring2 && picks.ring1.name === picks.ring2.name && singleCopy(picks.ring1)) warnings.push(`${picks.ring1.name} can only be worn once.`);
+  activeSets(all).filter((set) => set.illegal).forEach((set) => warnings.push(`Items of the ${set.name} set can't be worn together.`));
+  if (spent > available) warnings.push(`The build needs ${spent} skill points; level ${level} gives ${available}.`);
+  if (sp.capOverflow > 0 || overCap.length > 0) warnings.push(`More than ${MAX_ASSIGNED_PER_SKILL} points assigned in ${overCap.length ? overCap.map((skill) => SKILL_LABELS[skill]).join(", ") : "one skill"}.`);
+  const tree = TREE_INDEX[ws.playerClass];
+  const full = tree ? resolveTree(tree, ws.tree || []) : { points: 0, invalid: [] };
+  const treeIds = workspaceTreeIds(ws);
+  const resolved = tree ? resolveTree(tree, treeIds) : { points: 0, invalid: [] };
+  const apCap = workspaceApCap(ws);
+  if (full.points > apCap) warnings.push(`Your ability tree needs ${full.points} AP; level ${level}${workspaceRank(ws).loan ? ` with ${workspaceRank(ws).label}` : ""} gives ${apCap}, so it's trimmed to ${resolved.points} AP (the full tree is kept).`);
+  if (full.invalid && full.invalid.length > 0) warnings.push(`${full.invalid.length} abilit${full.invalid.length === 1 ? "y isn't" : "ies aren't"} connected to the tree: ${full.invalid.slice(0, 4).map((node) => node.name).join(", ")}.`);
+  if (tomes.length > 0 && extrasLocked(level)) warnings.push(`Tomes unlock at level ${RAID_CONTENT_MIN_LEVEL}.`);
+  TOME_SLOTS.forEach((slot) => {
+    const used = ((ws.tomes && ws.tomes[slot.id]) || []).filter(Boolean).length;
+    const open = tomeSlotsOpen(slot, level);
+    if (used > open) warnings.push(`${slot.label} tomes: ${used} set, level ${level} opens ${open}.`);
+  });
+  tomes.filter((tome) => tome.level > level).forEach((tome) => warnings.push(`${tome.name} needs level ${tome.level}.`));
+  if (aspects.length > aspectSlotsOpen(level) || (aspects.length > 0 && extrasLocked(level))) warnings.push(`${aspects.length} aspects set; level ${level} opens ${extrasLocked(level) ? 0 : aspectSlotsOpen(level)}.`);
+  if (aspects.filter(([aspect]) => aspect.tier === "Mythic").length > 1) warnings.push("Only one Mythic aspect can be used.");
+  const treeSettings = workspaceTreeSettings(ws);
+  return {
+    mode: "manual",
+    level,
+    playerClass: ws.playerClass,
+    archetype,
+    goal: null,
+    goalName: "",
+    passed: warnings.length === 0,
+    treeSettings,
+    options,
+    profile: getArchetypeProfile(archetype, options),
+    metrics: { cycle: null, minEhp: 0 },
+    warnings,
+    lockedSlots: [],
+    score: 0,
+    slots: SLOTS.map((slot) => ({ ...slot, item: picks[slot.id] || null, missing: ws.items && ws.items[slot.id] && !picks[slot.id] ? ws.items[slot.id] : null, score: 0, contributions: [] })),
+    skillPoints: { available, assigned, totals, required: spent, minimum: sp.total, free: extra, remaining: available - spent, valid, tomesIncluded: true, tomeSkills },
+    totals: itemStatTotals([...all, ...tomes.filter((tome) => SKILLS.every((skill) => !tome.ids[skill]))]),
+    tomes,
+    aspects,
+    apUsed: resolved.points,
+    treeFullPoints: full.points,
+    apCap,
+    stats: { eligible: 0, database: ITEM_DB.length, weapons: 0, passes: null, ms: 0 },
+  };
+}
+
+// Tomy i aspekty workspace'u w formacie wynnbuilderLink (extras).
+function workspaceExtras(ws) {
+  const tomes = {};
+  TOME_SLOTS.forEach((slot) => {
+    tomes[slot.id] = ((ws.tomes && ws.tomes[slot.id]) || []).map((name) => (name ? TOME_BY_NAME.get(name) || null : null));
+  });
+  const aspects = workspaceAspects(ws).map(([aspect, tier]) => ({ aspect, tier }));
+  return { tomes, aspects };
+}
+
+// Build z Recommendera / Optimizera / poradnika jako workspace ("Edytuj w Creatorze" kopiuje, nie przenosi).
+function workspaceFromBuild(build, { rank = "", treeIds = null, rolls = {}, extras = null, treeFx = {} } = {}) {
+  const ws = emptyWorkspace();
+  ws.playerClass = build.playerClass;
+  ws.rank = rank || "";
+  ws.level = build.level;
+  ws.archetype = build.archetype || "";
+  ws.tree = treeIds || (build.treeSettings && build.treeSettings.selected) || [];
+  ws.treeFx = treeFx || {};
+  build.slots.forEach((slot) => {
+    if (!slot.item) return;
+    ws.items[slot.id] = slot.item.name;
+    if (slot.item.powders && slot.item.powders.list && (slot.id === "weapon" || ARMOUR_SLOT_IDS.includes(slot.id))) ws.powders[slot.id] = powderText(slot.item.powders.list);
+    const spec = rolls[slot.item.name] || slot.item.rolls;
+    if (spec) ws.rolls[slot.item.name] = spec;
+  });
+  if (build.skillPoints && build.skillPoints.free) SKILLS.forEach((skill) => {
+    if (build.skillPoints.free[skill] > 0) ws.freeSp[skill] = build.skillPoints.free[skill];
+  });
+  if (extras) {
+    Object.entries(extras.tomes || {}).forEach(([slotId, list]) => {
+      ws.tomes[slotId] = (list || []).map((tome) => (tome ? tome.name : null));
+    });
+    ws.aspects = (extras.aspects || []).map((entry) => (entry ? { name: entry.aspect.name, tier: entry.tier } : null)).filter(Boolean);
+  } else if (build.mode === "manual") {
+    (build.tomes || []).forEach((tome) => {
+      (ws.tomes[tome.tomeSlot] || (ws.tomes[tome.tomeSlot] = []))[tome.tomeIndex || 0] = tome.name;
+    });
+    ws.aspects = (build.aspects || []).map(([aspect, tier]) => ({ name: aspect.name, tier }));
+  }
+  return ws;
+}
+
+// ---------- Import linku Wynnbuildera (odwrotność wynnbuilderLink; ENCODING.md, binarny format V12) ----------
+function wbReader(hash) {
+  const bits = [];
+  for (const char of hash) {
+    const value = WB_B64.indexOf(char);
+    if (value < 0) throw new Error(`The link has a character Wynnbuilder never writes: "${char}".`);
+    for (let j = 0; j < 6; j += 1) bits.push((value >> j) & 1);
+  }
+  let at = 0;
+  const read = (length) => {
+    if (at + length > bits.length) throw new Error("The link ends too early - copy the whole address from Wynnbuilder.");
+    let value = 0;
+    for (let i = 0; i < length; i += 1) value |= bits[at + i] << i;
+    at += length;
+    return value >>> 0;
+  };
+  const skip = (length) => {
+    if (at + length > bits.length) throw new Error("The link ends too early - copy the whole address from Wynnbuilder.");
+    at += length;
+  };
+  return { read, skip, rest: () => bits.slice(at) };
+}
+// Długości pól przedmiotu craftowanego i własnego w linku (CRAFTER_ENC w js/craft.js, CUSTOM_STR_LENGTH_BITLEN
+// w js/builder/build_encode_decode.js Wynnbuildera).
+const WB_CRAFT_BITS = { version: 7, ings: 6, ing: 12, recipe: 12, mats: 2, mat: 3, speed: 4 };
+const WB_CUSTOM_LENGTH_BITLEN = 12;
+function wbDecodePowders(r) {
+  const enc = WB_IDS.encoding;
+  const tiers = enc.POWDER_TIERS;
+  const count = enc.POWDER_ELEMENTS.length;
+  const out = [r.read(enc.POWDER_ID_BITLEN)];
+  for (;;) {
+    const prev = out[out.length - 1];
+    if (r.read(enc.POWDER_REPEAT_OP.BITLEN) === enc.POWDER_REPEAT_OP.REPEAT) {
+      out.push(prev);
+      continue;
+    }
+    if (r.read(enc.POWDER_REPEAT_TIER_OP.BITLEN) === enc.POWDER_REPEAT_TIER_OP.REPEAT_TIER) {
+      const wrap = r.read(enc.POWDER_WRAPPER_BITLEN);
+      out.push(((Math.floor(prev / tiers) + wrap + 1) % count) * tiers + (prev % tiers));
+      continue;
+    }
+    if (r.read(enc.POWDER_CHANGE_OP.BITLEN) === enc.POWDER_CHANGE_OP.NEW_POWDER) {
+      out.push(r.read(enc.POWDER_ID_BITLEN));
+      continue;
+    }
+    return out;
+  }
+}
+const WB_ITEM_BY_ID = new Map(Object.entries((WB_IDS && WB_IDS.items) || {}).map(([name, id]) => [id, name]));
+// Link (albo sam kod po "#") -> workspace. Zwraca { ws, notes } albo rzuca błąd z opisem dla gracza.
+function workspaceFromWynnbuilderLink(text) {
+  const enc = WB_IDS.encoding;
+  const raw = String(text || "").trim();
+  const hash = raw.includes("#") ? raw.slice(raw.indexOf("#") + 1) : raw;
+  if (!hash) throw new Error("Paste a Wynnbuilder builder link (https://wynnbuilder.github.io/builder/#...).");
+  if (/[_]/.test(hash) || /^\d+_/.test(hash)) throw new Error("This is an old Wynnbuilder link format. Open it in Wynnbuilder once and copy the new link.");
+  const r = wbReader(hash);
+  const legacy = r.read(6);
+  if (legacy !== 12) throw new Error(`This link uses Wynnbuilder's format ${legacy}; only the current binary format (12) can be read. Open it in Wynnbuilder and copy the link again.`);
+  r.read(10); // wersja danych Wynnbuildera
+  const notes = [];
+  const ws = emptyWorkspace();
+  const powderLists = {};
+  SLOTS.forEach((slot, index) => {
+    const kind = r.read(enc.EQUIPMENT_KIND.BITLEN);
+    if (kind === enc.EQUIPMENT_KIND.CRAFTED) {
+      // przedmiot craftowany (decodeCraft w js/craft.js Wynnbuildera): flaga legacy, wersja, 6 składników, przepis,
+      // 2 tiery materiałów, szybkość ataku (tylko broń) i dopełnienie do pełnych znaków base64 - pomijamy go
+      if (r.read(1) === 1) throw new Error(`The ${slot.label.toLowerCase()} is a crafted item in an old format. Open the link in Wynnbuilder once and copy it again.`);
+      let length = 1 + WB_CRAFT_BITS.version + WB_CRAFT_BITS.ings * WB_CRAFT_BITS.ing + WB_CRAFT_BITS.recipe + WB_CRAFT_BITS.mats * WB_CRAFT_BITS.mat + (slot.id === "weapon" ? WB_CRAFT_BITS.speed : 0);
+      r.skip(length - 1 + (6 - (length % 6)));
+      notes.push(`${slot.label}: a crafted item - crafted items aren't in the item database, so the slot is left empty.`);
+    } else if (kind === enc.EQUIPMENT_KIND.CUSTOM) {
+      r.skip(r.read(WB_CUSTOM_LENGTH_BITLEN) * 6);
+      notes.push(`${slot.label}: a custom item - left empty.`);
+    } else {
+      const id = r.read(enc.ITEM_ID_BITLEN);
+      if (id > 0) {
+        const name = WB_ITEM_BY_ID.get(id - 1);
+        if (name && ITEM_BY_NAME.has(name)) ws.items[slot.id] = name;
+        else notes.push(`${slot.label}: item #${id - 1} isn't in this item database.`);
+      }
+    }
+    if (index <= 3 || slot.id === "weapon") {
+      if (r.read(1) === enc.EQUIPMENT_POWDERS_FLAG.HAS_POWDERS) powderLists[slot.id] = wbDecodePowders(r);
+    }
+  });
+  Object.entries(powderLists).forEach(([slotId, ids]) => {
+    const list = ids.map((pid) => ({ element: ELEMENTS[Math.floor(pid / enc.POWDER_TIERS)], tier: (pid % enc.POWDER_TIERS) + 1 })).filter((powder) => powder.element);
+    const item = ws.items[slotId] ? ITEM_BY_NAME.get(ws.items[slotId]) : null;
+    if (list.length === 0 || !item) return;
+    // tyle powderów, ile przedmiot ma dziś slotów (starsze linki bywają z czasów, gdy miał ich więcej)
+    const fitted = powderListFromText(powderText(list), item);
+    if (fitted.length > 0) ws.powders[slotId] = powderText(fitted);
+    if (fitted.length < list.length) notes.push(`${item.name}: ${list.length} powders in the link, but it has ${item.slots} powder slot${item.slots === 1 ? "" : "s"} in item data ${WYNNBUILDER_DATA.version}.`);
+  });
+  // tomy w kolejności Wynnbuildera
+  if (r.read(1) === enc.TOMES_FLAG.HAS_TOMES) {
+    const order = WB_TOME_ORDER.flatMap(([slotId, count]) => Array.from({ length: count }, () => slotId));
+    for (let i = 0; i < enc.TOME_NUM; i += 1) {
+      if (r.read(1) !== enc.TOME_SLOT_FLAG.USED) continue;
+      const tome = TOME_BY_ID.get(r.read(enc.TOME_ID_BITLEN));
+      const slotId = order[i];
+      if (!tome || !slotId) {
+        notes.push("A tome in the link isn't in this data version.");
+        continue;
+      }
+      (ws.tomes[slotId] || (ws.tomes[slotId] = [])).push(tome.name);
+    }
+  }
+  let spTotals = null;
+  if (r.read(1) === enc.SP_FLAG.ASSIGNED) {
+    spTotals = {};
+    SKILLS.forEach((skill) => {
+      if (r.read(1) === enc.SP_ELEMENT_FLAG.ELEMENT_ASSIGNED) {
+        const shift = 32 - enc.MAX_SP_BITLEN;
+        spTotals[skill] = (r.read(enc.MAX_SP_BITLEN) << shift) >> shift;
+      }
+    });
+  }
+  // "MAX" Wynnbuildera (poziom maksymalny gry) = najwyższy poziom tej strony
+  const linkLevel = r.read(1) === enc.LEVEL_FLAG.MAX ? null : r.read(enc.LEVEL_BITLEN);
+  ws.level = linkLevel === null ? clampLevel(enc.MAX_LEVEL) : clampLevel(linkLevel);
+  if (linkLevel !== null && linkLevel > ws.level) notes.push(`The link is for level ${linkLevel}; this site goes up to ${ws.level}.`);
+  const weaponName = ws.items.weapon;
+  const weapon = weaponName ? ITEM_BY_NAME.get(weaponName) : null;
+  ws.playerClass = weapon ? WEAPON_CLASS[weapon.type] || "" : "";
+  const aspectIds = [];
+  if (r.read(1) === enc.ASPECTS_FLAG.HAS_ASPECTS) {
+    for (let i = 0; i < enc.NUM_ASPECTS; i += 1) {
+      if (r.read(1) === enc.ASPECT_SLOT_FLAG.USED) aspectIds.push({ id: r.read(enc.ASPECT_ID_BITLEN), tier: r.read(enc.ASPECT_TIER_BITLEN) + 1 });
+    }
+  }
+  if (ws.playerClass) {
+    const pool = ASPECT_DB[ws.playerClass] || [];
+    aspectIds.forEach(({ id, tier }) => {
+      const aspect = pool.find((candidate) => candidate.id === id);
+      if (aspect) ws.aspects.push({ name: aspect.name, tier });
+      else notes.push(`Aspect #${id} isn't in this data version.`);
+    });
+    const treeBits = r.rest();
+    let code = "";
+    for (let i = 0; i < treeBits.length; i += 6) {
+      let value = 0;
+      for (let j = 0; j < 6; j += 1) value |= (treeBits[i + j] || 0) << j;
+      code += WB_B64[value];
+    }
+    const ids = code ? decodeTreeHash(ws.playerClass, code) : null;
+    if (ids && ids.length > 1) ws.tree = ids;
+  } else if (aspectIds.length > 0) notes.push("No weapon in the link, so the class (and its aspects and tree) is unknown - pick the class.");
+  // Wynnbuilder trzyma sumy skill pointów; przydzielone ręcznie = suma - bonusy przedmiotów i tomów - wymagane.
+  if (spTotals) {
+    const probe = manualBuild({ ...ws, playerClass: ws.playerClass || "Warrior" });
+    if (probe) {
+      SKILLS.forEach((skill) => {
+        if (spTotals[skill] === undefined) return;
+        const free = spTotals[skill] - probe.skillPoints.totals[skill];
+        if (free > 0) ws.freeSp[skill] = free;
+      });
+    }
+  }
+  return { ws, notes };
+}
+
+// Odcisk wejść (Optimize z kłódką): ten sam build i te same parametry = ten sam odcisk.
+function inputsFingerprint(value) {
+  const text = JSON.stringify(value);
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+// Zapisane buildy Creatora (przeglądarka, localStorage): [{ name, savedAt, ws }].
+const SAVED_BUILDS_KEY = "wbr-creator-saved-v1";
+function loadSavedBuilds() {
+  try {
+    const list = JSON.parse(window.localStorage.getItem(SAVED_BUILDS_KEY) || "[]");
+    return Array.isArray(list) ? list.filter((entry) => entry && entry.ws && entry.name) : [];
+  } catch (error) {
+    return [];
+  }
+}
+function storeSavedBuilds(list) {
+  try {
+    window.localStorage.setItem(SAVED_BUILDS_KEY, JSON.stringify(list));
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+// ============================ BUILD OPTIMIZER: silnik ============================
+// Optimizer uzupełnia build gracza (workspace), nie zmieniając niczego, co gracz wybrał: puste sloty, wolne AP,
+// puste tomy i aspekty, wolne skill pointy, powdery broni. Kolejność etapów: drzewko → przedmioty → tomy → aspekty →
+// sprawdzenie (drugi przebieg drzewka z gotowymi przedmiotami, skill pointy, rekomendacje zamian).
+//
+// PEŁNE PRZESZUKANIE PRZEDMIOTÓW (branch and bound): każdy przedmiot pasujący do pustego slotu (typ, klasa broni,
+// poziom, filtry) jest kandydatem; drzewo przeszukiwania to sloty po kolei (dwa pierścienie jako para bez powtórzeń).
+// - Start: rekord z obecnej wiązki generatora (tryb szybki), więc od początku jest dobry próg odcięcia.
+// - Granica gałęzi: stała część buildu + "idealny przedmiot" każdego pustego slotu (dla każdej statystyki najlepsza
+//   wartość w puli slotu) i optymistyczne skill pointy (każda umiejętność z najwyższą możliwą sumą przy budżecie
+//   poziomu i minimalnych wymaganiach już wybranych przedmiotów). Model obrażeń / EHP rośnie z każdą z tych
+//   statystyk (kierunek sprawdzany próbą na buildzie odniesienia), więc granica nie jest mniejsza niż wynik
+//   jakiegokolwiek dokończenia gałęzi - odcięta gałąź nie może mieć lepszego buildu.
+// - Odrzucanie zdominowanych: przedmiot, który w żadnej używanej statystyce nie jest lepszy od innego z tej samej
+//   puli (a ma nie mniejsze wymagania i nie większe bonusy SP), wypada - zamiana na lepszy nigdy nie psuje buildu.
+// - Liść: dokładne skill pointy (kolejność zakładania), cel, filtry many i życia, wolne SP rozdzielone jak
+//   w generatorze.
+const OPT_DAMAGE_KEY = /^(?:[etwfanr]?(?:Sd|Md|Dam)(?:Pct|Raw)|(?:sd|md|dam)(?:Pct|Raw)|critDamPct)$/;
+const OPT_LOWER_BETTER = /^sp(?:Raw|Pct)[1-4]$/;
+const OPT_MANA_KEYS = new Set(["mr", "ms", "maxMana", "spRaw1", "spRaw2", "spRaw3", "spRaw4", "spPct1", "spPct2", "spPct3", "spPct4"]);
+const OPT_SUSTAIN_KEYS = new Set(["hprRaw", "hprPct", "ls"]);
+const OPT_ALWAYS_UP = new Set(["hpBonus", "atkTier", "mr", "ms", "maxMana", "hprRaw", "hprPct", "ls", "poison", ...SKILLS]);
+const OPT_TIME_LIMIT_S = 120; // szacunek powyżej 2 minut: gracz wybiera pełne przeszukanie albo tryb szybki
+const OPT_GAIN_EPS = 1e-9;
+
+// Przedmiot z workspace'u w silniku (rolle i powdery gracza).
+function optItem(entry) {
+  const base = ITEM_BY_NAME.get(entry.name);
+  if (!base) return null;
+  const rolled = entry.rolls ? withRolls(base, entry.rolls) : base;
+  return applyPowderList(entry.slotId, rolled, powderListFromText(entry.powders || "", rolled));
+}
+
+// Ustawienia Optimizera z workspace'u i panelu parametrów -> dane dla silnika (tylko proste wartości, żeby dało się
+// je wysłać do wątku). params: { goal, elements, blend (0-100), cycle, cps, drain, sustain, negDef, listed,
+// speeds, freeSp, tradeable, noEvents, scope: { slots, tree, tomes, aspects, sp, powders, swaps } }
+function optimizerSpec(ws, params, extra = {}) {
+  const level = ws.level || 120;
+  const rank = workspaceRank(ws);
+  const cap = abilityPointCap(level, rank.loan);
+  const treeIds = workspaceTreeIds(ws);
+  const scope = { slots: true, tree: true, tomes: true, aspects: true, sp: true, powders: true, swaps: true, ...(params.scope || {}) };
+  const fixed = SLOTS.filter((slot) => ws.items && ws.items[slot.id]).map((slot) => ({ slotId: slot.id, name: ws.items[slot.id], powders: (ws.powders && ws.powders[slot.id]) || "", rolls: (ws.rolls && ws.rolls[ws.items[slot.id]]) || null }));
+  const cycleIds = parseCycle(params.cycle || "");
+  return {
+    playerClass: ws.playerClass,
+    archetype: workspaceArchetype(ws),
+    level,
+    cap,
+    treeIds,
+    treeFx: { toggles: (ws.treeFx && ws.treeFx.toggles) || {}, sliders: (ws.treeFx && ws.treeFx.sliders) || {} },
+    aspects: (ws.aspects || []).map((entry) => (entry && entry.name ? { name: entry.name, tier: entry.tier } : null)),
+    tomes: ws.tomes || {},
+    fixed,
+    playerFree: Object.fromEntries(SKILLS.map((skill) => [skill, Math.max(0, Math.round(Number(ws.freeSp && ws.freeSp[skill]) || 0))])),
+    goal: Array.isArray(params.goal) ? (params.goal.length === 1 ? params.goal[0] : params.goal) : params.goal,
+    cycle: { ids: cycleIds, cps: Math.max(1, Number(params.cps) || 3), steal: true, gain: true, drain: Math.max(0, Number(params.drain) || 0), blend: Math.max(0, Math.min(100, Number(params.blend) || 0)) / 100 },
+    requireSustain: Boolean(params.sustain),
+    filters: {
+      avoidNegativeDefences: Boolean(params.negDef),
+      attackSpeeds: params.speeds || [],
+      elements: (params.elements || []).filter((element) => ELEMENTS.includes(element)),
+      tradeableOnly: Boolean(params.tradeable),
+      noEvents: params.noEvents !== false,
+      allowedNames: extra.allowedNames || null,
+    },
+    spendFree: params.freeSp !== false && scope.sp,
+    scope,
+    mode: params.mode || "full",
+    // broń gracza bez powderów, a zakres obejmuje powdery: Optimize dobiera jej powdery (sama broń zostaje)
+    powderOwnWeapon: (() => {
+      const own = fixed.find((entry) => entry.slotId === "weapon");
+      const item = own ? ITEM_BY_NAME.get(own.name) : null;
+      return own && !own.powders && item && item.slots > 0 && scope.powders ? own : null;
+    })(),
+  };
+}
+// Sloty, które Optimize wypełnia (puste; broń gracza bez powderów - tylko jej powdery).
+function optEmptySlots(spec) {
+  if (!spec.scope.slots && !spec.powderOwnWeapon) return [];
+  const empty = spec.scope.slots ? SLOTS.filter((slot) => !spec.fixed.some((entry) => entry.slotId === slot.id)).map((slot) => slot.id) : [];
+  if (spec.powderOwnWeapon && !empty.includes("weapon")) empty.unshift("weapon");
+  return empty;
+}
+
+// Drzewko do obliczeń: węzły + efekty (przełączniki, suwaki) + aspekty.
+function optTreeSettings(spec, ids = spec.treeIds, aspects = null) {
+  const pool = ASPECT_DB[spec.playerClass] || [];
+  const list = (aspects || spec.aspects || [])
+    .map((entry) => {
+      if (!entry) return null;
+      const aspect = pool.find((candidate) => candidate.name === entry.name);
+      return aspect ? [aspect, Math.max(1, Math.min(aspect.tiers.length, entry.tier || aspect.tiers.length))] : null;
+    })
+    .filter(Boolean);
+  return { selected: ids, toggles: spec.treeFx.toggles, sliders: spec.treeFx.sliders, ...(list.length > 0 ? { aspects: list } : {}) };
+}
+
+// Kandydaci na slot (bez przedmiotów gracza): typ slotu, broń klasy, poziom, filtry z parametrów.
+function optCandidates(spec, slotId) {
+  const slot = SLOTS.find((entry) => entry.id === slotId);
+  const weaponType = CLASSES[spec.playerClass].weapon;
+  const allowed = spec.filters.allowedNames ? new Set(spec.filters.allowedNames) : null;
+  const items = ITEM_DB.filter((item) => {
+    if (item.level > spec.level) return false;
+    if (slot.type === "weapon" ? item.type !== weaponType : item.type !== slot.type) return false;
+    if (spec.filters.noEvents && eventOf(item)) return false;
+    if (spec.filters.tradeableOnly && isUntradable(item)) return false;
+    if (spec.filters.avoidNegativeDefences && hasNegativeDefence(item)) return false;
+    if (allowed && !allowed.has(item.name)) return false;
+    if (slot.type === "weapon" && spec.filters.attackSpeeds.length > 0 && !spec.filters.attackSpeeds.includes(item.atkSpd)) return false;
+    return true;
+  });
+  if (slot.type !== "weapon") return items;
+  const focus = spec.filters.elements;
+  const elements = spec.scope.powders ? (focus.length > 0 ? focus : ELEMENTS) : [];
+  // broń gracza bez powderów: tylko jej warianty z powderami (przedmiot zostaje, dochodzą powdery)
+  if (spec.powderOwnWeapon) {
+    const own = optItem({ ...spec.powderOwnWeapon, powders: "" });
+    if (!own) return [];
+    const tier = powderTierFor(own.level);
+    return [own, ...elements.map((element) => weaponWithPowderList(own, Array.from({ length: own.slots }, () => ({ element, tier }))))];
+  }
+  // broń: warianty z powderami (żywioły focusu albo wszystkie, jak "Auto" generatora także bez powderów); focus
+  // żywiołu = broń zadaje obrażenia tego żywiołu (sama albo przez powdery)
+  const out = [];
+  items.forEach((item) => {
+    const deals = (element) => Boolean(item.damage && item.damage[element] > 0);
+    if (focus.length === 0 || focus.some(deals)) out.push(item);
+    if (item.slots > 0) elements.forEach((element) => out.push(powderedWeapon(item, element)));
+  });
+  return out;
+}
+
+// Wolne skill pointy gracza dokładane do wyniku solvera (Optimizer ich nie rusza).
+function optWithPlayerFree(sp, free) {
+  const sum = SKILLS.reduce((total, skill) => total + (free[skill] || 0), 0);
+  if (sum === 0) return sp;
+  return {
+    ...sp,
+    total: sp.total + sum,
+    assigned: Object.fromEntries(SKILLS.map((skill) => [skill, (sp.assigned[skill] || 0) + (free[skill] || 0)])),
+    totals: Object.fromEntries(SKILLS.map((skill) => [skill, (sp.totals[skill] || 0) + (free[skill] || 0)])),
+  };
+}
+
+// Pełna ocena gotowego zestawu (liść przeszukiwania i wyniki do porównań): null = zestaw nie do założenia.
+// bar: gdy optymistyczna ocena z wolnymi SP nie przebija bar, zwraca { below: true } bez rozdzielania punktów.
+function optEvaluate(opt, items, weapon, bar = null, exact = false) {
+  const { spec, ctx, cycle } = opt;
+  const sp0 = computeSkillPoints(items, exact);
+  if (sp0.capOverflow > 0) return null;
+  const sp = optWithPlayerFree(sp0, spec.playerFree);
+  const available = ctx.available;
+  if (sp.total > available) return null;
+  if (SKILLS.some((skill) => (sp.assigned[skill] || 0) > MAX_ASSIGNED_PER_SKILL)) return null;
+  if (activeSets(items).some((set) => set.illegal)) return null;
+  const ok = (metrics) => (!opt.cycleActive || manaOk(metrics, cycle)) && (!spec.requireSustain || metrics.sustain > 0);
+  let metrics = evaluateGoal(opt.ctx, items, weapon, sp.totals, spec.goal, cycle);
+  delete metrics.stats;
+  let extra = Object.fromEntries(SKILLS.map((skill) => [skill, 0]));
+  const free = available - sp.total;
+  if (spec.spendFree && free > 0) {
+    if (bar !== null) {
+      // optymistycznie: każda umiejętność z całą resztą wolnych punktów (więcej niż da się naprawdę przydzielić)
+      const optimistic = Object.fromEntries(SKILLS.map((skill) => [skill, (sp.totals[skill] || 0) + Math.min(free, MAX_ASSIGNED_PER_SKILL - (sp.assigned[skill] || 0))]));
+      const top = evaluateGoal(opt.ctx, items, weapon, optimistic, spec.goal, cycle);
+      if (top.damage <= bar + OPT_GAIN_EPS) return { below: true };
+    }
+    const rank = (m) => (ok(m) ? 1e15 + m.damage : -((m.manaNet < 0 ? -m.manaNet : 0) + (m.sustain > 0 ? 0 : 1)));
+    const allocated = allocateFreeSkillPoints(opt.ctx, items, weapon, sp, spec.goal, cycle, rank);
+    metrics = allocated.metrics;
+    delete metrics.stats;
+    extra = allocated.extra;
+  }
+  if (!ok(metrics)) return { infeasible: true, metrics };
+  return { value: metrics.damage, metrics, sp, extra };
+}
+
+// Kierunki statystyk: +1 więcej = lepiej, -1 mniej = lepiej, 0 = nieużywana. Statystyki obrażeń zawsze +1 (przy innej
+// broni / innym żywiole mogą zacząć działać), koszty czarów -1, reszta z próby na buildzie odniesienia.
+function optDirections(opt, keys, reference) {
+  const { spec, cycle } = opt;
+  const dirs = new Map();
+  const base = evaluateGoal(opt.ctx, reference.items, reference.weapon, reference.totals, spec.goal, cycle);
+  keys.forEach((key) => {
+    if (OPT_DAMAGE_KEY.test(key)) return dirs.set(key, { dir: 1, objective: true });
+    if (SKILLS.includes(key)) return dirs.set(key, { dir: 1, objective: true });
+    if (OPT_LOWER_BETTER.test(key)) return dirs.set(key, { dir: -1, objective: false, constraint: opt.cycleActive });
+    const step = PROBE_STEPS[key] || 10;
+    const ghost = { name: "__probe", category: "accessory", type: "ring", level: 0, tier: "Normal", ids: { [key]: step }, base: key === "hp" ? { hp: step } : {}, stats: {}, reqs: {}, elements: [], slots: 0, majorIds: [], baseIds: {}, staticIds: [] };
+    const probe = evaluateGoal(opt.ctx, [...reference.items, ghost], reference.weapon, reference.totals, spec.goal, cycle);
+    const dObjective = probe.damage - base.damage;
+    const dMana = probe.manaNet - base.manaNet;
+    const dLife = probe.sustain - base.sustain;
+    const objective = Math.abs(dObjective) > 1e-9 * Math.max(1, Math.abs(base.damage));
+    const constraint = (opt.cycleActive && (OPT_MANA_KEYS.has(key) || Math.abs(dMana) > 1e-9)) || (spec.requireSustain && (OPT_SUSTAIN_KEYS.has(key) || Math.abs(dLife) > 1e-9));
+    if (!objective && !constraint) return dirs.set(key, { dir: 0 });
+    const sign = OPT_ALWAYS_UP.has(key) ? 1 : objective ? Math.sign(dObjective) : Math.sign(dMana || dLife) || 1;
+    dirs.set(key, { dir: sign, objective, constraint });
+  });
+  return dirs;
+}
+
+const OPT_RANGES = new WeakMap();
+function optRanges(weapon) {
+  if (!OPT_RANGES.has(weapon)) OPT_RANGES.set(weapon, weaponDamageRanges(weapon));
+  return OPT_RANGES.get(weapon);
+}
+// Wektor porównania przedmiotu: każda używana statystyka w kierunku "więcej = lepiej", bonusy SP, minus wymagania,
+// HP, zakresy obrażeń broni. a dominuje b, gdy a >= b na każdej pozycji (i żadne nie jest w secie / z major ID).
+function optVector(item, keys, hpMatters) {
+  const values = [];
+  keys.forEach(([key, dir]) => values.push((item.ids[key] || 0) * dir));
+  SKILLS.forEach((skill) => {
+    values.push(item.stats[skill] || 0);
+    values.push(-(item.reqs[skill] || 0));
+  });
+  if (hpMatters) values.push((item.base && item.base.hp) || 0);
+  if (item.category === "weapon") optRanges(item).forEach(([min, max]) => values.push(min, max));
+  return values;
+}
+function optDominates(a, b, va, vb) {
+  if (a.set || b.set) return false;
+  if (a.category === "weapon" && a.atkSpd !== b.atkSpd) return false;
+  if ((a.majorIds || []).join() !== (b.majorIds || []).join()) return false;
+  for (let i = 0; i < va.length; i += 1) if (va[i] < vb[i] - 1e-9) return false;
+  return true;
+}
+
+// Odrzucanie zdominowanych w puli slotu. Pierścienie: przedmiot wypada dopiero, gdy ma dwóch "lepszych" (albo jeden
+// lepszy, który można nosić podwójnie), bo para potrzebuje dwóch pierścieni.
+function optPrune(pool, dirs, hpMatters, rings = false) {
+  const keys = [...dirs].filter(([key, entry]) => entry.dir && !SKILLS.includes(key)).map(([key, entry]) => [key, entry.dir]);
+  const vectors = pool.map((item) => optVector(item, keys, hpMatters));
+  const keep = [];
+  pool.forEach((item, index) => {
+    let dominators = 0;
+    for (let j = 0; j < pool.length; j += 1) {
+      if (j === index) continue;
+      const other = pool[j];
+      if (!optDominates(other, item, vectors[j], vectors[index])) continue;
+      // dwa identyczne (wzajemnie dominujące): zostaje pierwszy
+      if (j > index && optDominates(item, other, vectors[index], vectors[j])) continue;
+      dominators += rings && singleCopy(other) ? 1 : 2;
+      if (!rings || dominators >= 2) break;
+    }
+    if (dominators < (rings ? 2 : 1)) keep.push(item);
+  });
+  return keep;
+}
+
+// "Idealny przedmiot" puli: dla każdej używanej statystyki najlepsza wartość w puli (z największym możliwym
+// przyrostem bonusu setu), największe bonusy SP i HP, bez wymagań.
+function optGhost(pool, dirs) {
+  const ids = {};
+  const skills = Object.fromEntries(SKILLS.map((skill) => [skill, -Infinity]));
+  let hp = 0;
+  pool.forEach((item) => {
+    const setBoost = item.set && ITEM_SETS[item.set] ? optSetIncrement(item.set) : null;
+    for (const [key, entry] of dirs) {
+      if (!entry.dir || !entry.objective || SKILLS.includes(key)) continue;
+      const value = (item.ids[key] || 0) + (setBoost ? setBoost.ids[key] || 0 : 0);
+      if (ids[key] === undefined || (entry.dir > 0 ? value > ids[key] : value < ids[key])) ids[key] = value;
+    }
+    SKILLS.forEach((skill) => {
+      skills[skill] = Math.max(skills[skill], (item.stats[skill] || 0) + (setBoost ? setBoost.skills[skill] || 0 : 0));
+    });
+    hp = Math.max(hp, ((item.base && item.base.hp) || 0) + (setBoost ? setBoost.hp || 0 : 0));
+  });
+  SKILLS.forEach((skill) => {
+    if (!Number.isFinite(skills[skill])) skills[skill] = 0;
+  });
+  return { ids, skills, hp };
+}
+const OPT_SET_INCREMENT = new Map();
+// Największy przyrost bonusu setu przy dołożeniu jednej części (po każdej statystyce osobno).
+function optSetIncrement(name) {
+  if (OPT_SET_INCREMENT.has(name)) return OPT_SET_INCREMENT.get(name);
+  const bonuses = (ITEM_SETS[name] && ITEM_SETS[name].bonuses) || [];
+  const ids = {};
+  const skills = {};
+  let hp = 0;
+  bonuses.forEach((bonus, index) => {
+    if (bonus.illegal) return;
+    const previous = index > 0 ? bonuses[index - 1] : {};
+    Object.entries(bonus).forEach(([key, value]) => {
+      if (typeof value !== "number") return;
+      const delta = value - (Number(previous[key]) || 0);
+      if (SKILLS.includes(key)) skills[key] = Math.max(skills[key] || 0, delta);
+      else if (key === "hpBonus") hp = Math.max(hp, delta);
+      else ids[key] = Math.max(ids[key] || 0, delta);
+    });
+  });
+  const out = { ids, skills, hp };
+  OPT_SET_INCREMENT.set(name, out);
+  return out;
+}
+
+// Przygotowanie przeszukiwania (w każdym wątku to samo, z tych samych danych): kontekst modelu, stałe przedmioty,
+// pule pustych slotów po odrzuceniu zdominowanych, kolejność slotów, "idealne przedmioty" reszty slotów.
+const OPT_CONTEXT_CACHE = new Map();
+function optContext(spec, treeIds, emptySlots, fixedPicks = {}) {
+  const key = JSON.stringify([spec, treeIds, emptySlots, Object.fromEntries(Object.entries(fixedPicks).map(([slotId, item]) => [slotId, item && item.name]))]);
+  if (OPT_CONTEXT_CACHE.has(key)) return OPT_CONTEXT_CACHE.get(key);
+  const cycle = normalizeCycle(spec.cycle);
+  const treeSettings = optTreeSettings(spec, treeIds);
+  const ctx = damageGoalContext(spec.playerClass, spec.level, treeSettings);
+  const fixedItems = [];
+  spec.fixed.forEach((entry) => {
+    if (emptySlots.includes(entry.slotId)) return;
+    const item = optItem(entry);
+    if (item) fixedItems.push({ ...item, __slot: entry.slotId });
+  });
+  Object.entries(fixedPicks).forEach(([slotId, item]) => {
+    if (item && !emptySlots.includes(slotId)) fixedItems.push({ ...item, __slot: slotId });
+  });
+  const fixedWeapon = fixedItems.find((item) => item.__slot === "weapon") || null;
+  const opt = { spec, cycle, ctx, cycleActive: cycle.ids.length > 0, treeIds, fixedItems, fixedWeapon, emptySlots };
+  // odniesienie do kierunków i wag: stałe przedmioty + najlepsza broń (gracza albo najmocniejsza sama)
+  const rawPools = Object.fromEntries(emptySlots.map((slotId) => [slotId, optCandidates(spec, slotId)]));
+  let refWeapon = fixedWeapon;
+  const weaponScore = new Map();
+  if (rawPools.weapon && rawPools.weapon.length > 0) {
+    let best = null;
+    rawPools.weapon.forEach((weapon) => {
+      const all = [...fixedItems, weapon];
+      const metrics = evaluateGoal(ctx, all, weapon, computeSkillPoints(all).totals, spec.goal, cycle);
+      weaponScore.set(weapon, metrics.damage);
+      if (!best || metrics.damage > best.damage) best = { weapon, damage: metrics.damage };
+    });
+    if (!refWeapon) refWeapon = best ? best.weapon : null;
+  }
+  const refItems = refWeapon && !fixedWeapon ? [...fixedItems, refWeapon] : fixedItems;
+  const reference = { items: refItems, weapon: refWeapon, totals: computeSkillPoints(refItems).totals };
+  const keys = new Set();
+  Object.values(rawPools).forEach((pool) => pool.forEach((item) => Object.keys(item.ids).forEach((key) => keys.add(key))));
+  fixedItems.forEach((item) => Object.keys(item.ids).forEach((key) => keys.add(key)));
+  const dirs = optDirections(opt, keys, reference);
+  const hpMatters = spec.cycle.blend > 0 || (() => {
+    if (!refWeapon) return true;
+    const base = evaluateGoal(ctx, refItems, refWeapon, reference.totals, spec.goal, cycle);
+    const ghost = { name: "__probe", category: "accessory", type: "ring", level: 0, tier: "Normal", ids: {}, base: { hp: 500 }, stats: {}, reqs: {}, elements: [], slots: 0, majorIds: [], baseIds: {}, staticIds: [] };
+    return Math.abs(evaluateGoal(ctx, [...refItems, ghost], refWeapon, reference.totals, spec.goal, cycle).damage - base.damage) > 1e-9;
+  })();
+  opt.dirs = dirs;
+  opt.hpMatters = hpMatters;
+  // wagi liniowe do kolejności kandydatów (najpierw najlepsi = szybko dobry rekord = więcej odcięć)
+  const weights = refWeapon ? goalStatWeights(ctx, refItems, refWeapon, reference.totals, spec.goal, cycle).damage : {};
+  const proxy = (item) => {
+    let value = proxyScore(item, weights);
+    SKILLS.forEach((skill) => (value += (weights[skill] || 0) * (item.stats[skill] || 0)));
+    return value;
+  };
+  const pools = {};
+  const rawSizes = {};
+  emptySlots.forEach((slotId) => {
+    rawSizes[slotId] = rawPools[slotId].length;
+    const rings = slotId === "ring1" || slotId === "ring2";
+    const pruned = optPrune(rawPools[slotId], dirs, hpMatters, rings);
+    pools[slotId] = pruned.map((item) => ({ item, proxy: slotId === "weapon" ? 0 : proxy(item) })).sort((a, b) => b.proxy - a.proxy).map((entry) => entry.item);
+  });
+  if (pools.weapon) {
+    // bronie: najmocniejsze same w sobie (ze stałymi przedmiotami) pierwsze
+    pools.weapon = [...pools.weapon].sort((a, b) => (weaponScore.get(b) || 0) - (weaponScore.get(a) || 0));
+  }
+  // kolejność slotów: broń (bez niej nie ma granicy), potem od największego rozrzutu, pierścienie jako para na końcu
+  const others = emptySlots.filter((slotId) => slotId !== "weapon" && slotId !== "ring1" && slotId !== "ring2");
+  others.sort((a, b) => SEARCH_ORDER.indexOf(a) - SEARCH_ORDER.indexOf(b));
+  const order = [...(emptySlots.includes("weapon") ? ["weapon"] : []), ...others, ...["ring1", "ring2"].filter((slotId) => emptySlots.includes(slotId))];
+  // para pierścieni: ring2 bierze kandydatów od indeksu ring1 (bez powtórzeń par), gdy obie są puste i pule równe
+  const ringPair = emptySlots.includes("ring1") && emptySlots.includes("ring2");
+  if (ringPair) pools.ring2 = pools.ring1;
+  opt.pools = pools;
+  opt.freeArr = Float64Array.from(SKILLS.map((skill) => spec.playerFree[skill] || 0));
+  opt.rawSizes = rawSizes;
+  opt.order = order;
+  opt.ringPair = ringPair;
+  // idealne przedmioty dla każdego sufiksu kolejności (sloty od głębokości d do końca)
+  const ghosts = order.map((slotId) => optGhost(pools[slotId], dirs));
+  opt.suffix = [];
+  for (let depth = order.length; depth >= 0; depth -= 1) {
+    const ids = {};
+    const skills = Object.fromEntries(SKILLS.map((skill) => [skill, 0]));
+    const positive = Object.fromEntries(SKILLS.map((skill) => [skill, 0]));
+    let hp = 0;
+    for (let d = depth; d < order.length; d += 1) {
+      Object.entries(ghosts[d].ids).forEach(([key, value]) => (ids[key] = (ids[key] || 0) + value));
+      SKILLS.forEach((skill) => {
+        skills[skill] += ghosts[d].skills[skill];
+        positive[skill] += Math.max(0, ghosts[d].skills[skill]);
+      });
+      hp += ghosts[d].hp;
+    }
+    opt.suffix[depth] = {
+      item: { name: `__ghost${depth}`, category: "accessory", type: "ghost", level: 0, tier: "Normal", ids, base: { hp }, stats: {}, reqs: {}, elements: [], slots: 0, majorIds: [], baseIds: {}, staticIds: [] },
+      skills,
+      positive,
+      skillsArr: Float64Array.from(SKILLS.map((skill) => skills[skill])),
+      positiveArr: Float64Array.from(SKILLS.map((skill) => positive[skill])),
+    };
+  }
+  // liczba kombinacji (para pierścieni bez powtórzeń): wszystkie i w poddrzewach
+  const sizes = order.map((slotId) => pools[slotId].length);
+  opt.sizes = sizes;
+  let total = 1;
+  order.forEach((slotId, depth) => {
+    if (ringPair && slotId === "ring2") return;
+    if (ringPair && slotId === "ring1") total *= (sizes[depth] * (sizes[depth] + 1)) / 2;
+    else total *= sizes[depth];
+  });
+  opt.total = order.length === 0 ? 1 : total;
+  OPT_CONTEXT_CACHE.clear();
+  OPT_CONTEXT_CACHE.set(key, opt);
+  return opt;
+}
+
+// Liczba liści pod węzłem na głębokości depth (sloty depth.. do końca), gdy ring1 ma indeks ringIndex.
+function optSubtree(opt, depth, ringIndex = null) {
+  let count = 1;
+  for (let d = depth; d < opt.order.length; d += 1) {
+    const slotId = opt.order[d];
+    const n = opt.sizes[d];
+    if (opt.ringPair && slotId === "ring1") {
+      count *= (n * (n + 1)) / 2;
+      d += 1;
+    } else if (opt.ringPair && slotId === "ring2") count *= n - (ringIndex || 0);
+    else count *= n;
+  }
+  return count;
+}
+
+// Skill pointy gałęzi: najwyższe możliwe bonusy (przedmioty + "idealne" przedmioty reszty slotów + sety) i dolne
+// ograniczenie punktów, które wymagania na pewno zabiorą (bonusy innych przedmiotów pomagają najwyżej wszystkie
+// naraz) plus wolne punkty gracza (liczą się na wierzchu, jak w Creatorze). null = nic się nie zmieści w budżecie.
+// Tablice po 5 umiejętnościach w kolejności SKILLS (szybko - liczone w każdym węźle przeszukiwania).
+function optAggregate(items) {
+  const bonus = new Float64Array(5);
+  const positive = new Float64Array(5);
+  const maxReq = new Float64Array(5);
+  let sets = false;
+  for (let i = 0; i < items.length; i += 1) {
+    const item = items[i];
+    if (item.set) sets = true;
+    for (let s = 0; s < 5; s += 1) {
+      const skill = SKILLS[s];
+      const value = item.stats[skill] || 0;
+      bonus[s] += value;
+      if (value > 0) positive[s] += value;
+      const req = item.reqs[skill] || 0;
+      if (req > maxReq[s]) maxReq[s] = req;
+    }
+  }
+  if (sets) {
+    const setSkills = setBonusSkills(items);
+    for (let s = 0; s < 5; s += 1) {
+      bonus[s] += setSkills[s];
+      if (setSkills[s] > 0) positive[s] += setSkills[s];
+    }
+  }
+  return { bonus, positive, maxReq, sets };
+}
+function optSkillInfoFrom(opt, depth, agg) {
+  const ghost = opt.suffix[depth];
+  const bonus = new Float64Array(5);
+  const floor = new Float64Array(5);
+  let floorSum = 0;
+  for (let s = 0; s < 5; s += 1) {
+    bonus[s] = agg.bonus[s] + ghost.skillsArr[s];
+    const positive = agg.positive[s] + ghost.positiveArr[s];
+    floor[s] = Math.max(0, agg.maxReq[s] - positive) + opt.freeArr[s];
+    if (floor[s] > MAX_ASSIGNED_PER_SKILL) return null;
+    floorSum += floor[s];
+  }
+  const available = opt.ctx.available;
+  if (floorSum > available) return null;
+  return { bonus, floor, floorSum, available };
+}
+function optSkillInfo(opt, depth, chosen) {
+  return optSkillInfoFrom(opt, depth, optAggregate([...opt.fixedItems, ...chosen]));
+}
+// Sufit każdej umiejętności osobno: bonusy + cały budżet poza minimum pozostałych umiejętności.
+function optSkillCeiling(opt, depth, chosen) {
+  const info = optSkillInfo(opt, depth, chosen);
+  if (!info) return null;
+  const totals = {};
+  SKILLS.forEach((skill, s) => {
+    totals[skill] = info.bonus[s] + Math.min(MAX_ASSIGNED_PER_SKILL, info.available - (info.floorSum - info.floor[s]));
+  });
+  return totals;
+}
+
+// Granica "idealnych przedmiotów": stała część + najlepsza wartość każdej statystyki w pulach reszty slotów.
+function optBound(opt, depth, chosen, weapon) {
+  const totals = optSkillCeiling(opt, depth, chosen);
+  if (!totals) return -Infinity;
+  return evaluateGoal(opt.ctx, [...opt.fixedItems, ...chosen, opt.suffix[depth].item], weapon, totals, opt.spec.goal, opt.cycle).damage;
+}
+
+// PŁASZCZYZNY STYCZNE (granica dużo ciaśniejsza niż "idealne przedmioty"): przy stałych szybkości ataku i Crit
+// Damage logarytm celu jest wklęsły względem sumy statystyk przedmiotów (obrażenia każdego żywiołu to funkcja
+// liniowa statystyk, mnożona przez stałe; EHP liniowe w HP) i względem punktów Str/Dex/Int (+Def/Agi bez EHP w celu;
+// procent z umiejętności jest wklęsły, poniżej zera płaski). Styczna do funkcji wklęsłej leży nad nią wszędzie, więc
+// log(cel) <= C + g·(statystyki) + gT·(punkty). Najlepsze dokończenie gałęzi pod styczną liczy się osobno w każdym
+// slocie: suma maksimów g·(przedmiot) po pulach. Styczną liczymy w węźle-kotwicy (przy jego suficie skill pointów
+// i maksymalnych szybkości ataku / Crit Damage reszty slotów - w głąb gałęzi już tylko maleją) i używamy dla całego
+// poddrzewa. Pochodne z różnic centralnych, więc granica dostaje 1% zapasu.
+const OPT_PLANE_MARGIN = 1.01;
+const OPT_PLANE_FIXED_KEYS = ["atkTier", "critDamPct"];
+function optPrepare(opt) {
+  if (opt.planeReady) return;
+  const { dirs, hpMatters, spec } = opt;
+  opt.planeKeys = [...dirs].filter(([key, entry]) => entry.dir && entry.objective && !SKILLS.includes(key) && !OPT_PLANE_FIXED_KEYS.includes(key)).map(([key]) => key);
+  opt.linSkills = spec.cycle.blend > 0 ? ["str", "dex", "int"] : [...SKILLS];
+  const keyCount = opt.planeKeys.length + (hpMatters ? 1 : 0);
+  const vecOf = (item) => {
+    const values = new Float64Array(keyCount);
+    const inc = item.set && ITEM_SETS[item.set] ? optSetIncrement(item.set) : null;
+    opt.planeKeys.forEach((key, index) => {
+      values[index] = (item.ids[key] || 0) + (inc ? inc.ids[key] || 0 : 0);
+    });
+    if (hpMatters) values[keyCount - 1] = ((item.base && item.base.hp) || 0) + (inc ? inc.hp || 0 : 0);
+    return values;
+  };
+  const fixedOf = (item) => OPT_PLANE_FIXED_KEYS.map((key) => (item.ids[key] || 0) + (item.set && ITEM_SETS[item.set] ? optSetIncrement(item.set).ids[key] || 0 : 0));
+  opt.vecs = opt.order.map((slotId) => opt.pools[slotId].map(vecOf));
+  opt.fixedVals = opt.order.map((slotId) => opt.pools[slotId].map(fixedOf));
+  opt.fixedMax = opt.fixedVals.map((list) => OPT_PLANE_FIXED_KEYS.map((_, k) => list.reduce((max, values) => Math.max(max, values[k]), 0)));
+  // kroki różnic: ~5% największej wartości statystyki w pulach
+  opt.planeSteps = new Float64Array(keyCount);
+  for (let k = 0; k < keyCount; k += 1) {
+    let top = 0;
+    opt.vecs.forEach((list) => list.forEach((values) => (top = Math.max(top, Math.abs(values[k])))));
+    opt.planeSteps[k] = Math.max(1, top * 0.05);
+  }
+  opt.keyCount = keyCount;
+  opt.vecOf = vecOf;
+  opt.fixedOf = fixedOf;
+  // skill pointy każdego kandydata: bonus (z przyrostem setu), bonus dodatni, wymaganie - do granicy Lagrange'a
+  opt.skillVecs = opt.order.map((slotId) =>
+    opt.pools[slotId].map((item) => {
+      const values = new Float64Array(15);
+      const inc = item.set && ITEM_SETS[item.set] ? optSetIncrement(item.set) : null;
+      SKILLS.forEach((skill, s) => {
+        const bonus = (item.stats[skill] || 0) + (inc ? inc.skills[skill] || 0 : 0);
+        values[s] = bonus;
+        values[5 + s] = Math.max(0, bonus);
+        values[10 + s] = item.reqs[skill] || 0;
+      });
+      return values;
+    })
+  );
+  opt.minBonus = opt.skillVecs.map((list) => Float64Array.from(SKILLS.map((_, s) => list.reduce((min, values) => Math.min(min, values[s]), Infinity))));
+  opt.planeReady = true;
+}
+// GRANICA LAGRANGE'A dla węzła z co najmniej dwoma pustymi slotami: budżet skill pointów zamieniony na "cenę punktu"
+// lambda (słaba dualność programu liniowego skill pointów), a minimum punktów umiejętności oszacowane średnią wymagań
+// przedmiotów (maksimum >= średnia). Wtedy każdy slot wybiera przedmiot osobno: g·x + jego bonusy SP po nachyleniach
+// stycznej - koszt jego wymagań i + zysk z jego bonusów w umiejętnościach tańszych niż lambda. Uwzględnia ujemne
+// bonusy i wymagania każdego przedmiotu, czego "idealny przedmiot" nie widzi. Minimum po kilku lambdach.
+function optPlaneLagrange(opt, plane, depth, partial, agg) {
+  const order = opt.order;
+  const slots = order.length - depth;
+  if (slots < 2) return Infinity;
+  const sigma = new Float64Array(5);
+  plane.slopes.forEach(([s, slope]) => (sigma[s] = slope));
+  const A = opt.ctx.available;
+  const pf = opt.freeArr;
+  // lambdy: nachylenia stycznej (i zero) - optimum dualne to nachylenie umiejętności, która dostaje ostatni punkt
+  const lambdas = [0, ...plane.slopes.map(([, slope]) => slope)];
+  // Obcięcie u = max(0, T): max(0, x + y) <= max(0, x) + max(0, y). Wariant "dodatni": bonusy przedmiotów tylko
+  // dodatnie, a stała część (wybrane + minimum) z własną korektą; wariant "ze znakiem": bonusy ze znakiem i korekta
+  // za najgorszy przypadek (najmniejsze bonusy puli). Oba są górnym oszacowaniem - bierzemy mniejsze.
+  const correctionFor = (signed) => {
+    let value = 0;
+    for (let s = 0; s < 5; s += 1) {
+      if (!sigma[s]) continue;
+      let low = agg.bonus[s] + pf[s];
+      if (signed) for (let d = depth; d < order.length; d += 1) low += opt.minBonus[d][s];
+      if (low < 0) value += sigma[s] * -low;
+    }
+    return value;
+  };
+  let best = Infinity;
+  // wagi wymagań: same stałe/wybrane przedmioty (maksimum >= ich maksimum) albo średnia z nich i każdego slotu
+  const weightings = [
+    [1, 0],
+    [1 / (slots + 1), 1 / (slots + 1)],
+  ];
+  for (let variant = 0; variant < 2; variant += 1) {
+    const signed = variant === 1;
+    const correction = correctionFor(signed);
+    for (let li = 0; li < lambdas.length; li += 1) {
+      const lambda = lambdas[li];
+      for (let wi = 0; wi < weightings.length; wi += 1) {
+        const [wPre, wr] = weightings[wi];
+        const cost = new Float64Array(5);
+        let constant = lambda * A + correction;
+        for (let s = 0; s < 5; s += 1) {
+          constant += sigma[s] * agg.bonus[s];
+          if (sigma[s] >= lambda) constant += (sigma[s] - lambda) * MAX_ASSIGNED_PER_SKILL;
+          else {
+            cost[s] = lambda - sigma[s];
+            // minimum punktów >= wolne gracza + ważone wymagania - wszystkie dodatnie bonusy
+            constant -= cost[s] * (pf[s] + wPre * agg.maxReq[s] - agg.positive[s]);
+          }
+        }
+        let total = constant;
+        for (let d = depth; d < order.length && total < best; d += 1) {
+          const dots = plane.dots[d];
+          const vecs = opt.skillVecs[d];
+          let top = -Infinity;
+          for (let j = 0; j < vecs.length; j += 1) {
+            const v = vecs[j];
+            let score = dots[j];
+            for (let s = 0; s < 5; s += 1) {
+              if (sigma[s]) score += sigma[s] * (signed ? v[s] : v[5 + s]);
+              if (cost[s]) score += cost[s] * (v[5 + s] - wr * v[10 + s]);
+            }
+            if (score > top) top = score;
+          }
+          total += top;
+        }
+        if (total < best) best = total;
+      }
+    }
+  }
+  return partial + best;
+}
+// Styczna w węźle na głębokości depth (chosen = indeksy i przedmioty 0..depth-1). ref: przedmioty odniesienia reszty
+// slotów (rekord albo pierwszy kandydat). null, gdy cel w punkcie odniesienia jest zerowy.
+function optPlane(opt, depth, chosen, chosenIdx, weapon, refIdx) {
+  optPrepare(opt);
+  const { ctx, spec, cycle, order } = opt;
+  const ceiling = optSkillCeiling(opt, depth, chosen);
+  if (!ceiling) return null;
+  // punkt styczności w umiejętnościach: skill pointy zestawu odniesienia (blisko optimum = ciaśniej); umiejętności
+  // spoza stycznej (Def/Agi przy EHP w celu) na suficie - granica rośnie z nimi, więc to górne oszacowanie
+  const refItems = [...opt.fixedItems, ...chosen.slice(0, depth), ...order.slice(depth).map((slotId, offset) => opt.pools[slotId][refIdx[depth + offset]])].filter(Boolean);
+  const refSp = optWithPlayerFree(computeSkillPoints(refItems), spec.playerFree);
+  const T0 = Object.fromEntries(SKILLS.map((skill) => [skill, opt.linSkills.includes(skill) ? Math.max(0, Math.min(150, refSp.totals[skill] || 0)) : ceiling[skill]]));
+  const keyCount = opt.keyCount;
+  const s0 = new Float64Array(keyCount);
+  const fixedVals = [0, 0];
+  const add = (values, into) => {
+    for (let k = 0; k < values.length; k += 1) into[k] += values[k];
+  };
+  const prefix = new Float64Array(keyCount);
+  for (let d = 0; d < depth; d += 1) {
+    if (order[d] === "weapon") continue;
+    add(opt.vecs[d][chosenIdx[d]], prefix);
+    add(opt.fixedVals[d][chosenIdx[d]], fixedVals);
+  }
+  add(prefix, s0);
+  for (let d = depth; d < order.length; d += 1) {
+    add(opt.vecs[d][refIdx[d]], s0);
+    add(opt.fixedMax[d], fixedVals);
+  }
+  const pseudo = (values, extra = null) => {
+    const ids = {};
+    opt.planeKeys.forEach((key, index) => {
+      if (values[index]) ids[key] = values[index];
+    });
+    OPT_PLANE_FIXED_KEYS.forEach((key, index) => {
+      if (fixedVals[index]) ids[key] = (ids[key] || 0) + fixedVals[index];
+    });
+    if (extra) ids[extra.key] = (ids[extra.key] || 0) + extra.delta;
+    const hp = opt.hpMatters ? values[keyCount - 1] + (extra && extra.key === "__hp" ? extra.delta : 0) : 0;
+    return { name: "__plane", category: "accessory", type: "ghost", level: 0, tier: "Normal", ids, base: { hp }, stats: {}, reqs: {}, elements: [], slots: 0, majorIds: [], baseIds: {}, staticIds: [] };
+  };
+  const worn = [...opt.fixedItems, ...(order[0] === "weapon" && depth > 0 ? [chosen[0]] : [])];
+  const value = (values, totals, extra = null) => evaluateGoal(ctx, [...worn, pseudo(values, extra)], weapon, totals, spec.goal, cycle).damage;
+  const f0 = value(s0, T0);
+  if (!(f0 > 0)) return null;
+  const h0 = Math.log(f0);
+  const g = new Float64Array(keyCount);
+  for (let k = 0; k < keyCount; k += 1) {
+    const key = k < opt.planeKeys.length ? opt.planeKeys[k] : "__hp";
+    const step = opt.planeSteps[k];
+    const up = value(s0, T0, { key, delta: step });
+    const down = value(s0, T0, { key, delta: -step });
+    g[k] = up > 0 && down > 0 ? (Math.log(up) - Math.log(down)) / (2 * step) : up > 0 ? (Math.log(up) - h0) / step : 0;
+  }
+  // nachylenie w punktach u = max(T, 0) (poniżej zera procent z umiejętności jest płaski): w zerze pochodna z prawej
+  const gT = {};
+  let skillPart = 0;
+  opt.linSkills.forEach((skill) => {
+    const base = T0[skill];
+    const up = value(s0, { ...T0, [skill]: base + 1 });
+    const down = base >= 1 ? value(s0, { ...T0, [skill]: base - 1 }) : f0;
+    const span = base >= 1 ? 2 : 1;
+    gT[skill] = up > 0 && down > 0 ? Math.max(0, (Math.log(up) - Math.log(down)) / span) : 0;
+    skillPart += gT[skill] * base;
+  });
+  let dot0 = 0;
+  for (let k = 0; k < keyCount; k += 1) dot0 += g[k] * s0[k];
+  let prefixDot = 0;
+  for (let k = 0; k < keyCount; k += 1) prefixDot += g[k] * prefix[k];
+  const dots = opt.order.map((slotId, d) => {
+    if (d < depth) return null;
+    return opt.vecs[d].map((values) => {
+      let sum = 0;
+      for (let k = 0; k < keyCount; k += 1) sum += g[k] * values[k];
+      return sum;
+    });
+  });
+  const maxDot = dots.map((list) => (list ? list.reduce((max, value) => Math.max(max, value), -Infinity) : 0));
+  // kandydaci slotu od największego g·x (ostatni slot przeglądany w tej kolejności, z przerwaniem pod rekordem)
+  const sorted = dots.map((list) => (list ? Array.from(list.keys()).sort((a, b) => list[b] - list[a]) : null));
+  // suma maksimów od głębokości d do końca
+  const suffixMax = new Float64Array(order.length + 1);
+  for (let d = order.length - 1; d >= depth; d -= 1) suffixMax[d] = suffixMax[d + 1] + maxDot[d];
+  const order2 = Object.entries(gT).filter(([, slope]) => slope > 0).sort((a, b) => b[1] - a[1]).map(([skill, slope]) => [SKILL_INDEX[skill], slope]);
+  return { depth, C: h0 - dot0 - skillPart, prefixDot, dots, sorted, suffixMax, gT, slopes: order2, T0 };
+}
+// Granica z płaszczyzny dla węzła na głębokości depth (chosenIdx: indeksy przedmiotów 0..depth-1, info: skill pointy
+// węzła z optSkillInfo). Część skill pointów to mały program liniowy: każda umiejętność ma co najmniej swoje minimum,
+// a reszta budżetu idzie tam, gdzie styczna rośnie najszybciej (do 100 przydzielonych) - jedna pula punktów dla
+// wszystkich, a nie cały budżet w każdej umiejętności osobno.
+function optPlaneSkills(plane, info) {
+  let log = 0;
+  let rest = info.available - info.floorSum;
+  const slopes = plane.slopes;
+  for (let k = 0; k < slopes.length; k += 1) {
+    const s = slopes[k][0];
+    const slope = slopes[k][1];
+    log += slope * Math.max(0, info.bonus[s] + info.floor[s]);
+    const add = Math.max(0, Math.min(rest, MAX_ASSIGNED_PER_SKILL - info.floor[s]));
+    log += slope * add;
+    rest -= add;
+  }
+  return log;
+}
+function optPlaneBound(plane, depth, chosenIdx, info) {
+  let log = plane.C + plane.prefixDot + plane.suffixMax[depth];
+  for (let d = plane.depth; d < depth; d += 1) log += plane.dots[d][chosenIdx[d]];
+  return Math.exp(log + optPlaneSkills(plane, info)) * OPT_PLANE_MARGIN;
+}
+
+// Branch and bound po pustych slotach. range: zakres kandydatów pierwszego slotu (podział na wątki).
+// Zwraca najlepszy znaleziony zestaw (lepszy niż incumbent) i liczniki. onTick({ checked, evaluated, best }) co ok. 250 ms.
+// refPicks: { slotId: nazwa } - przedmioty odniesienia dla płaszczyzn (zwykle rekord z wiązki).
+// Ostatni slot przegląda szybka pętla: granica z płaszczyzn dla każdego kandydata (bez modelu obrażeń), pełna ocena
+// tylko dla tych, które mogą pobić rekord.
+const OPT_PLANE_MIN_SUBTREE = 1500;
+const OPT_PLANE_MAX_DEPTH = 1;
+function optBranchAndBound(opt, { from = 0, to = null, incumbent = -Infinity, deadline = null, onTick = null, noBound = false, refPicks = null, planes: usePlanes = true, planeMin = OPT_PLANE_MIN_SUBTREE } = {}) {
+  const { order, pools } = opt;
+  const depthCount = order.length;
+  const started = Date.now();
+  let best = incumbent;
+  let bestPicks = null;
+  let checked = 0;
+  let evaluated = 0;
+  let bounds = 0;
+  let planesMade = 0;
+  let screened = 0;
+  let lastTick = started;
+  let stopped = false;
+  const chosen = [];
+  const indexes = [];
+  if (usePlanes && !noBound) optPrepare(opt);
+  // przedmioty odniesienia płaszczyzn: rekord (gdy jest w puli) albo pierwszy kandydat
+  const refIdx = order.map((slotId) => {
+    const name = refPicks && refPicks[slotId] ? refPicks[slotId].name || refPicks[slotId] : null;
+    const at = name ? pools[slotId].findIndex((item) => item.name === name) : -1;
+    return at >= 0 ? at : 0;
+  });
+  const planeAt = []; // płaszczyzny zakotwiczone na ścieżce (po głębokości kotwicy)
+  const weaponOf = () => opt.fixedWeapon || (order[0] === "weapon" ? chosen[0] : null);
+  const fixedRing = opt.fixedItems.find((item) => item.type === "ring") || null;
+  const ringDepths = order.map((slotId, depth) => (slotId === "ring1" || slotId === "ring2" ? depth : -1)).filter((depth) => depth >= 0);
+  const ringClash = () => {
+    const rings = ringDepths.map((depth) => chosen[depth]);
+    if (fixedRing) rings.push(fixedRing);
+    return rings.length === 2 && rings[0].name === rings[1].name && singleCopy(rings[0]);
+  };
+  // skill pointy stałych i wybranych przedmiotów po głębokościach (agg[d] = stałe + wybrane 0..d-1)
+  const agg = [optAggregate(opt.fixedItems)];
+  const extend = (depth, item) => {
+    const prev = agg[depth];
+    if (prev.sets || item.set) {
+      agg[depth + 1] = optAggregate([...opt.fixedItems, ...chosen.slice(0, depth + 1)]);
+      return;
+    }
+    const bonus = Float64Array.from(prev.bonus);
+    const positive = Float64Array.from(prev.positive);
+    const maxReq = Float64Array.from(prev.maxReq);
+    for (let s = 0; s < 5; s += 1) {
+      const skill = SKILLS[s];
+      const value = item.stats[skill] || 0;
+      bonus[s] += value;
+      if (value > 0) positive[s] += value;
+      const req = item.reqs[skill] || 0;
+      if (req > maxReq[s]) maxReq[s] = req;
+    }
+    agg[depth + 1] = { bonus, positive, maxReq, sets: false };
+  };
+  const planeBound = (depth) => {
+    let bound = Infinity;
+    let info = null;
+    for (let d = 0; d <= depth && d < planeAt.length; d += 1) {
+      const plane = planeAt[d];
+      if (!plane) continue;
+      if (!info) {
+        info = optSkillInfoFrom(opt, depth, agg[depth]);
+        if (!info) return -Infinity;
+      }
+      bound = Math.min(bound, optPlaneBound(plane, depth, indexes, info));
+    }
+    return bound;
+  };
+  const evaluateLeaf = () => {
+    evaluated += 1;
+    const weapon = weaponOf();
+    if (!weapon || ringClash()) return;
+    const items = [...opt.fixedItems, ...chosen];
+    const result = optEvaluate(opt, items, weapon, noBound ? null : best);
+    if (!result || result.below || result.infeasible) return;
+    if (result.value > best + OPT_GAIN_EPS) {
+      best = result.value;
+      bestPicks = order.map((slotId, depth) => ({ slotId, item: chosen[depth] }));
+    }
+  };
+  const tick = () => {
+    const now = Date.now();
+    if (onTick && now - lastTick > 250) {
+      lastTick = now;
+      onTick({ checked, evaluated, bounds, best, bestPicks });
+    }
+    if (deadline && now > deadline) stopped = true;
+  };
+  if (depthCount === 0) {
+    checked += 1;
+    evaluateLeaf();
+    return { best, bestPicks, checked, evaluated, bounds, ms: Date.now() - started, complete: true };
+  }
+  const upper = (depth) => (depth === 0 && to !== null ? Math.min(to, pools[order[0]].length) : pools[order[depth]].length);
+  const startIndex = (depth) => {
+    if (depth === 0) return from;
+    if (opt.ringPair && order[depth] === "ring2") return indexes[depth - 1];
+    return 0;
+  };
+  // Ostatni slot: dla każdego kandydata granica z płaszczyzn (sumy skill pointów węzła + ten przedmiot), pełna ocena
+  // tylko powyżej rekordu.
+  const lastLevel = (depth) => {
+    const pool = pools[order[depth]];
+    const first = startIndex(depth);
+    const end = upper(depth);
+    const planes = usePlanes && !noBound ? planeAt.filter(Boolean) : [];
+    let base = null;
+    let baseSets = false;
+    if (planes.length > 0 && weaponOf()) {
+      // skill pointy stałych i wybranych przedmiotów (bez ostatniego slotu) - raz na węzeł
+      const node = agg[depth];
+      baseSets = node.sets;
+      base = { bonus: node.bonus, positive: node.positive, maxReq: node.maxReq };
+      base.partial = planes.map((plane) => {
+        let log = plane.C + plane.prefixDot;
+        for (let d = plane.depth; d < depth; d += 1) log += plane.dots[d][indexes[d]];
+        return log;
+      });
+    }
+    const available = opt.ctx.available;
+    const free = SKILLS.map((skill) => opt.spec.playerFree[skill] || 0);
+    const bonus = new Float64Array(5);
+    const floor = new Float64Array(5);
+    // kolejność: od największego g·x najgłębszej płaszczyzny; granica "g·x + skill pointy z idealnym przedmiotem"
+    // maleje w tej kolejności, więc gdy spadnie pod rekord, reszta kandydatów też go nie pobije
+    const lead = base && planes.length > 0 ? planes[planes.length - 1] : null;
+    const leadIndex = lead ? planes.length - 1 : -1;
+    const sequence = lead && lead.sorted[depth] ? lead.sorted[depth] : null;
+    let ceilingSkills = null;
+    if (lead) {
+      const info = optSkillInfoFrom(opt, depth, agg[depth]);
+      ceilingSkills = info ? optPlaneSkills(lead, info) : -Infinity;
+    }
+    let visited = 0;
+    const count = sequence ? sequence.length : end - first;
+    for (let step = 0; step < count; step += 1) {
+      if (stopped) return;
+      const j = sequence ? sequence[step] : first + step;
+      if (j < first || j >= end) continue;
+      if (lead && Math.exp(base.partial[leadIndex] + lead.dots[depth][j] + ceilingSkills) * OPT_PLANE_MARGIN <= best + OPT_GAIN_EPS) break;
+      visited += 1;
+      const item = pool[j];
+      checked += 1;
+      if (base && !(baseSets || item.set)) {
+        let floorSum = 0;
+        let fits = true;
+        const stats = item.stats;
+        const reqs = item.reqs;
+        for (let s = 0; s < 5; s += 1) {
+          const skill = SKILLS[s];
+          const value = stats[skill] || 0;
+          bonus[s] = base.bonus[s] + value;
+          const positive = base.positive[s] + (value > 0 ? value : 0);
+          const own = reqs[skill] || 0;
+          const req = own > base.maxReq[s] ? own : base.maxReq[s];
+          floor[s] = (req > positive ? req - positive : 0) + free[s];
+          if (floor[s] > MAX_ASSIGNED_PER_SKILL) fits = false;
+          floorSum += floor[s];
+        }
+        if (!fits || floorSum > available) {
+          screened += 1;
+          continue;
+        }
+        let bound = Infinity;
+        for (let p = 0; p < planes.length; p += 1) {
+          const plane = planes[p];
+          let log = base.partial[p] + plane.dots[depth][j];
+          let rest = available - floorSum;
+          for (let k = 0; k < plane.slopes.length; k += 1) {
+            const s = plane.slopes[k][0];
+            const slope = plane.slopes[k][1];
+            log += slope * Math.max(0, bonus[s] + floor[s]);
+            const add = Math.max(0, Math.min(rest, MAX_ASSIGNED_PER_SKILL - floor[s]));
+            log += slope * add;
+            rest -= add;
+          }
+          const value = Math.exp(log) * OPT_PLANE_MARGIN;
+          if (value < bound) bound = value;
+        }
+        if (bound <= best + OPT_GAIN_EPS) {
+          screened += 1;
+          if ((checked & 4095) === 0) tick();
+          continue;
+        }
+      } else if (planes.length > 0) {
+        // zestawy: dokładniejsza (wolniejsza) droga
+        chosen[depth] = item;
+        indexes[depth] = j;
+        chosen.length = depth + 1;
+        extend(depth, item);
+        const bound = planeBound(depth + 1);
+        if (bound <= best + OPT_GAIN_EPS) {
+          screened += 1;
+          continue;
+        }
+      }
+      chosen[depth] = item;
+      indexes[depth] = j;
+      chosen.length = depth + 1;
+      evaluateLeaf();
+      if ((evaluated & 15) === 0) tick();
+    }
+    // przerwane pod rekordem: pozostali kandydaci są sprawdzeni granicą
+    const skipped = end - first - visited;
+    if (skipped > 0) {
+      checked += skipped;
+      screened += skipped;
+    }
+    if ((checked & 4095) < 64) tick();
+  };
+  // płaszczyzna w korzeniu (broń gracza znana od początku)
+  if (!noBound && usePlanes && opt.fixedWeapon && optSubtree(opt, 0) >= Math.min(planeMin, OPT_PLANE_MIN_SUBTREE)) {
+    planeAt[0] = optPlane(opt, 0, [], [], opt.fixedWeapon, refIdx);
+    planesMade += 1;
+  }
+  if (depthCount === 1) {
+    lastLevel(0);
+    return { best, bestPicks, checked, evaluated, bounds, planes: planesMade, screened, ms: Date.now() - started, complete: !stopped };
+  }
+  let counter = 0;
+  let depth = 0;
+  indexes[0] = startIndex(0) - 1;
+  while (depth >= 0) {
+    if (stopped) break;
+    indexes[depth] += 1;
+    if (indexes[depth] >= upper(depth)) {
+      planeAt.length = Math.min(planeAt.length, depth + 1);
+      depth -= 1;
+      chosen.length = Math.max(0, depth);
+      continue;
+    }
+    const item = pools[order[depth]][indexes[depth]];
+    chosen[depth] = item;
+    chosen.length = depth + 1;
+    planeAt.length = Math.min(planeAt.length, depth + 1);
+    extend(depth, item);
+    // węzeł wewnętrzny: granica całego poddrzewa
+    const weapon = weaponOf();
+    const subtree = optSubtree(opt, depth + 1, opt.ringPair && order[depth] === "ring1" ? indexes[depth] : null);
+    if (weapon && !noBound) {
+      bounds += 1;
+      let bound = usePlanes ? planeBound(depth + 1) : Infinity;
+      if (bound === Infinity) bound = optBound(opt, depth + 1, chosen, weapon);
+      // co najmniej dwa puste sloty poniżej: granica Lagrange'a (wymagania i ujemne bonusy każdego kandydata)
+      if (bound > best + OPT_GAIN_EPS && usePlanes && depthCount - (depth + 1) >= 2) {
+        for (let d = planeAt.length - 1; d >= 0 && bound > best + OPT_GAIN_EPS; d -= 1) {
+          const plane = planeAt[d];
+          if (!plane) continue;
+          let partial = plane.C + plane.prefixDot;
+          for (let k = plane.depth; k <= depth; k += 1) partial += plane.dots[k][indexes[k]];
+          bound = Math.min(bound, Math.exp(optPlaneLagrange(opt, plane, depth + 1, partial, agg[depth + 1])) * OPT_PLANE_MARGIN);
+          break;
+        }
+      }
+      // nowe płaszczyzny tylko na dwóch pierwszych poziomach (pomiar: 4 puste sloty - płaszczyzna w każdym węźle
+      // trzeciego poziomu kosztuje więcej, niż oszczędza; 3 sloty - płaszczyzny pierwszego poziomu dają 2x)
+      if (bound > best + OPT_GAIN_EPS && usePlanes && subtree >= planeMin && depth + 1 <= OPT_PLANE_MAX_DEPTH) {
+        // nowa płaszczyzna w tym węźle (sufit SP i szybkość ataku już ciaśniejsze niż u przodków)
+        const refs = refIdx.map((value, d) => (d <= depth ? indexes[d] : opt.ringPair && order[d] === "ring2" && d === depth + 1 ? Math.max(value, indexes[depth]) : value));
+        const plane = optPlane(opt, depth + 1, chosen, indexes, weapon, refs);
+        planesMade += 1;
+        if (plane) {
+          planeAt[depth + 1] = plane;
+          const info = optSkillInfoFrom(opt, depth + 1, agg[depth + 1]);
+          bound = info ? Math.min(bound, optPlaneBound(plane, depth + 1, indexes, info)) : -Infinity;
+          if (bound > best + OPT_GAIN_EPS && depthCount - (depth + 1) >= 2) bound = Math.min(bound, Math.exp(optPlaneLagrange(opt, plane, depth + 1, plane.C + plane.prefixDot, agg[depth + 1])) * OPT_PLANE_MARGIN);
+        }
+      }
+      if (bound <= best + OPT_GAIN_EPS) {
+        checked += subtree;
+        counter += 1;
+        if ((counter & 31) === 0) tick();
+        continue;
+      }
+    }
+    counter += 1;
+    if ((counter & 31) === 0) tick();
+    if (depth + 1 === depthCount - 1) {
+      // dzieci to liście: szybka pętla po ostatnim slocie
+      lastLevel(depth + 1);
+      chosen.length = depth + 1;
+      continue;
+    }
+    depth += 1;
+    indexes[depth] = startIndex(depth) - 1;
+  }
+  return { best, bestPicks, checked, evaluated, bounds, planes: planesMade, screened, ms: Date.now() - started, complete: !stopped };
+}
+
+// ---------- Etap "Drzewko": wolne AP pod cel, węzły gracza zostają ----------
+// Z bronią: ścieżki drzewka oceniane zyskiem celu (model obrażeń z tymi przedmiotami) + wagami z poradników;
+// bez broni (jeszcze nie wybrana) - same wagi, jak przycisk Suggest.
+function optFillTree(spec, items, weapon, skillTotals, seed = spec.treeIds) {
+  if (!TREE_INDEX[spec.playerClass]) return seed;
+  const cycle = normalizeCycle(spec.cycle);
+  if (!weapon) return suggestAbilityTree(spec.playerClass, spec.archetype, spec.cap, null, seed).ids;
+  const cache = new Map();
+  const valueOf = (ids) => {
+    const key = [...ids].sort((a, b) => a - b).join(",");
+    if (!cache.has(key)) {
+      const ctx = damageGoalContext(spec.playerClass, spec.level, optTreeSettings(spec, ids));
+      cache.set(key, evaluateGoal(ctx, items, weapon, skillTotals, spec.goal, cycle).damage);
+    }
+    return cache.get(key);
+  };
+  const pathValue = (path, active, heuristic) => {
+    const before = valueOf([...active]);
+    const after = valueOf([...active, ...path]);
+    const gain = before > 0 ? (after - before) / before : after > 0 ? 1 : 0;
+    return 100 * gain + heuristic;
+  };
+  return suggestAbilityTree(spec.playerClass, spec.archetype, spec.cap, null, seed, pathValue).ids;
+}
+
+// Przedmioty gracza (stałe) i wybrane przez Optimize jako lista do oceny.
+function optItemsOf(spec, picks, emptySlots) {
+  const items = [];
+  spec.fixed.forEach((entry) => {
+    if (emptySlots.includes(entry.slotId) && picks[entry.slotId]) return;
+    if (emptySlots.includes(entry.slotId) && !picks[entry.slotId] && !(spec.powderOwnWeapon && entry.slotId === "weapon")) return;
+    const item = optItem(entry);
+    if (item) items.push({ ...item, __slot: entry.slotId });
+  });
+  Object.entries(picks).forEach(([slotId, pick]) => {
+    const own = spec.fixed.find((entry) => entry.slotId === slotId && pick && entry.name === pick.name);
+    const item = pick && optItem({ slotId, name: pick.name, powders: pick.powders || "", rolls: pick.rolls || (own ? own.rolls : null) });
+    if (item) items.push({ ...item, __slot: slotId });
+  });
+  return { items, weapon: items.find((item) => item.__slot === "weapon") || null };
+}
+function optPickOf(slotId, item) {
+  return { name: item.name, powders: item.powders && item.powders.list && (slotId === "weapon" || ARMOUR_SLOT_IDS.includes(slotId)) ? powderText(item.powders.list) : "" };
+}
+
+// ---------- Zadania silnika (w wątku albo w głównym wątku) ----------
+// plan: etap drzewka + rozmiar przeszukiwania
+function optTaskPlan({ spec }) {
+  const emptySlots = optEmptySlots(spec);
+  let treeIds = spec.treeIds;
+  const started = Date.now();
+  if (spec.scope.tree && TREE_INDEX[spec.playerClass]) {
+    const { items, weapon } = optItemsOf(spec, {}, []);
+    const sp = optWithPlayerFree(computeSkillPoints(items), spec.playerFree);
+    const filled = optFillTree(spec, items, weapon, sp.totals);
+    treeIds = filled;
+  }
+  const treeMs = Date.now() - started;
+  if (emptySlots.length === 0) return { treeIds, emptySlots, total: 0, sizes: [], rawSizes: {}, order: [], treeMs };
+  let opt = optContext(spec, treeIds, emptySlots);
+  // slot bez żadnego kandydata (filtry) zostaje pusty
+  const noCandidates = emptySlots.filter((slotId) => opt.pools[slotId].length === 0);
+  if (noCandidates.length > 0) {
+    const kept = emptySlots.filter((slotId) => !noCandidates.includes(slotId));
+    if (kept.length === 0) return { treeIds, emptySlots: [], total: 0, sizes: [], rawSizes: {}, order: [], treeMs, noCandidates };
+    opt = optContext(spec, treeIds, kept);
+    return { treeIds, emptySlots: kept, total: opt.total, sizes: opt.sizes, rawSizes: opt.rawSizes, order: opt.order, firstCount: opt.sizes[0] || 0, treeMs, noCandidates };
+  }
+  return { treeIds, emptySlots, total: opt.total, sizes: opt.sizes, rawSizes: opt.rawSizes, order: opt.order, firstCount: opt.sizes[0] || 0, treeMs };
+}
+
+// quick: obecna wiązka generatora z przypiętymi przedmiotami gracza (tryb szybki i rekord startowy)
+async function optTaskQuick({ spec, treeIds, emptySlots }) {
+  const opt = optContext(spec, treeIds, emptySlots);
+  const locked = {};
+  const items = [...ITEM_DB];
+  spec.fixed.forEach((entry) => {
+    if (emptySlots.includes(entry.slotId) && !(spec.powderOwnWeapon && entry.slotId === "weapon")) return;
+    locked[entry.slotId] = entry.name;
+  });
+
+  // rolle i powdery gracza: przypięte przedmioty w swojej wersji (generator bierze je po nazwie z tej listy)
+  const own = new Map(opt.fixedItems.map((item) => [item.name, item]));
+  if (spec.powderOwnWeapon) {
+    const bare = optItem({ ...spec.powderOwnWeapon, powders: "" });
+    if (bare) own.set(bare.name, bare);
+  }
+  const pool = items.map((item) => own.get(item.name) || item);
+  const focus = spec.filters.elements;
+  let best = null;
+  const powderChoices = spec.powderOwnWeapon || !emptySlots.includes("weapon") ? ["none"] : spec.scope.powders ? (focus.length > 0 ? focus : ["auto"]) : ["none"];
+  for (const powders of powderChoices) {
+    const build = await generateDamageBuild({
+      playerClass: spec.playerClass,
+      level: spec.level,
+      archetype: spec.archetype,
+      treeSettings: optTreeSettings(spec, treeIds),
+      goal: spec.goal,
+      cycle: spec.cycle,
+      requireSustain: spec.requireSustain,
+      options: { ...DEFAULT_OPTIONS, locked, attackSpeeds: spec.filters.attackSpeeds, avoidNegativeDefences: spec.filters.avoidNegativeDefences },
+      items: spec.filters.allowedNames ? pool.filter((item) => own.has(item.name) || spec.filters.allowedNames.includes(item.name)) : pool,
+      powders,
+      excludeEvents: spec.filters.noEvents,
+      tradeableOnly: spec.filters.tradeableOnly,
+      effort: "quick",
+      spendFreeSkillPoints: spec.spendFree,
+      spReserve: SKILLS.reduce((sum, skill) => sum + (spec.playerFree[skill] || 0), 0),
+    });
+    const picks = {};
+    build.slots.forEach((slot) => {
+      if (emptySlots.includes(slot.id) && slot.item) picks[slot.id] = optPickOf(slot.id, slot.item);
+    });
+    if (spec.powderOwnWeapon) {
+      // broń gracza: najlepszy wariant powderów przy tych przedmiotach
+      picks.weapon = null;
+    }
+    const chosen = { ...picks };
+    const { items: all, weapon } = optItemsOf(spec, chosen, emptySlots);
+    let evaluated = weapon ? optEvaluate(opt, all, weapon) : null;
+    if (spec.powderOwnWeapon && opt.pools.weapon) {
+      let bestVariant = null;
+      opt.pools.weapon.forEach((variant) => {
+        const withVariant = [...all.filter((item) => item.__slot !== "weapon"), { ...variant, __slot: "weapon" }];
+        const result = optEvaluate(opt, withVariant, variant);
+        if (result && result.value !== undefined && (!bestVariant || result.value > bestVariant.value)) bestVariant = { ...result, variant };
+      });
+      if (bestVariant) {
+        picks.weapon = optPickOf("weapon", bestVariant.variant);
+        evaluated = bestVariant;
+      } else delete picks.weapon;
+    }
+    const value = evaluated && evaluated.value !== undefined ? evaluated.value : -Infinity;
+    if (!best || value > best.value) best = { picks, value };
+  }
+  return best;
+}
+
+// bnb: pełne przeszukanie zakresu kandydatów pierwszego slotu
+function optTaskBnb({ spec, treeIds, emptySlots, from, to, incumbent, budgetMs = null, refPicks = null }, onProgress = null) {
+  const opt = optContext(spec, treeIds, emptySlots);
+  const result = optBranchAndBound(opt, {
+    from,
+    to,
+    refPicks,
+    incumbent: Number.isFinite(incumbent) ? incumbent : -Infinity,
+    deadline: budgetMs ? Date.now() + budgetMs : null,
+    onTick: onProgress
+      ? (tick) => onProgress({ checked: tick.checked, evaluated: tick.evaluated, best: tick.best, picks: tick.bestPicks ? optPicksToNames(tick.bestPicks) : null })
+      : null,
+  });
+  return { ...result, picks: result.bestPicks ? optPicksToNames(result.bestPicks) : null, bestPicks: undefined, total: opt.total };
+}
+function optPicksToNames(list) {
+  const picks = {};
+  list.forEach(({ slotId, item }) => {
+    if (item) picks[slotId] = optPickOf(slotId, item);
+  });
+  return picks;
+}
+
+// finish: tomy, aspekty i sprawdzenie (drugi przebieg drzewka, skill pointy, rekomendacje zamian) -> lista zmian
+function optTaskFinish({ spec, treeIds, emptySlots, picks, searchMode = "full", complete = true, candidates = null }, onProgress = null) {
+  const report = (stage) => onProgress && onProgress({ stage });
+  const cycle = normalizeCycle(spec.cycle);
+  const level = spec.level;
+  const { items, weapon } = optItemsOf(spec, picks, emptySlots);
+  const aspectPool = ASPECT_DB[spec.playerClass] || [];
+  const playerAspects = (spec.aspects || []).map((entry) => {
+    if (!entry) return null;
+    const aspect = aspectPool.find((candidate) => candidate.name === entry.name);
+    return aspect ? [aspect, Math.max(1, Math.min(aspect.tiers.length, entry.tier || aspect.tiers.length))] : null;
+  });
+  const tomesOf = (tomeNames) => {
+    const out = [];
+    TOME_SLOTS.forEach((slot) => ((tomeNames && tomeNames[slot.id]) || []).forEach((name, index) => {
+      const tome = name ? TOME_BY_NAME.get(name) : null;
+      if (tome) out.push({ ...tome, tomeIndex: index });
+    }));
+    return out;
+  };
+  // ocena stanu: przedmioty + tomy (jak przedmioty; tomy z SP liczą się też w skill pointach) + drzewko + aspekty
+  const stateValue = (state, allocate = false) => {
+    const tomes = tomesOf(state.tomes);
+    const all = [...state.items, ...tomes];
+    const sp = optWithPlayerFree(computeSkillPoints(all, true), state.free || spec.playerFree);
+    const ctx = damageGoalContext(spec.playerClass, level, optTreeSettings(spec, state.tree, state.aspects));
+    if (!state.weapon) return { metrics: null, sp, extra: null, ctx };
+    let metrics = evaluateGoal(ctx, all, state.weapon, sp.totals, spec.goal, cycle);
+    let extra = null;
+    if (allocate && ctx.available - sp.total > 0 && sp.capOverflow === 0) {
+      const ok = (m) => (cycle.ids.length === 0 || manaOk(m, cycle)) && (!spec.requireSustain || m.sustain > 0);
+      const rank = (m) => (ok(m) ? 1e15 + m.damage : -((m.manaNet < 0 ? -m.manaNet : 0) + (m.sustain > 0 ? 0 : 1)));
+      const allocated = allocateFreeSkillPoints(ctx, all, state.weapon, sp, spec.goal, cycle, rank);
+      metrics = allocated.metrics;
+      extra = allocated.extra;
+    }
+    if (metrics) delete metrics.stats;
+    return { metrics, sp, extra, ctx };
+  };
+  const pct = (after, before) => (before > 0 ? ((after - before) / before) * 100 : after > 0 ? 100 : 0);
+  const fmtPct = (value) => `${value >= 0 ? "+" : ""}${Math.abs(value) >= 10 ? Math.round(value) : value.toFixed(1)}%`;
+  const goalWord = spec.cycle.blend > 0 ? "goal score" : "goal damage";
+  const changes = [];
+  const swaps = [];
+  let state = { items, weapon, tree: treeIds, tomes: { ...(spec.tomes || {}) }, aspects: spec.aspects || [], free: spec.playerFree };
+
+  // --- przedmioty (wynik przeszukiwania) ---
+  const base = stateValue(state).metrics;
+  Object.entries(picks).forEach(([slotId, pick]) => {
+    if (!pick) return;
+    const slot = SLOTS.find((entry) => entry.id === slotId);
+    const own = spec.fixed.find((entry) => entry.slotId === slotId);
+    const without = { ...state, items: state.items.filter((item) => item.__slot !== slotId), weapon: slotId === "weapon" ? null : state.weapon };
+    const withoutValue = slotId === "weapon" ? null : stateValue(without).metrics;
+    const gain = base && withoutValue ? pct(base.damage, withoutValue.damage) : null;
+    const ehpGain = base && withoutValue ? base.ehp - withoutValue.ehp : null;
+    if (own && own.name === pick.name) {
+      // broń gracza: dochodzą tylko powdery
+      const bare = { ...state, items: state.items.map((item) => (item.__slot === "weapon" ? { ...optItem({ ...own, powders: "" }), __slot: "weapon" } : item)), weapon: optItem({ ...own, powders: "" }) };
+      const bareValue = stateValue(bare).metrics;
+      changes.push({
+        id: `powders-${slotId}`,
+        area: "powders",
+        label: `${slot.label} powders`,
+        from: "none",
+        to: pick.powders,
+        why: `${bareValue && base ? fmtPct(pct(base.damage, bareValue.damage)) : "More"} ${goalWord} from powders in your ${own.name}'s ${optItem(own) ? optItem(own).slots : ""} slots (every element compared).`,
+        patch: { type: "powders", slotId, text: pick.powders },
+      });
+      return;
+    }
+    changes.push({
+      id: `slot-${slotId}`,
+      area: "slot",
+      label: slot.label,
+      from: null,
+      to: pick.name,
+      toPowders: pick.powders || "",
+      why:
+        (searchMode === "full" && complete
+          ? `Best ${slot.type === "weapon" ? "weapon" : slot.label.toLowerCase()} in the full search (${candidates && candidates[slotId] ? `${candidates[slotId].toLocaleString("en-US")} candidates` : "every candidate"}), checked together with the other slots.`
+          : searchMode === "full"
+            ? "Best found before the search was stopped."
+            : "Best found by the quick search.") +
+        (gain !== null ? ` Adds ${fmtPct(gain)} ${goalWord}${ehpGain ? `, ${ehpGain >= 0 ? "+" : ""}${formatNumber(Math.round(ehpGain))} EHP` : ""}.` : "") +
+        (pick.powders ? ` Powders: ${pick.powders}.` : ""),
+      patch: { type: "item", slotId, name: pick.name, powders: pick.powders || "" },
+    });
+  });
+
+  // --- tomy ---
+  const buildLike = (tree) => {
+    const sp = optWithPlayerFree(computeSkillPoints(state.items, true), spec.playerFree);
+    return { level, playerClass: spec.playerClass, slots: state.items.map((item) => ({ id: item.__slot, item })), skillPoints: { totals: sp.totals } };
+  };
+  const env = (tree, aspects) => ({ treeSettings: optTreeSettings(spec, tree, aspects), goal: spec.goal, cycle: spec.cycle, minEhp: 0, requireSustain: spec.requireSustain, minSustain: 0 });
+  if (spec.scope.tomes && !extrasLocked(level) && state.weapon) {
+    report("tomes");
+    const picked = pickTomes(buildLike(state.tree), env(state.tree, state.aspects), spec.tomes || {});
+    const tomes = JSON.parse(JSON.stringify(spec.tomes || {}));
+    picked.groups.forEach((group) => {
+      group.picks.forEach((entry) => {
+        if (!entry.tome || entry.fixed) return;
+        const list = tomes[group.slot.id] || (tomes[group.slot.id] = []);
+        while (list.length <= entry.index) list.push(null);
+        list[entry.index] = entry.tome.name;
+        const delta = entry.delta || {};
+        changes.push({
+          id: `tome-${group.slot.id}-${entry.index}`,
+          area: "tome",
+          label: `${group.slot.label} tome ${entry.index + 1}`,
+          from: null,
+          to: entry.tome.name,
+          why: `${delta.damagePct ? `${fmtPct(delta.damagePct)} ${goalWord}` : "No change in the goal"}${delta.ehp ? `, ${delta.ehp >= 0 ? "+" : ""}${formatNumber(Math.round(delta.ehp))} EHP` : ""}${delta.mana ? `, mana ${delta.mana >= 0 ? "+" : ""}${delta.mana.toFixed(2)}/s` : ""} (${group.slot.purpose}; the best ${group.slot.label.toLowerCase()} tome with the ones already set).`,
+          patch: { type: "tome", slotId: group.slot.id, index: entry.index, name: entry.tome.name },
+        });
+      });
+    });
+    state = { ...state, tomes };
+  } else report("tomes");
+
+  // --- aspekty ---
+  if (spec.scope.aspects && !extrasLocked(level) && state.weapon) {
+    report("aspects");
+    const fixed = Array.from({ length: ASPECT_SLOT_UNLOCKS.length }, (_, index) => playerAspects[index] || null);
+    const picked = pickAspects(buildLike(state.tree), env(state.tree, []), fixed);
+    const aspects = Array.from({ length: ASPECT_SLOT_UNLOCKS.length }, (_, index) => (spec.aspects || [])[index] || null);
+    picked.slots.forEach((entry) => {
+      if (!entry.aspect || entry.fixed) return;
+      aspects[entry.index] = { name: entry.aspect.name, tier: entry.tier };
+      const delta = entry.delta || {};
+      changes.push({
+        id: `aspect-${entry.index}`,
+        area: "aspect",
+        label: `Aspect slot ${entry.index + 1}`,
+        from: null,
+        to: `${entry.aspect.name} (tier ${ROMAN[entry.tier - 1]})`,
+        why: `${delta.damagePct ? `${fmtPct(delta.damagePct)} ${goalWord}` : "Not in the damage model"}${entry.nodes && entry.nodes.length ? `; boosts ${entry.nodes.slice(0, 3).join(", ")}` : ""}${delta.ehp ? `, ${delta.ehp >= 0 ? "+" : ""}${formatNumber(Math.round(delta.ehp))} EHP` : ""}.`,
+        patch: { type: "aspect", index: entry.index, name: entry.aspect.name, tier: entry.tier },
+      });
+    });
+    state = { ...state, aspects };
+  } else report("aspects");
+
+  // --- sprawdzenie: drugi przebieg drzewka z gotowymi przedmiotami ---
+  report("check");
+  if (spec.scope.tree && state.weapon && TREE_INDEX[spec.playerClass]) {
+    const sp = optWithPlayerFree(computeSkillPoints([...state.items, ...tomesOf(state.tomes)], true), spec.playerFree);
+    const second = optFillTree(spec, [...state.items, ...tomesOf(state.tomes)], state.weapon, sp.totals);
+    const firstValue = stateValue(state).metrics;
+    const secondValue = stateValue({ ...state, tree: second }).metrics;
+    if (secondValue && firstValue && secondValue.damage > firstValue.damage * (1 + 1e-6)) state = { ...state, tree: second };
+  }
+  const added = state.tree.filter((id) => !spec.treeIds.includes(id));
+  if (added.length > 0) {
+    const tree = TREE_INDEX[spec.playerClass];
+    const names = added.map((id) => (tree.byId.get(id) || {}).name).filter(Boolean);
+    const before = stateValue({ ...state, tree: spec.treeIds }).metrics;
+    const after = stateValue(state).metrics;
+    const freeAp = spec.cap - resolveTree(tree, spec.treeIds).points;
+    const usedAp = resolveTree(tree, state.tree).points - resolveTree(tree, spec.treeIds).points;
+    changes.push({
+      id: "tree",
+      area: "tree",
+      label: "Ability tree",
+      from: `${spec.treeIds.length} abilities`,
+      to: `+${added.length} abilit${added.length === 1 ? "y" : "ies"}: ${names.slice(0, 5).join(", ")}${names.length > 5 ? ", …" : ""} (${usedAp}/${freeAp} free AP)`,
+      why: `${before && after ? `${fmtPct(pct(after.damage, before.damage))} ${goalWord}` : "Fills your free AP"} with your nodes untouched (paths judged by the damage model with the finished items and by how often guide trees take them).`,
+      patch: { type: "tree", add: added, keep: state.tree },
+    });
+  }
+
+  // --- skill pointy: wolne punkty pod cel ---
+  if (spec.scope.sp && spec.spendFree && state.weapon) {
+    const plain = stateValue(state);
+    const allocated = stateValue(state, true);
+    if (allocated.extra && SKILLS.some((skill) => allocated.extra[skill] > 0) && plain.metrics && allocated.metrics) {
+      const values = Object.fromEntries(SKILLS.map((skill) => [skill, (spec.playerFree[skill] || 0) + (allocated.extra[skill] || 0)]));
+      const spent = SKILLS.filter((skill) => allocated.extra[skill] > 0);
+      changes.push({
+        id: "sp",
+        area: "sp",
+        label: "Skill points",
+        from: `${SKILLS.reduce((sum, skill) => sum + (spec.playerFree[skill] || 0), 0)} free assigned`,
+        to: spent.map((skill) => `+${allocated.extra[skill]} ${SKILL_STYLE[skill].short}`).join(", "),
+        why: `${fmtPct(pct(allocated.metrics.damage, plain.metrics.damage))} ${goalWord} from points your level gives but the items don't need (your own points stay).`,
+        patch: { type: "freeSp", values },
+      });
+      state = { ...state, free: values };
+    }
+  }
+
+  // --- rekomendacje zamian przedmiotów gracza (reszta buildu bez zmian) ---
+  if (spec.scope.swaps && state.weapon) {
+    const tomes = tomesOf(state.tomes);
+    const ctx = damageGoalContext(spec.playerClass, level, optTreeSettings(spec, state.tree, state.aspects));
+    const opt = { spec, cycle, ctx, cycleActive: cycle.ids.length > 0 };
+    const current = optEvaluate(opt, [...state.items, ...tomes], state.weapon, null, true);
+    const currentValue = current && current.value !== undefined ? current.value : null;
+    if (currentValue) {
+      const ownSlots = spec.fixed.filter((entry) => !(picks[entry.slotId] && picks[entry.slotId].name !== entry.name));
+      ownSlots.forEach((entry) => {
+        const slot = SLOTS.find((candidate) => candidate.id === entry.slotId);
+        const pool = optCandidates({ ...spec, powderOwnWeapon: null }, entry.slotId);
+        let best = null;
+        pool.forEach((candidate) => {
+          if (candidate.name === entry.name) return;
+          const others = state.items.filter((item) => item.__slot !== entry.slotId);
+          const rings = [...others, candidate].filter((item) => item.type === "ring");
+          if (rings.length === 2 && rings[0].name === rings[1].name && singleCopy(candidate)) return;
+          const weapon = entry.slotId === "weapon" ? candidate : state.weapon;
+          const result = optEvaluate(opt, [...others, { ...candidate, __slot: entry.slotId }, ...tomes], weapon, best ? best.value : currentValue);
+          if (!result || result.below || result.infeasible || result.value === undefined) return;
+          if (result.value > (best ? best.value : currentValue) * (1 + 1e-6)) best = { item: candidate, value: result.value, metrics: result.metrics };
+        });
+        if (best && best.value > currentValue * 1.005) {
+          const gain = pct(best.value, currentValue);
+          swaps.push({
+            id: `swap-${entry.slotId}`,
+            area: "swap",
+            label: slot.label,
+            from: entry.name,
+            to: best.item.name,
+            toPowders: optPickOf(entry.slotId, best.item).powders,
+            gain,
+            why: `${fmtPct(gain)} ${goalWord} with the rest of the build as it is${current.metrics && best.metrics ? `; EHP ${formatNumber(Math.round(current.metrics.ehp))} → ${formatNumber(Math.round(best.metrics.ehp))}` : ""}. Only if you want - your ${entry.name} stays unless you check this.`,
+            patch: { type: "item", slotId: entry.slotId, name: best.item.name, powders: optPickOf(entry.slotId, best.item).powders },
+          });
+        }
+      });
+    }
+  }
+  return { changes, swaps };
+}
+
+// Zmiany z listy Optimizera -> nowy workspace (tylko zaznaczone).
+function applyOptimizerChanges(ws, changes) {
+  const next = { ...ws, items: { ...ws.items }, powders: { ...ws.powders }, tomes: { ...ws.tomes }, aspects: [...(ws.aspects || [])], freeSp: { ...ws.freeSp }, tree: [...(ws.tree || [])] };
+  changes.forEach((change) => {
+    const patch = change.patch;
+    if (patch.type === "item") {
+      next.items[patch.slotId] = patch.name;
+      if (patch.powders) next.powders[patch.slotId] = patch.powders;
+      else delete next.powders[patch.slotId];
+    } else if (patch.type === "powders") next.powders[patch.slotId] = patch.text;
+    else if (patch.type === "tree") {
+      // pełne drzewko gracza większe niż limit AP: zostaje przycięta część + nowe węzły
+      const cap = workspaceApCap(ws);
+      const tree = TREE_INDEX[ws.playerClass];
+      const stored = tree && resolveTree(tree, ws.tree || []).points > cap ? workspaceTreeIds(ws) : ws.tree || [];
+      next.tree = [...stored, ...patch.add.filter((id) => !stored.includes(id))];
+    } else if (patch.type === "tome") {
+      const list = [...(next.tomes[patch.slotId] || [])];
+      while (list.length <= patch.index) list.push(null);
+      list[patch.index] = patch.name;
+      next.tomes[patch.slotId] = list;
+    } else if (patch.type === "aspect") {
+      while (next.aspects.length <= patch.index) next.aspects.push(null);
+      next.aspects[patch.index] = { name: patch.name, tier: patch.tier };
+    } else if (patch.type === "freeSp") next.freeSp = { ...patch.values };
+  });
+  return next;
+}
+
+async function optRunTask(kind, payload, onProgress = null) {
+  if (kind === "plan") return optTaskPlan(payload);
+  if (kind === "quick") return optTaskQuick(payload);
+  if (kind === "bnb") return optTaskBnb(payload, onProgress);
+  if (kind === "finish") return optTaskFinish(payload, onProgress);
+  throw new Error(`Unknown optimizer task: ${kind}`);
+}
+
+// Wykonawca w głównym wątku (bez Web Workerów; testy): zadania po kolei, z przerwą dla przeglądarki.
+function optLocalExecutor() {
+  let cancelled = false;
+  return {
+    threads: 1,
+    local: true,
+    async run(kind, payload, onProgress = null) {
+      if (cancelled) throw Object.assign(new Error("Stopped"), { cancelled: true });
+      if (typeof window !== "undefined") await yieldToBrowser();
+      return optRunTask(kind, payload, onProgress);
+    },
+    cancel() {
+      cancelled = true;
+    },
+  };
+}
+
+// Wątki Optimizera: osobna pula (liczba rdzeni - 1), zadania z kolejki; "Stop" zamyka wątki od razu.
+class OptimizerPool {
+  constructor(factory, size) {
+    this.factory = factory;
+    this.threads = size;
+    this.slots = [];
+    this.queue = [];
+    this.nextId = 1;
+    this.failed = false;
+  }
+  spawn() {
+    let worker;
+    try {
+      worker = this.factory();
+    } catch (error) {
+      this.fail();
+      return;
+    }
+    const slot = { worker, ready: false, busy: null };
+    slot.timer = setTimeout(() => {
+      if (!slot.ready) this.fail();
+    }, ENGINE_READY_TIMEOUT_MS);
+    worker.onmessage = (event) => this.handle(slot, event.data || {});
+    worker.onerror = () => this.crash(slot);
+    this.slots.push(slot);
+  }
+  fail() {
+    if (this.failed) return;
+    this.failed = true;
+    this.cancel(Object.assign(new Error("Web Workers unavailable"), { fallback: true }));
+  }
+  crash(slot) {
+    const task = slot.busy;
+    this.slots = this.slots.filter((entry) => entry !== slot);
+    try {
+      slot.worker.terminate();
+    } catch (error) {
+      // już zamknięty
+    }
+    if (task) task.reject(new Error("The optimizer thread stopped unexpectedly"));
+    this.pump();
+  }
+  run(kind, payload, onProgress = null) {
+    if (this.failed) return Promise.reject(Object.assign(new Error("Web Workers unavailable"), { fallback: true }));
+    return new Promise((resolve, reject) => {
+      this.queue.push({ id: this.nextId++, kind, payload, onProgress, resolve, reject });
+      while (this.slots.length < this.threads) this.spawn();
+      this.pump();
+    });
+  }
+  pump() {
+    this.slots.forEach((slot) => {
+      if (!slot.ready || slot.busy || this.queue.length === 0) return;
+      const task = this.queue.shift();
+      slot.busy = task;
+      slot.worker.postMessage({ type: "optTask", id: task.id, kind: task.kind, payload: task.payload });
+    });
+  }
+  handle(slot, message) {
+    if (message.type === "ready") {
+      slot.ready = true;
+      clearTimeout(slot.timer);
+      this.pump();
+      return;
+    }
+    const task = slot.busy;
+    if (!task || message.id !== task.id) return;
+    if (message.type === "optProgress") {
+      if (task.onProgress) task.onProgress(message.progress);
+    } else if (message.type === "optDone" || message.type === "optError") {
+      slot.busy = null;
+      if (message.type === "optDone") task.resolve(message.result);
+      else task.reject(new Error(message.message));
+      this.pump();
+    }
+  }
+  cancel(error = Object.assign(new Error("Stopped"), { cancelled: true })) {
+    this.slots.forEach((slot) => {
+      clearTimeout(slot.timer);
+      try {
+        slot.worker.terminate();
+      } catch (terminateError) {
+        // już zamknięty
+      }
+      if (slot.busy) slot.busy.reject(error);
+    });
+    this.slots = [];
+    this.queue.splice(0).forEach((task) => task.reject(error));
+  }
+}
+function optimizerExecutor() {
+  const factory = typeof globalThis !== "undefined" ? globalThis.__WBR_WORKER_FACTORY : null;
+  if (typeof Worker === "undefined" || typeof factory !== "function" || (typeof window !== "undefined" && window.WBR_NO_WORKERS)) return optLocalExecutor();
+  const cores = (typeof navigator !== "undefined" && navigator.hardwareConcurrency) || 2;
+  const forced = typeof window !== "undefined" && Number(window.WBR_WORKER_COUNT) > 0 ? Number(window.WBR_WORKER_COUNT) : null;
+  return new OptimizerPool(factory, forced || Math.max(1, Math.min(8, cores - 1)));
+}
+
+// Cały Optimize: drzewko → przedmioty (wiązka jako start, potem pełne B&B albo tryb szybki) → tomy → aspekty →
+// sprawdzenie. onProgress({ stage, checked, total, etaMs, ... }); askChoice({ total, etaMs }) -> "full" | "quick".
+// Przerwanie (executor.cancel + stopRef.current): wynik z najlepszego dotąd zestawu, oznaczony jako niepełny.
+async function runOptimizer({ ws, params, allowedNames = null, executor, makeExecutor = null, onProgress = () => {}, askChoice = async () => "full", stopRef = { current: false } }) {
+  const spec = optimizerSpec(ws, params, { allowedNames });
+  const started = Date.now();
+  const report = (stage, extra = {}) => onProgress({ stage, elapsedMs: Date.now() - started, threads: executor.threads, ...extra });
+  const cancelled = (error) => Boolean(error && (error.cancelled || stopRef.current));
+  report("tree");
+  const plan = await executor.run("plan", { spec });
+  let picks = {};
+  let complete = true;
+  let searchMode = spec.mode;
+  let best = -Infinity;
+  let checked = 0;
+  if (plan.emptySlots.length > 0 && !stopRef.current) {
+    report("items", { total: plan.total, checked: 0, note: "Quick search for a starting build" });
+    try {
+      const quick = await executor.run("quick", { spec, treeIds: plan.treeIds, emptySlots: plan.emptySlots });
+      if (quick) {
+        picks = quick.picks || {};
+        best = quick.value;
+      }
+      if (spec.mode === "quick") complete = false;
+      else if (!stopRef.current) {
+        const payload = { spec, treeIds: plan.treeIds, emptySlots: plan.emptySlots };
+        const probe = await executor.run("bnb", { ...payload, from: 0, to: plan.firstCount, incumbent: best, budgetMs: 1500, refPicks: picks }, (tick) => {
+          report("items", { total: plan.total, checked: tick.checked, note: "Measuring the search" });
+        });
+        if (probe.picks && probe.best > best) {
+          best = probe.best;
+          picks = probe.picks;
+        }
+        checked = probe.checked;
+        if (!probe.complete) {
+          const rate = probe.checked / Math.max(1, probe.ms);
+          const etaMs = (plan.total - probe.checked) / Math.max(1e-9, rate) / Math.max(1, executor.threads);
+          report("items", { total: plan.total, checked, etaMs, note: "Estimate" });
+          const choice = etaMs > OPT_TIME_LIMIT_S * 1000 ? await askChoice({ total: plan.total, etaMs, threads: executor.threads }) : "full";
+          if (choice !== "full") {
+            complete = false;
+            searchMode = "quick";
+          } else {
+            // pełne przeszukanie: kandydaci pierwszego slotu w kawałkach, rozdzielanych na wątki; każdy kawałek dostaje
+            // aktualny rekord (lepszy rekord = więcej odciętych gałęzi)
+            checked = 0;
+            const count = plan.firstCount;
+            const pieces = Math.max(1, Math.min(count, executor.threads * 8));
+            const size = Math.max(1, Math.ceil(count / pieces));
+            const ranges = [];
+            for (let from = 0; from < count; from += size) ranges.push([from, Math.min(count, from + size)]);
+            const live = new Map();
+            const searchStart = Date.now();
+            const tickReport = () => {
+              const done = checked + [...live.values()].reduce((sum, value) => sum + value, 0);
+              const elapsed = Date.now() - searchStart;
+              const eta = done > 0 ? ((plan.total - done) * elapsed) / done : null;
+              report("items", { total: plan.total, checked: Math.min(done, plan.total), etaMs: eta, note: "Full search" });
+            };
+            const worker = async () => {
+              while (ranges.length > 0 && !stopRef.current) {
+                const [from, to] = ranges.shift();
+                const key = `${from}-${to}`;
+                const result = await executor.run("bnb", { ...payload, from, to, incumbent: best, refPicks: picks }, (tick) => {
+                  live.set(key, tick.checked);
+                  if (tick.picks && tick.best > best) {
+                    best = tick.best;
+                    picks = tick.picks;
+                  }
+                  tickReport();
+                });
+                live.delete(key);
+                checked += result.checked;
+                if (result.picks && result.best > best) {
+                  best = result.best;
+                  picks = result.picks;
+                }
+                tickReport();
+              }
+            };
+            await Promise.all(Array.from({ length: Math.max(1, executor.threads) }, worker));
+            complete = !stopRef.current;
+          }
+        }
+      }
+    } catch (error) {
+      if (!cancelled(error)) throw error;
+      complete = false;
+    }
+  }
+  // przerwane: dalej liczymy na świeżych wątkach (poprzednie zamknięte przez Stop)
+  const finishExecutor = stopRef.current && makeExecutor ? makeExecutor() : executor;
+  report("tomes");
+  const candidates = plan.rawSizes || {};
+  const finish = await finishExecutor.run("finish", { spec, treeIds: plan.treeIds, emptySlots: plan.emptySlots, picks, searchMode, complete, candidates }, (progress) => report(progress.stage));
+  report("done");
+  return { ...finish, complete, searchMode, stopped: stopRef.current, total: plan.total, checked, emptySlots: plan.emptySlots, ms: Date.now() - started, spec };
+}
+
+// ============================ TRYBY STRONY: Recommender / Optimizer / Creator ============================
+// Pasek trybów na górze. Każdy tryb ma własny build (Recommender: wynik generatora; Optimizer i Creator: workspace
+// gracza zapisany w przeglądarce), a przejścia "Send to Optimizer" / "Edit in Creator" kopiują build, nie przenoszą.
+const APP_MODES = [
+  { id: "recommender", label: "Build Recommender", icon: "✦", who: "The generator", blurb: "A whole build from scratch" },
+  { id: "optimizer", label: "Build Optimizer", icon: "⚒", who: "You + the generator", blurb: "Fills in the build you started" },
+  { id: "creator", label: "Build Creator", icon: "✎", who: "Only you", blurb: "Put a build together by hand" },
+];
+const MODE_STORAGE_KEY = "wbr-mode-v1";
+const INTRO_KEYS = { optimizer: "wbr-intro-optimizer-v1", creator: "wbr-intro-creator-v1" };
+const WORKSPACE_KEYS = { creator: "wbr-ws-creator-v1", optimizer: "wbr-ws-optimizer-v1" };
+function loadSavedMode() {
+  try {
+    const saved = window.localStorage.getItem(MODE_STORAGE_KEY);
+    return APP_MODES.some((mode) => mode.id === saved) ? saved : "recommender";
+  } catch (error) {
+    return "recommender";
+  }
+}
+function saveMode(mode) {
+  try {
+    window.localStorage.setItem(MODE_STORAGE_KEY, mode);
+  } catch (error) {
+    // bez localStorage tryb wraca do Recommendera przy następnej wizycie
+  }
+}
+function readIntroSeen(mode) {
+  try {
+    return window.localStorage.getItem(INTRO_KEYS[mode]) === "1";
+  } catch (error) {
+    return false;
+  }
+}
+function markIntroSeen(mode) {
+  try {
+    window.localStorage.setItem(INTRO_KEYS[mode], "1");
+  } catch (error) {
+    // popup pokaże się znowu przy następnej wizycie
+  }
+}
+// Workspace z przeglądarki: tylko znane pola (stary albo uszkodzony zapis nie psuje strony).
+function sanitizeWorkspace(raw) {
+  const base = emptyWorkspace();
+  if (!raw || typeof raw !== "object") return base;
+  const object = (value) => (value && typeof value === "object" && !Array.isArray(value) ? value : {});
+  return {
+    ...base,
+    playerClass: CLASSES[raw.playerClass] ? raw.playerClass : "",
+    rank: RANKS.some((entry) => entry.id === raw.rank) ? raw.rank : "",
+    level: Number.isFinite(raw.level) ? clampLevel(raw.level) : null,
+    archetype: typeof raw.archetype === "string" ? raw.archetype : "",
+    tree: Array.isArray(raw.tree) ? raw.tree.filter((id) => typeof id === "number" || typeof id === "string") : [],
+    treeFx: object(raw.treeFx),
+    items: Object.fromEntries(Object.entries(object(raw.items)).filter(([slotId, name]) => SLOTS.some((slot) => slot.id === slotId) && typeof name === "string")),
+    powders: Object.fromEntries(Object.entries(object(raw.powders)).filter(([, text]) => typeof text === "string")),
+    rolls: object(raw.rolls),
+    tomes: Object.fromEntries(Object.entries(object(raw.tomes)).filter(([, list]) => Array.isArray(list))),
+    aspects: Array.isArray(raw.aspects) ? raw.aspects.map((entry) => (entry && typeof entry.name === "string" ? { name: entry.name, tier: Number(entry.tier) || 1 } : null)) : [],
+    freeSp: Object.fromEntries(SKILLS.filter((skill) => Number(object(raw.freeSp)[skill]) > 0).map((skill) => [skill, Math.round(Number(raw.freeSp[skill]))])),
+    name: typeof raw.name === "string" ? raw.name.slice(0, 60) : "",
+  };
+}
+function loadWorkspace(mode) {
+  try {
+    return sanitizeWorkspace(JSON.parse(window.localStorage.getItem(WORKSPACE_KEYS[mode]) || "null"));
+  } catch (error) {
+    return emptyWorkspace();
+  }
+}
+function storeWorkspace(mode, ws) {
+  try {
+    window.localStorage.setItem(WORKSPACE_KEYS[mode], JSON.stringify(ws));
+  } catch (error) {
+    // build zostaje tylko w tej sesji
+  }
+}
+
+// Miejsca, które Optimize może uzupełnić (komunikaty "Optimize will fill ..." i zakres zmian).
+function workspaceGaps(ws, build) {
+  const level = (build && build.level) || ws.level || 120;
+  const emptySlots = SLOTS.filter((slot) => !(ws.items && ws.items[slot.id]));
+  const freeAp = build ? Math.max(0, build.apCap - build.apUsed) : 0;
+  const freeSp = build ? Math.max(0, build.skillPoints.available - build.skillPoints.required) : 0;
+  const locked = extrasLocked(level);
+  const emptyTomes = locked
+    ? []
+    : TOME_SLOTS.flatMap((slot) =>
+        Array.from({ length: tomeSlotsOpen(slot, level) }, (_, index) => ({ slot, index })).filter(({ index }) => !((ws.tomes && ws.tomes[slot.id]) || [])[index])
+      );
+  const aspectOpen = locked ? 0 : aspectSlotsOpen(level);
+  const emptyAspects = Array.from({ length: aspectOpen }, (_, index) => index).filter((index) => !((ws.aspects || [])[index] && ws.aspects[index].name));
+  const weapon = ws.items && ws.items.weapon ? ITEM_BY_NAME.get(ws.items.weapon) : null;
+  const weaponPowders = Boolean(weapon && weapon.slots > 0 && !(ws.powders && ws.powders.weapon));
+  return { emptySlots, freeAp, freeSp, emptyTomes, emptyAspects, weaponPowders };
+}
+
+function ModeBar({ mode, onMode, onHelp }) {
+  return (
+    <nav className="wbr-modes" aria-label="Mode">
+      {APP_MODES.map((entry) => (
+        <div key={entry.id} className="wbr-mode-wrap">
+          <button
+            type="button"
+            className={`wbr-mode ${mode === entry.id ? "wbr-mode-on" : ""}`}
+            aria-pressed={mode === entry.id}
+            onClick={() => onMode(entry.id)}
+            title={`${entry.label}: ${entry.blurb.toLowerCase()} (${entry.who.toLowerCase()} builds)`}
+          >
+            <span className="wbr-mode-icon" aria-hidden="true">
+              {entry.icon}
+            </span>
+            <span className="flex min-w-0 flex-col">
+              <span className="wbr-mode-name">{entry.label}</span>
+              <span className="wbr-mode-sub">
+                {entry.who} · {entry.blurb}
+              </span>
+            </span>
+          </button>
+          {entry.id !== "recommender" && (
+            <button type="button" className="wbr-mode-help" onClick={() => onHelp(entry.id)} aria-label={`What is the ${entry.label}?`} title={`What is the ${entry.label}?`}>
+              ?
+            </button>
+          )}
+        </div>
+      ))}
+    </nav>
+  );
+}
+
+// Popup przy pierwszym wejściu na Optimizer / Creator (i po kliknięciu "?"): czym jest tryb, 4 kroki, różnice.
+const MODE_INTROS = {
+  optimizer: {
+    kicker: "New",
+    title: "Build Optimizer",
+    lead: "You start the build, the Optimizer fills in the rest. It never changes what you picked: it fills the empty places and recommends swaps - you decide on each one.",
+    steps: [
+      ["Set up.", "Class, archetype, rank and level, then your ability tree - as much of it as you like. Rank and level decide your ability points."],
+      ["Put in your items.", "Any item in any matching slot, or leave slots empty. Problems show as warnings, never blocks, and the stats update live."],
+      ["Optimize.", "Pick the goal (spells and / or main attack), Damage ↔ EHP, mana and filters, and what it may fill: empty slots, free ability points, tomes, aspects, skill points, weapon powders and swap recommendations."],
+      ["Review the changes.", "A list of changes with a short why for each. Uncheck what you don't want and press Accept changes - nothing enters your build without it. Swaps for your own items are listed separately, unchecked."],
+    ],
+    differs: [
+      ["Build Recommender", "builds everything from scratch."],
+      ["Build Creator", "never picks anything - you put the build together by hand."],
+      ["Build Optimizer", "works around your choices and only fills or suggests."],
+    ],
+  },
+  creator: {
+    kicker: "New",
+    title: "Build Creator",
+    lead: "Put a build together by hand, like in Wynnbuilder. The site only calculates and shows - it never picks anything for you.",
+    steps: [
+      ["Set up.", "Class (or pick a weapon - it sets the class), rank and level."],
+      ["Fill the 9 slots.", "Search the whole item database with filters (slot, level, rarity, requirements, name, stat). Rolls are max by default and can be set per ID; powders per item in any order and mix, armour too."],
+      ["Tree, tomes, aspects, skill points.", "Set them by hand within your level's limits. Required skill points are calculated like in Wynnbuilder; you spread the free ones."],
+      ["Read and share.", "Damage, EHP, defences, cycle mana and life update live. Export to or import from Wynnbuilder, save builds under your own names, or Send to Optimizer to fill the gaps."],
+    ],
+    differs: [
+      ["Build Recommender", "builds everything from scratch."],
+      ["Build Optimizer", "fills in the build you started and suggests swaps."],
+      ["Build Creator", "is fully manual: warnings instead of blocks, no automation."],
+    ],
+  },
+};
+function ModeIntroDialog({ mode, onClose }) {
+  const intro = MODE_INTROS[mode];
+  const buttonRef = useRef(null);
+  useEffect(() => {
+    if (typeof document === "undefined") return undefined;
+    const { body, documentElement } = document;
+    const previous = [body.style.overflow, documentElement.style.overflow];
+    body.style.overflow = "hidden";
+    documentElement.style.overflow = "hidden";
+    const onKey = (event) => event.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    if (buttonRef.current) buttonRef.current.focus({ preventScroll: true });
+    return () => {
+      body.style.overflow = previous[0];
+      documentElement.style.overflow = previous[1];
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [onClose]);
+  if (!intro) return null;
+  const hl = (text) => <b className="wbr-welcome-hl">{text}</b>;
+  return (
+    <div className="wbr-backdrop wbr-welcome-backdrop fixed inset-0 z-[60] flex items-center justify-center p-3 sm:p-6" role="dialog" aria-modal="true" aria-labelledby="wbr-intro-title" onClick={(event) => event.target === event.currentTarget && onClose()}>
+      <div className="wbr-pop wbr-welcome flex max-h-full w-full max-w-2xl flex-col">
+        <div className="wbr-welcome-head flex items-center justify-between gap-3 px-5 pb-4 pt-5">
+          <div className="flex min-w-0 flex-col gap-1">
+            <span className="wbr-hero-kicker">{intro.kicker}</span>
+            <h2 id="wbr-intro-title" className="wbr-hero-title wbr-welcome-title">
+              {intro.title}
+            </h2>
+          </div>
+          <button type="button" className="mc-btn mc-btn-sm" onClick={onClose} aria-label="Close">
+            ✕
+          </button>
+        </div>
+        <div className="wbr-welcome-body flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-5 py-4 text-base" tabIndex={0}>
+          <p>{intro.lead}</p>
+          <section className="flex flex-col gap-2">
+            <h3 className="wbr-welcome-sub">How it works</h3>
+            <ol className="wbr-info-list">
+              {intro.steps.map(([head, text]) => (
+                <li key={head}>
+                  {hl(head)} {text}
+                </li>
+              ))}
+            </ol>
+          </section>
+          <section className="flex flex-col gap-2">
+            <h3 className="wbr-welcome-sub">How it differs</h3>
+            <ul className="flex flex-col gap-2 text-sm">
+              {intro.differs.map(([name, text]) => (
+                <li key={name} className="wbr-welcome-source">
+                  {hl(name)} {text}
+                </li>
+              ))}
+            </ul>
+          </section>
+          <p className="wbr-welcome-muted text-sm">Press ? next to the mode's name to open this again.</p>
+        </div>
+        <div className="wbr-welcome-foot flex justify-end px-5 py-3">
+          <button ref={buttonRef} type="button" className="mc-btn mc-btn-primary wbr-welcome-btn" onClick={onClose}>
+            Got it
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Komunikat "Optimize uzupełni ..." przy każdym miejscu, które Optimizer może wypełnić.
+function FillHint({ children }) {
+  return (
+    <p className="wbr-fill-hint text-sm" role="note">
+      <span aria-hidden="true">⚒ </span>
+      {children}
+    </p>
+  );
+}
+
+// Okno powderów jednego przedmiotu (Creator / Optimizer): dowolna kolejność i mieszanka, najwyżej tyle, ile slotów.
+function PowderDialog({ slotLabel, slotId, item, text, onChange, onClose }) {
+  const maxTier = powderTierFor(item.level);
+  const [tier, setTier] = useState(maxTier);
+  const list = powderListFromText(text, item);
+  const full = list.length >= item.slots;
+  const setList = (next) => onChange(powderText(next));
+  const preview = applyPowderList(slotId, item, list);
+  const isWeapon = slotId === "weapon";
+  useEffect(() => {
+    const onKey = (event) => event.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  const [draft, setDraft] = useState(text || "");
+  useEffect(() => setDraft(text || ""), [text]);
+  const draftOk = draft.trim() === "" || parsePowderMix(draft) !== null;
+  return (
+    <div className="wbr-backdrop fixed inset-0 z-50 flex items-start justify-center overflow-y-auto px-4 py-6" role="dialog" aria-modal="true" aria-label={`Powders for ${item.name}`}>
+      <div className="wbr-pop mc-panel flex w-full max-w-xl flex-col gap-3 p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h2 className="mc-title text-lg">Powders · {slotLabel}</h2>
+            <p className="text-sm text-zinc-400">
+              <span style={ts({ color: RARITY_COLORS[item.tier] })}>{item.name}</span> has {item.slots} powder slot{item.slots === 1 ? "" : "s"}; level {item.level} takes up to tier {ROMAN[maxTier - 1]}.{" "}
+              {isWeapon ? "Order matters: the first element converts neutral damage first and decides the powder special." : "Each powder adds its element's defence and health and lowers the opposite element's defence."}
+            </p>
+          </div>
+          <button type="button" autoFocus onClick={onClose} className="mc-btn mc-btn-sm">
+            Done
+          </button>
+        </div>
+        <div className="mc-slot flex flex-col gap-3 p-3">
+          <div className="flex flex-wrap items-center gap-2" aria-label="Powders in the slots">
+            {Array.from({ length: item.slots }, (_, index) => {
+              const powder = list[index];
+              const style = powder ? ELEMENT_STYLE[powder.element] : null;
+              return powder ? (
+                <button
+                  key={index}
+                  type="button"
+                  onClick={() => setList(list.filter((_, at) => at !== index))}
+                  className="mc-btn mc-btn-sm"
+                  style={ts({ color: style.color })}
+                  title="Remove this powder"
+                >
+                  {style.symbol} {style.label} {ROMAN[powder.tier - 1]} ✕
+                </button>
+              ) : (
+                <span key={index} className="mc-well px-3 py-1 text-xs text-zinc-500">
+                  empty
+                </span>
+              );
+            })}
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="flex items-center gap-1 text-xs text-zinc-300">
+              Tier
+              <select value={tier} onChange={(event) => setTier(Number(event.target.value))} className="mc-input" aria-label="Powder tier">
+                {Array.from({ length: maxTier }, (_, index) => index + 1)
+                  .reverse()
+                  .map((value) => (
+                    <option key={value} value={value}>
+                      {ROMAN[value - 1]}
+                    </option>
+                  ))}
+              </select>
+            </label>
+            {ELEMENTS.map((element) => (
+              <button
+                key={element}
+                type="button"
+                disabled={full}
+                onClick={() => setList([...list, { element, tier }])}
+                className="mc-btn mc-btn-sm"
+                style={ts({ color: ELEMENT_STYLE[element].color })}
+                title={`Add a tier ${ROMAN[tier - 1]} ${ELEMENT_STYLE[element].label} powder`}
+              >
+                + {ELEMENT_STYLE[element].symbol} {ELEMENT_STYLE[element].label}
+              </button>
+            ))}
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs text-zinc-500">Fill every slot:</span>
+            {ELEMENTS.map((element) => (
+              <button key={element} type="button" onClick={() => setList(Array.from({ length: item.slots }, () => ({ element, tier })))} className="mc-btn mc-btn-sm" style={ts({ color: ELEMENT_STYLE[element].color })}>
+                {ELEMENT_STYLE[element].symbol}
+              </button>
+            ))}
+            <button type="button" disabled={list.length === 0} onClick={() => setList([])} className="mc-btn mc-btn-sm">
+              Clear
+            </button>
+          </div>
+          <label className="flex flex-col gap-1 text-xs text-zinc-300">
+            Or type them (e t w f a, optional tier 1-7, e.g. e6 e6 t6)
+            <input
+              value={draft}
+              onChange={(event) => {
+                setDraft(event.target.value);
+                if (event.target.value.trim() === "") onChange("");
+                else if (parsePowderMix(event.target.value)) onChange(powderText(powderListFromText(event.target.value, item)));
+              }}
+              className="mc-input w-full"
+              spellCheck={false}
+              aria-label="Powders as text"
+            />
+            {!draftOk && <span className="text-red-400">Letters e t w f a, each optionally followed by a tier 1-7.</span>}
+          </label>
+        </div>
+        <div className="mc-slot flex flex-col gap-1 p-3 text-sm">
+          <span className="mc-gold text-xs uppercase">With these powders</span>
+          {isWeapon ? (
+            <p className="text-zinc-300">
+              {DAMAGE_ELEMENTS.filter((element) => preview.damageRanges && preview.damageRanges[element])
+                .map((element) => `${element === "neutral" ? "✤ Neutral" : `${ELEMENT_STYLE[element].symbol} ${ELEMENT_STYLE[element].label}`} ${preview.damageRanges[element]}`)
+                .join(" · ") || "No damage."}{" "}
+              <span className="text-zinc-500">· {formatNumber(preview.dps || 0)} DPS (base {formatNumber(item.dps || 0)})</span>
+            </p>
+          ) : (
+            <p className="text-zinc-300">
+              Health {formatNumber((preview.base && preview.base.hp) || 0)} (base {formatNumber((item.base && item.base.hp) || 0)}) ·{" "}
+              {ELEMENTS.map((element) => {
+                const key = `${element.charAt(0)}Def`;
+                const value = (preview.base && preview.base[key]) || 0;
+                const before = (item.base && item.base[key]) || 0;
+                return (
+                  <span key={element} style={ts({ color: value !== before ? (value > before ? "#55FF55" : "#FF5555") : undefined })}>
+                    {ELEMENT_STYLE[element].symbol} {value}{" "}
+                  </span>
+                );
+              })}
+            </p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Skill pointy w Creatorze: wymagane liczone jak w Wynnbuilderze, wolne gracz rozdziela sam (+ / − albo wpisane).
+function ManualSkillPointPanel({ skillPoints, onFree, hint = null }) {
+  const usedPct = skillPoints.available > 0 ? Math.min(100, (skillPoints.required / skillPoints.available) * 100) : 0;
+  const left = skillPoints.available - skillPoints.required;
+  return (
+    <section className="mc-panel flex flex-col gap-3 p-4">
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="mc-title text-sm uppercase">Skill points</h3>
+        <span className="mc-slot px-2 py-0.5 text-xs" style={ts({ color: skillPoints.valid ? "#55FF55" : "#FF5555" })}>
+          {skillPoints.valid ? "Equippable" : "Over budget"}
+        </span>
+      </div>
+      <div>
+        <div className="flex items-baseline justify-between text-sm">
+          <span className="text-zinc-400" title="Points the items need (calculated in the game's equip order, like Wynnbuilder) plus the free points you put in">
+            Required {skillPoints.minimum} + free {skillPoints.required - skillPoints.minimum}
+          </span>
+          <span className="tabular-nums text-zinc-100">
+            {skillPoints.required} / {skillPoints.available}
+          </span>
+        </div>
+        <div className="mc-bar mt-1">
+          <div className="mc-bar-fill" style={ts({ width: `${usedPct}%`, background: skillPoints.valid ? "#7FE828" : "#FF5555" })} />
+        </div>
+        <p className="mt-1 text-xs" style={ts({ color: left < 0 ? "#FF5555" : undefined })}>
+          <span className={left < 0 ? "" : "text-zinc-500"}>{left < 0 ? `${-left} points over your level's budget.` : `${left} free point${left === 1 ? "" : "s"} left to spread.`}</span>
+        </p>
+      </div>
+      {hint}
+      <ul className="flex flex-col gap-2">
+        {SKILLS.map((skill) => {
+          const free = (skillPoints.free && skillPoints.free[skill]) || 0;
+          const needed = skillPoints.assigned[skill] - free;
+          const set = (value) => onFree(skill, Math.max(0, Math.min(MAX_ASSIGNED_PER_SKILL, Math.round(Number(value) || 0))));
+          return (
+            <li key={skill} className="grid grid-cols-12 items-center gap-2 text-xs">
+              <span className="col-span-3 truncate" style={ts({ color: SKILL_STYLE[skill].color })} title={SKILL_LABELS[skill]}>
+                {SKILL_STYLE[skill].symbol} {SKILL_STYLE[skill].short}
+              </span>
+              <span className="col-span-2 text-right tabular-nums text-zinc-400" title="Assigned for the items' requirements">
+                {needed}
+              </span>
+              <span className="col-span-5 flex items-center justify-center gap-1">
+                <button type="button" className="mc-btn mc-btn-sm px-2" onClick={() => set(free - 1)} disabled={free <= 0} aria-label={`One free point less in ${SKILL_LABELS[skill]}`}>
+                  −
+                </button>
+                <input value={free} onChange={(event) => set(event.target.value.replace(/[^0-9]/g, ""))} inputMode="numeric" className="mc-input w-12 text-center" aria-label={`Free points in ${SKILL_LABELS[skill]}`} />
+                <button type="button" className="mc-btn mc-btn-sm px-2" onClick={() => set(free + 1)} aria-label={`One free point more in ${SKILL_LABELS[skill]}`}>
+                  +
+                </button>
+              </span>
+              <span className="col-span-2 text-right tabular-nums text-zinc-200" title="Total with item (and tome) bonuses">
+                {skillPoints.totals[skill]}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+      <p className="text-xs text-zinc-500" title="Max 100 assigned per skill.">
+        Required · free (yours) · total with items{skillPoints.tomeSkills && SKILLS.some((skill) => skillPoints.tomeSkills[skill]) ? " and tomes" : ""}.
+      </p>
+    </section>
+  );
+}
+
+// Tomy ustawiane ręcznie: sloty otwarte na tym poziomie (jak w grze), tomy do poziomu postaci.
+function ManualTomesPanel({ ws, level, onChange, hint = null }) {
+  return (
+    <section className="mc-panel flex flex-col gap-4 p-4">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h3 className="mc-title text-sm uppercase">Tomes · yours</h3>
+        <span className="text-xs text-zinc-500">Slots open at level {level}; tomes up to level {level}.</span>
+      </div>
+      {hint}
+      {TOME_SLOTS.map((slot) => {
+        const open = tomeSlotsOpen(slot, level);
+        const chosen = (ws.tomes && ws.tomes[slot.id]) || [];
+        const pool = TOME_DB.filter((tome) => tome.tomeSlot === slot.id && tome.level <= level).sort((a, b) => b.level - a.level || a.name.localeCompare(b.name));
+        return (
+          <div key={slot.id} className="flex flex-col gap-2">
+            <span className="text-sm text-zinc-200">
+              {slot.label} <span className="text-xs text-zinc-500">· {slot.purpose}</span>
+            </span>
+            {slot.unlocks.map((unlock, index) => {
+              const name = chosen[index] || "";
+              const tome = name ? TOME_BY_NAME.get(name) : null;
+              const locked = index >= open;
+              return (
+                <div key={index} className="flex flex-col gap-1">
+                  <select
+                    value={locked ? "" : name}
+                    disabled={locked}
+                    onChange={(event) => onChange(slot.id, index, event.target.value || null)}
+                    className="mc-input w-full"
+                    aria-label={`${slot.label} tome ${index + 1}`}
+                  >
+                    <option value="">{locked ? `Unlocks at level ${unlock}` : "— empty —"}</option>
+                    {pool.map((entry) => (
+                      <option key={entry.name} value={entry.name}>
+                        {entry.name} (lv {entry.level})
+                      </option>
+                    ))}
+                  </select>
+                  {tome && !locked && (
+                    <span className="text-xs text-zinc-400">
+                      {ID_DISPLAY.filter((display) => tome.ids[display.key])
+                        .map((display) => `${formatStatValue(display.key, tome.ids[display.key])} ${STAT_META[display.key] ? STAT_META[display.key].label : display.key}`)
+                        .join(" · ") || "No identifications the model uses."}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        );
+      })}
+    </section>
+  );
+}
+
+// Aspekty ustawiane ręcznie: sloty otwarte na tym poziomie, jeden aspekt najwyżej raz, tier do wyboru.
+function ManualAspectsPanel({ ws, level, onChange, hint = null }) {
+  const pool = ASPECT_DB[ws.playerClass] || [];
+  const open = aspectSlotsOpen(level);
+  const list = ws.aspects || [];
+  const setAt = (index, value) => {
+    const next = Array.from({ length: Math.max(list.length, index + 1) }, (_, at) => list[at] || null);
+    next[index] = value;
+    onChange(next);
+  };
+  return (
+    <section className="mc-panel flex flex-col gap-4 p-4">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h3 className="mc-title text-sm uppercase">Aspects · yours</h3>
+        <span className="text-xs text-zinc-500">
+          {open} slot{open === 1 ? "" : "s"} at level {level}. {ASPECT_RAID_RANK_NOTE}
+        </span>
+      </div>
+      {hint}
+      {ASPECT_SLOT_UNLOCKS.map((unlock, index) => {
+        const entry = list[index] && list[index].name ? list[index] : null;
+        const aspect = entry ? pool.find((candidate) => candidate.name === entry.name) : null;
+        const tier = aspect ? Math.max(1, Math.min(aspect.tiers.length, entry.tier || aspect.tiers.length)) : 1;
+        const locked = index >= open;
+        const used = new Set(list.filter((other, at) => other && at !== index).map((other) => other.name));
+        return (
+          <div key={index} className="flex flex-col gap-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="w-14 text-xs text-zinc-500">Slot {index + 1}</span>
+              <select
+                value={locked ? "" : entry ? entry.name : ""}
+                disabled={locked}
+                onChange={(event) => {
+                  const picked = pool.find((candidate) => candidate.name === event.target.value);
+                  setAt(index, picked ? { name: picked.name, tier: picked.tiers.length } : null);
+                }}
+                className="mc-input min-w-0 flex-1"
+                aria-label={`Aspect slot ${index + 1}`}
+              >
+                <option value="">{locked ? `Unlocks at level ${unlock}` : "— empty —"}</option>
+                {pool.map((candidate) => (
+                  <option key={candidate.name} value={candidate.name} disabled={used.has(candidate.name)}>
+                    {candidate.name} ({candidate.tier})
+                  </option>
+                ))}
+              </select>
+              {aspect && !locked && (
+                <select value={tier} onChange={(event) => setAt(index, { name: aspect.name, tier: Number(event.target.value) })} className="mc-input" aria-label={`Tier of ${aspect.name}`}>
+                  {aspect.tiers.map((_, at) => (
+                    <option key={at} value={at + 1}>
+                      Tier {ROMAN[at]}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+            {aspect && !locked && <span className="pl-16 text-xs text-zinc-400">{(aspect.tiers[tier - 1].text || []).join(" ")}</span>}
+          </div>
+        );
+      })}
+    </section>
+  );
+}
+
+// Setup trybu: kolejność z specyfikacji (Optimizer: klasa → archetyp → ranga → poziom; Creator: klasa → ranga → poziom).
+function WorkspaceSetup({ mode, ws, onWs }) {
+  const [levelText, setLevelText] = useState(ws.level ? String(ws.level) : "");
+  useEffect(() => setLevelText(ws.level ? String(ws.level) : ""), [ws.level]);
+  const archetypes = ws.playerClass ? CLASSES[ws.playerClass].archetypes : [];
+  const setClass = (name) =>
+    onWs((current) => (current.playerClass === name ? current : { ...current, playerClass: name, archetype: "", tree: [], treeFx: {}, aspects: [] }));
+  const archetypeBlock = ws.playerClass ? (
+    <div className="flex flex-col gap-2">
+      <span className="text-xs text-zinc-300">
+        Archetype{mode === "creator" ? <span className="text-zinc-500"> (optional: Build info and guide builds)</span> : ""}
+      </span>
+      <div className="grid grid-cols-3 gap-1.5">
+        {archetypes.map((arch) => (
+          <button
+            key={arch}
+            type="button"
+            onClick={() => onWs((current) => ({ ...current, archetype: current.archetype === arch && mode === "creator" ? "" : arch }))}
+            className={`mc-btn mc-btn-sm flex w-full items-center justify-center px-1 text-center leading-tight ${ws.archetype === arch ? "mc-btn-on" : ""}`}
+            style={{ whiteSpace: "normal", minHeight: 36, fontSize: 14, overflowWrap: "anywhere" }}
+            aria-pressed={ws.archetype === arch}
+          >
+            {arch}
+          </button>
+        ))}
+      </div>
+    </div>
+  ) : null;
+  const rankBlock = (
+    <label className="flex flex-col gap-1 text-xs text-zinc-300">
+      Rank
+      <select value={ws.rank || "none"} onChange={(event) => onWs((current) => ({ ...current, rank: event.target.value }))} className="mc-input w-full" aria-label="Rank">
+        {RANKS.map((entry) => (
+          <option key={entry.id} value={entry.id}>
+            {entry.label}
+            {entry.loan ? ` (+${entry.loan} AP early)` : ""}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+  const levelBlock = (
+    <label className="flex flex-col gap-1 text-xs text-zinc-300">
+      Level
+      <input
+        value={levelText}
+        onChange={(event) => {
+          const text = event.target.value.replace(/[^0-9]/g, "").slice(0, 3);
+          setLevelText(text);
+          onWs((current) => ({ ...current, level: text === "" ? null : clampLevel(text) }));
+        }}
+        placeholder="1-120 (empty = 120)"
+        inputMode="numeric"
+        className="mc-input w-full"
+        aria-label="Level"
+      />
+    </label>
+  );
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-2">
+        <span className="text-xs text-zinc-300">Class{mode === "creator" ? <span className="text-zinc-500"> (or pick a weapon - it sets the class)</span> : ""}</span>
+        <div className="grid grid-cols-3 gap-1.5">
+          {Object.keys(CLASSES).map((name) => (
+            <button key={name} type="button" onClick={() => setClass(name)} className={`mc-btn mc-btn-sm flex w-full items-center justify-center px-1 ${ws.playerClass === name ? "mc-btn-on" : ""}`} aria-pressed={ws.playerClass === name}>
+              {name}
+            </button>
+          ))}
+        </div>
+      </div>
+      {mode === "optimizer" && archetypeBlock}
+      <div className="grid grid-cols-2 gap-2">
+        {rankBlock}
+        {levelBlock}
+      </div>
+      {mode === "creator" && archetypeBlock}
+    </div>
+  );
+}
+
+// Zapisane buildy Creatora, import z linku Wynnbuildera i nazwa buildu.
+function CreatorFiles({ ws, onWs, onLoad }) {
+  const [saved, setSaved] = useState(loadSavedBuilds);
+  const [message, setMessage] = useState("");
+  const [importText, setImportText] = useState("");
+  const [importNotes, setImportNotes] = useState([]);
+  const save = () => {
+    const name = (ws.name || "").trim() || `${ws.playerClass || "Build"} ${ws.level || 120}`;
+    const entry = { name, savedAt: Date.now(), ws: { ...ws, name } };
+    const next = [entry, ...saved.filter((other) => other.name !== name)].slice(0, 50);
+    if (storeSavedBuilds(next)) {
+      setSaved(next);
+      onWs((current) => ({ ...current, name }));
+      setMessage(`Saved "${name}" in this browser.`);
+    } else setMessage("This browser doesn't allow saving (private mode?).");
+  };
+  const remove = (name) => {
+    const next = saved.filter((other) => other.name !== name);
+    storeSavedBuilds(next);
+    setSaved(next);
+    setMessage(`Deleted "${name}".`);
+  };
+  const runImport = () => {
+    try {
+      const { ws: loaded, notes } = workspaceFromWynnbuilderLink(importText);
+      onLoad({ ...loaded, rank: ws.rank }, "the Wynnbuilder link");
+      setImportNotes(notes);
+      setImportText("");
+      setMessage(`Imported from Wynnbuilder${loaded.playerClass ? ` (${loaded.playerClass}, level ${loaded.level})` : ""}.`);
+    } catch (error) {
+      setImportNotes([]);
+      setMessage(error.message);
+    }
+  };
+  return (
+    <div className="flex flex-col gap-3">
+      <label className="flex flex-col gap-1 text-xs text-zinc-300">
+        Build name
+        <div className="flex gap-2">
+          <input value={ws.name || ""} onChange={(event) => onWs((current) => ({ ...current, name: event.target.value.slice(0, 60) }))} placeholder="My build" className="mc-input min-w-0 flex-1" aria-label="Build name" />
+          <button type="button" onClick={save} className="mc-btn mc-btn-sm mc-btn-primary">
+            Save
+          </button>
+        </div>
+      </label>
+      {saved.length > 0 && (
+        <details className="mc-slot p-2" open={saved.length <= 4}>
+          <summary className="cursor-pointer text-xs text-zinc-300">Saved builds ({saved.length})</summary>
+          <ul className="mc-divide mt-2 flex flex-col">
+            {saved.map((entry) => (
+              <li key={entry.name} className="flex items-center justify-between gap-2 py-1.5 text-sm">
+                <span className="min-w-0 truncate text-zinc-100" title={new Date(entry.savedAt).toLocaleString()}>
+                  {entry.name}
+                  <span className="text-xs text-zinc-500">
+                    {" "}
+                    · {entry.ws.playerClass || "?"} {entry.ws.level || 120}
+                  </span>
+                </span>
+                <span className="flex flex-shrink-0 gap-1">
+                  <button type="button" onClick={() => onLoad(sanitizeWorkspace(entry.ws), `"${entry.name}"`)} className="mc-btn mc-btn-sm">
+                    Load
+                  </button>
+                  <button type="button" onClick={() => remove(entry.name)} className="mc-btn mc-btn-sm" aria-label={`Delete ${entry.name}`} title="Delete from this browser">
+                    ✕
+                  </button>
+                </span>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+      <label className="flex flex-col gap-1 text-xs text-zinc-300">
+        Import from Wynnbuilder
+        <div className="flex gap-2">
+          <input value={importText} onChange={(event) => setImportText(event.target.value)} placeholder="https://wynnbuilder.github.io/builder/#..." className="mc-input min-w-0 flex-1" aria-label="Wynnbuilder link" spellCheck={false} />
+          <button type="button" onClick={runImport} disabled={!importText.trim()} className="mc-btn mc-btn-sm">
+            Import
+          </button>
+        </div>
+      </label>
+      {message && <p className="text-xs text-emerald-300">{message}</p>}
+      {importNotes.map((note) => (
+        <p key={note} className="text-xs text-amber-300">
+          {note}
+        </p>
+      ))}
+    </div>
+  );
+}
+
+// ============================ BUILD OPTIMIZER: interfejs ============================
+// Panel "2 · Optimize" w lewej kolumnie, okno parametrów (cel, żywioły, Damage ↔ EHP, mana, filtry, zakres zmian),
+// postęp szukania (etapy, licznik kombinacji, szacowany czas, Stop) i lista zmian nad slotami (Accept / Discard).
+const OPT_PARAMS_KEY = "wbr-optimizer-params-v1";
+const OPT_SCOPE = [
+  ["slots", "Empty item slots"],
+  ["tree", "Free ability points"],
+  ["tomes", "Tomes"],
+  ["aspects", "Aspects"],
+  ["sp", "Skill points"],
+  ["powders", "Weapon powders"],
+  ["swaps", "Swap recommendations for your items"],
+];
+const OPT_STAGES = [
+  ["tree", "Tree"],
+  ["items", "Items"],
+  ["tomes", "Tomes"],
+  ["aspects", "Aspects"],
+  ["check", "Check"],
+];
+const DEFAULT_OPT_PARAMS = {
+  goal: [],
+  elements: [],
+  blend: 0,
+  cycle: "",
+  cps: 3,
+  drain: 0,
+  sustain: false,
+  negDef: false,
+  listed: false,
+  speeds: [],
+  freeSp: true,
+  tradeable: false,
+  noEvents: true,
+  scope: Object.fromEntries(OPT_SCOPE.map(([id]) => [id, true])),
+};
+function loadOptParams() {
+  try {
+    const raw = JSON.parse(window.localStorage.getItem(OPT_PARAMS_KEY) || "null");
+    if (!raw || typeof raw !== "object") return DEFAULT_OPT_PARAMS;
+    return { ...DEFAULT_OPT_PARAMS, ...raw, scope: { ...DEFAULT_OPT_PARAMS.scope, ...(raw.scope || {}) } };
+  } catch (error) {
+    return DEFAULT_OPT_PARAMS;
+  }
+}
+function saveOptParams(params) {
+  try {
+    window.localStorage.setItem(OPT_PARAMS_KEY, JSON.stringify(params));
+  } catch (error) {
+    // parametry tylko na tę sesję
+  }
+}
+// Cele do wyboru: czary z drzewka, jakie Optimize najpewniej złoży (węzły gracza + propozycja), i main attack.
+const OPT_GOAL_CACHE = new Map();
+function optGoalOptions(ws) {
+  if (!ws.playerClass || !CLASSES[ws.playerClass]) return [];
+  const level = ws.level || 120;
+  const seed = workspaceTreeIds(ws);
+  const key = JSON.stringify([ws.playerClass, level, ws.rank, seed, workspaceArchetype(ws)]);
+  if (OPT_GOAL_CACHE.has(key)) return OPT_GOAL_CACHE.get(key);
+  const filled = suggestAbilityTree(ws.playerClass, workspaceArchetype(ws), workspaceApCap(ws), null, seed).ids;
+  const own = new Set(damageGoalOptions(ws.playerClass, level, { selected: seed, toggles: {}, sliders: {} }).map((entry) => entry.id));
+  const options = damageGoalOptions(ws.playerClass, level, { selected: filled, toggles: {}, sliders: {} }).map((entry) => ({ ...entry, fromFill: !own.has(entry.id) }));
+  if (OPT_GOAL_CACHE.size > 30) OPT_GOAL_CACHE.clear();
+  OPT_GOAL_CACHE.set(key, options);
+  return options;
+}
+// Cel z parametrów; bez wyboru - najmocniejszy czar (albo main attack).
+function optParamsForRun(ws, params) {
+  const options = optGoalOptions(ws);
+  const valid = (params.goal || []).filter((id) => options.some((entry) => entry.id === id));
+  const goal = valid.length > 0 ? valid : options.length > 0 ? [options[0].id] : [DAMAGE_GOAL_MAIN];
+  return { ...params, goal };
+}
+// Odcisk wejść Optimize: build i parametry. Ten sam odcisk co przy ostatnim Optimize = kłódka.
+function optFingerprint(ws, params) {
+  return inputsFingerprint({
+    ws: { c: ws.playerClass, a: ws.archetype, r: ws.rank, l: ws.level, t: ws.tree, fx: ws.treeFx, i: ws.items, p: ws.powders, ro: ws.rolls, to: ws.tomes, as: ws.aspects, f: ws.freeSp },
+    params,
+  });
+}
+// Liczby "przed → po" w wierszu Statystyki: surowe obrażenia celu, EHP, bilans many cyklu, życie.
+function optSummary(ws, params) {
+  const build = manualBuild(ws);
+  if (!build) return null;
+  const weapon = (build.slots.find((slot) => slot.id === "weapon") || {}).item || null;
+  const items = build.slots.filter((slot) => slot.item).map((slot) => slot.item);
+  const tomes = (build.tomes || []).filter((tome) => SKILLS.every((skill) => !(tome.ids && tome.ids[skill])));
+  const ctx = damageGoalContext(build.playerClass, build.level, build.treeSettings);
+  const goal = params.goal.length === 1 ? params.goal[0] : params.goal;
+  const cycle = normalizeCycle({ ids: parseCycle(params.cycle || ""), cps: Math.max(1, Number(params.cps) || 3), drain: Math.max(0, Number(params.drain) || 0) });
+  if (!weapon) return { damage: 0, ehp: 0, manaNet: null, sustain: 0, valid: build.skillPoints.valid };
+  const metrics = evaluateGoal(ctx, [...items, ...tomes], weapon, build.skillPoints.totals, goal, cycle);
+  return { damage: metrics.damage, name: metrics.goalName, ehp: metrics.ehp, manaNet: cycle.ids.length > 0 ? metrics.manaNet : null, sustain: metrics.sustain, valid: build.skillPoints.valid };
+}
+function formatDuration(ms) {
+  if (!Number.isFinite(ms)) return "unknown";
+  const seconds = Math.max(1, Math.round(ms / 1000));
+  if (seconds < 90) return `${seconds} s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 90) return `${minutes} min`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours} h`;
+  return `${Math.round(hours / 24)} days`;
+}
+function formatCount(value) {
+  if (!Number.isFinite(value)) return "?";
+  if (value >= 1e9) return `${(value / 1e9).toFixed(value >= 1e10 ? 0 : 1)} bn`;
+  if (value >= 1e6) return `${(value / 1e6).toFixed(value >= 1e7 ? 0 : 1)} M`;
+  if (value >= 1e4) return `${Math.round(value / 1e3)}k`;
+  return Math.round(value).toLocaleString("en-US");
+}
+
+// Panel w lewej kolumnie Optimizera: co Optimize może uzupełnić, przycisk, skrót postępu.
+function OptimizeAside({ gaps, build, locked, onOpen, run, onStop, proposal }) {
+  const parts = [];
+  if (gaps.emptySlots.length) parts.push(`${gaps.emptySlots.length} empty slot${gaps.emptySlots.length === 1 ? "" : "s"}`);
+  if (gaps.freeAp) parts.push(`${gaps.freeAp} free AP`);
+  if (gaps.freeSp) parts.push(`${gaps.freeSp} free skill points`);
+  if (gaps.emptyTomes.length) parts.push(`${gaps.emptyTomes.length} empty tome slots`);
+  if (gaps.emptyAspects.length) parts.push(`${gaps.emptyAspects.length} empty aspect slots`);
+  if (gaps.weaponPowders) parts.push("weapon powders");
+  const stage = run && run.progress ? OPT_STAGES.find(([id]) => id === run.progress.stage) : null;
+  return (
+    <section className="mc-panel flex flex-col gap-3 p-4">
+      <h2 className="mc-title text-sm uppercase">2 · Optimize</h2>
+      <p className="text-xs text-zinc-400">
+        {parts.length > 0 ? `Optimize can fill: ${parts.join(", ")}` : "Nothing is empty"} - and recommend swaps for your own items. Nothing changes until you press Accept changes.
+      </p>
+      {run && run.running ? (
+        <div className="flex flex-col gap-2">
+          <p className="text-sm text-amber-300">Optimizing · {stage ? stage[1] : "…"}</p>
+          <button type="button" onClick={onOpen} className="mc-btn mc-btn-sm">
+            Show progress
+          </button>
+          <button type="button" onClick={onStop} className="mc-btn mc-btn-sm">
+            Stop
+          </button>
+        </div>
+      ) : (
+        <button type="button" onClick={onOpen} disabled={!build || !build.playerClass} className="mc-btn mc-btn-primary w-full" title={locked ? "Change the build or the parameters to optimize again" : "Choose the goal and what Optimize may fill"}>
+          {locked ? "🔒 " : ""}Optimize ⚒
+        </button>
+      )}
+      {locked && !(run && run.running) && <p className="text-xs text-zinc-500">Change the build or the parameters to optimize again.</p>}
+      {proposal && <p className="text-xs text-emerald-300">Proposed changes are waiting above your items: check the ones you want and press Accept changes.</p>}
+    </section>
+  );
+}
+
+// Okno parametrów Optimize i postępu szukania.
+function OptimizeDialog({ ws, gaps, params, onParams, onStart, onClose, run, onStop, locked }) {
+  const goals = useMemo(() => optGoalOptions(ws), [ws]);
+  const set = (patch) => onParams({ ...params, ...patch });
+  const running = Boolean(run && run.running);
+  useEffect(() => {
+    if (running) return undefined;
+    const onKey = (event) => event.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [running, onClose]);
+  const selectedGoals = (params.goal || []).filter((id) => goals.some((entry) => entry.id === id));
+  const effectiveGoals = selectedGoals.length > 0 ? selectedGoals : goals.length > 0 ? [goals[0].id] : [];
+  const cycleIds = parseCycle(params.cycle || "");
+  const weaponEmpty = !(ws.items && ws.items.weapon);
+  const progress = run && run.progress ? run.progress : null;
+  const stageIndex = progress ? OPT_STAGES.findIndex(([id]) => id === progress.stage) : -1;
+  const hl = (text) => <b className="wbr-welcome-hl">{text}</b>;
+  return (
+    <div className="wbr-backdrop fixed inset-0 z-50 flex items-start justify-center overflow-y-auto px-4 py-6" role="dialog" aria-modal="true" aria-label="Optimize">
+      <div className="wbr-pop mc-panel flex w-full max-w-3xl flex-col gap-4 p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h2 className="mc-title text-lg">Optimize</h2>
+            <p className="text-sm text-zinc-400">Your items, nodes, tomes, aspects and points stay. Optimize fills what's empty and lists every change for you to accept.</p>
+          </div>
+          {!running && (
+            <button type="button" autoFocus onClick={onClose} className="mc-btn mc-btn-sm">
+              Close
+            </button>
+          )}
+        </div>
+
+        {running ? (
+          <div className="flex flex-col gap-4">
+            <ol className="flex flex-wrap gap-2" aria-label="Stages">
+              {OPT_STAGES.map(([id, label], index) => (
+                <li key={id} className={`wbr-step ${index < stageIndex ? "wbr-step-done" : ""} ${index === stageIndex ? "wbr-step-on" : ""}`}>
+                  <span className="wbr-step-num">{index + 1}</span>
+                  {label}
+                </li>
+              ))}
+            </ol>
+            {progress && progress.stage === "items" && progress.total > 0 && (
+              <div className="flex flex-col gap-2">
+                <div className="flex flex-wrap items-baseline justify-between gap-2 text-sm">
+                  <span className="text-zinc-300">
+                    {progress.note || "Searching"} · <span className="tabular-nums text-zinc-100">{formatCount(progress.checked || 0)}</span> / {formatCount(progress.total)} combinations checked
+                  </span>
+                  <span className="tabular-nums text-zinc-400">
+                    {progress.etaMs ? `about ${formatDuration(progress.etaMs)} left` : ""}
+                    {progress.threads ? ` · ${progress.threads} thread${progress.threads === 1 ? "" : "s"}` : ""}
+                  </span>
+                </div>
+                <div className="mc-bar">
+                  <div className="mc-bar-fill" style={ts({ width: `${Math.min(100, ((progress.checked || 0) / progress.total) * 100)}%`, background: "#7FE828" })} />
+                </div>
+                <p className="text-xs text-zinc-500">
+                  Every item that fits an empty slot is a candidate (rings as pairs); items that are worse in everything the model counts are dropped first. Whole branches are skipped only when even their best case can't beat the best build found so far.
+                </p>
+              </div>
+            )}
+            {progress && progress.stage !== "items" && <p className="text-sm text-zinc-300">{stageIndex >= 0 ? `${OPT_STAGES[stageIndex][1]}…` : "Working…"}</p>}
+            {run.choice && (
+              <div className="wbr-info-note flex flex-col gap-2 text-sm">
+                <p>
+                  The full search would take {hl(`about ${formatDuration(run.choice.etaMs)}`)} ({formatCount(run.choice.total)} combinations on {run.choice.threads} thread{run.choice.threads === 1 ? "" : "s"}) - over the {OPT_TIME_LIMIT_S / 60}-minute limit.
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <button type="button" onClick={() => run.choice.resolve("full")} className="mc-btn">
+                    Continue full search
+                  </button>
+                  <button type="button" onClick={() => run.choice.resolve("quick")} className="mc-btn mc-btn-primary">
+                    Quick mode
+                  </button>
+                </div>
+                <p className="text-xs text-zinc-400">Quick mode = the Recommender's search around your items: seconds, usually within a few % of the best, but no guarantee.</p>
+              </div>
+            )}
+            <button type="button" onClick={onStop} className="mc-btn self-start" title="Stop and use the best build found so far (marked as not a full search)">
+              Stop
+            </button>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-4">
+            <div className="flex flex-col gap-2">
+              <span className="text-xs text-zinc-300">Damage goal (one or more - their sum)</span>
+              <div className="flex flex-wrap gap-2">
+                {goals.map((entry) => (
+                  <ToggleChip
+                    key={entry.id}
+                    pressed={effectiveGoals.includes(entry.id)}
+                    onClick={() => {
+                      const current = effectiveGoals;
+                      const next = current.includes(entry.id) ? current.filter((id) => id !== entry.id) : [...current, entry.id];
+                      set({ goal: next.length > 0 ? next : current });
+                    }}
+                    title={entry.fromFill ? "Not in your tree yet - Optimize adds it with your free AP" : undefined}
+                  >
+                    {entry.name}
+                    {entry.fromFill ? " +" : ""}
+                  </ToggleChip>
+                ))}
+              </div>
+              {goals.length === 0 && <p className="text-xs text-zinc-500">Pick your class first.</p>}
+            </div>
+            <div className="flex flex-col gap-2">
+              <span className="text-xs text-zinc-300">Damage element focus (the weapon deals it; powders use it)</span>
+              <div className="flex flex-wrap gap-2">
+                {ELEMENTS.map((element) => (
+                  <ToggleChip key={element} pressed={params.elements.includes(element)} color={ELEMENT_STYLE[element].color} onClick={() => set({ elements: toggleValue(params.elements, element) })}>
+                    {ELEMENT_STYLE[element].symbol} {ELEMENT_STYLE[element].label}
+                  </ToggleChip>
+                ))}
+              </div>
+            </div>
+            <label className="flex flex-col gap-1 text-xs text-zinc-300">
+              <span className="flex items-baseline justify-between">
+                <span>Damage ↔ Effective HP</span>
+                <span className="tabular-nums text-zinc-100">{params.blend === 0 ? "pure damage" : params.blend === 100 ? "pure EHP" : `${100 - params.blend}% damage · ${params.blend}% EHP`}</span>
+              </span>
+              <input type="range" min={0} max={100} step={5} value={params.blend} onChange={(event) => set({ blend: Number(event.target.value) })} className="mc-range w-full" aria-label="Damage to EHP balance" style={{ "--mc-fill": `${params.blend}%` }} />
+            </label>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <label className="flex flex-col gap-1 text-xs text-zinc-300">
+                Spell cycle (1-4, M)
+                <input value={params.cycle} onChange={(event) => set({ cycle: event.target.value.toUpperCase().replace(/[^1-4M]/g, "").slice(0, 16) })} placeholder="e.g. 1M2M" className="mc-input" aria-label="Spell cycle" />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-zinc-300">
+                Clicks per second
+                <input value={params.cps} onChange={(event) => set({ cps: event.target.value.replace(/[^0-9.]/g, "").slice(0, 4) })} inputMode="decimal" className="mc-input" aria-label="Clicks per second" disabled={cycleIds.length === 0} />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-zinc-300">
+                Allowed mana drain (/s)
+                <input value={params.drain} onChange={(event) => set({ drain: event.target.value.replace(/[^0-9.]/g, "").slice(0, 5) })} inputMode="decimal" className="mc-input" aria-label="Allowed mana drain" disabled={cycleIds.length === 0} />
+              </label>
+            </div>
+            <p className="-mt-2 text-xs text-zinc-500">Mana steal counts only from M hits in the cycle. No cycle = no mana filter.</p>
+            {weaponEmpty && (
+              <div className="flex flex-col gap-2">
+                <span className="text-xs text-zinc-300">Weapon attack speed (your weapon slot is empty)</span>
+                <div className="flex flex-wrap gap-2">
+                  {ATTACK_SPEEDS.map((speed) => (
+                    <ToggleChip key={speed} pressed={params.speeds.includes(speed)} onClick={() => set({ speeds: toggleValue(params.speeds, speed) })}>
+                      {ATTACK_SPEED_LABELS[speed]}
+                    </ToggleChip>
+                  ))}
+                </div>
+              </div>
+            )}
+            <div className="grid grid-cols-1 gap-x-4 gap-y-1 sm:grid-cols-2">
+              <CheckRow checked={params.sustain} onChange={() => set({ sustain: !params.sustain })} label="Life sustain" hint="Life Steal + Health Regen > 0" />
+              <CheckRow checked={params.negDef} onChange={() => set({ negDef: !params.negDef })} label="Avoid negative defences" />
+              {hasLiveData() && <CheckRow checked={params.listed} onChange={() => set({ listed: !params.listed })} label="Trade Market: listed today" />}
+              <CheckRow checked={params.freeSp} onChange={() => set({ freeSp: !params.freeSp })} label="Spend free skill points" />
+              <CheckRow checked={params.tradeable} onChange={() => set({ tradeable: !params.tradeable })} label="No untradeable items" hint="picked items only" />
+              <CheckRow checked={params.noEvents} onChange={() => set({ noEvents: !params.noEvents })} label="No limited-time items" hint="picked items only" />
+            </div>
+            <div className="flex flex-col gap-1">
+              <span className="text-xs text-zinc-300">What Optimize may change</span>
+              <div className="grid grid-cols-1 gap-x-4 gap-y-1 sm:grid-cols-2">
+                {OPT_SCOPE.map(([id, label]) => (
+                  <CheckRow
+                    key={id}
+                    checked={params.scope[id] !== false}
+                    onChange={() => set({ scope: { ...params.scope, [id]: params.scope[id] === false } })}
+                    label={label}
+                    hint={
+                      id === "slots"
+                        ? `${gaps.emptySlots.length} empty`
+                        : id === "tree"
+                          ? `${gaps.freeAp} free AP`
+                          : id === "tomes"
+                            ? `${gaps.emptyTomes.length} empty`
+                            : id === "aspects"
+                              ? `${gaps.emptyAspects.length} empty`
+                              : id === "sp"
+                                ? `${gaps.freeSp} free`
+                                : id === "powders"
+                                  ? gaps.weaponPowders
+                                    ? "your weapon has none"
+                                    : weaponEmpty
+                                      ? "for the picked weapon"
+                                      : "yours stay"
+                                  : "never applied on their own"
+                    }
+                  />
+                ))}
+              </div>
+            </div>
+            {run && run.error && <p className="text-sm text-red-400">{run.error}</p>}
+            <div className="flex flex-wrap items-center gap-3">
+              <button type="button" onClick={onStart} disabled={locked || goals.length === 0} className="mc-btn mc-btn-primary wbr-why-btn" title={locked ? "Change the build or the parameters to optimize again" : undefined}>
+                {locked ? "🔒 Optimize" : "Start optimizing ⚒"}
+              </button>
+              {locked && <span className="text-sm text-zinc-400">Change the build or the parameters to optimize again.</span>}
+            </div>
+            <p className="text-xs text-zinc-500">
+              Full search: every item that fits each empty slot is checked with the exact damage model. Before it starts you see the estimated time; over {OPT_TIME_LIMIT_S / 60} minutes you choose between the full search and quick mode.
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Lista zmian nad slotami: grupy obszarów, "dlaczego" przy każdej, odznaczanie; rekomendacje zamian osobno.
+const OPT_AREAS = [
+  ["slot", "Items"],
+  ["powders", "Powders"],
+  ["tree", "Ability tree"],
+  ["tome", "Tomes"],
+  ["aspect", "Aspects"],
+  ["sp", "Skill points"],
+];
+function OptimizeResult({ proposal, checked, onToggle, onAccept, onDiscard, before, after, stale }) {
+  const { result } = proposal;
+  const nothing = result.changes.length === 0 && result.swaps.length === 0;
+  const pct = (a, b) => (b > 0 ? ((a - b) / b) * 100 : 0);
+  const row = (change) => (
+    <li key={change.id} className="flex items-start gap-3 py-2">
+      <input type="checkbox" className="mc-check mt-1" checked={Boolean(checked[change.id])} onChange={() => onToggle(change.id)} aria-label={`Apply: ${change.label}`} />
+      <div className="flex min-w-0 flex-col gap-0.5">
+        <span className="text-sm text-zinc-100">
+          <span className="text-zinc-400">{change.label}:</span> {change.from ? <span className="text-zinc-300">{change.from}</span> : <i className="text-zinc-500">empty</i>} → <b className="text-amber-300">{change.to}</b>
+          {change.toPowders && change.area !== "powders" ? <span className="text-xs text-zinc-400"> ({change.toPowders})</span> : null}
+        </span>
+        <span className="text-xs text-zinc-400">{change.why}</span>
+      </div>
+    </li>
+  );
+  return (
+    <section className="mc-panel wbr-fade flex flex-col gap-3 p-4" aria-label="Proposed changes">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h2 className="mc-title text-lg">{nothing ? "Optimize result" : "Proposed changes"}</h2>
+        <span className="text-xs text-zinc-500">
+          {result.searchMode === "full" && result.complete ? "full search" : result.searchMode === "full" ? "stopped - not a full search" : "quick mode - no guarantee of the best"}
+          {result.total ? ` · ${formatCount(result.total)} combinations` : ""} · {formatDuration(result.ms)}
+        </span>
+      </div>
+      {!result.complete && result.searchMode === "full" && (
+        <p className="text-sm text-amber-300">The search was stopped before the end: these changes come from the best build found so far, not from a full search.</p>
+      )}
+      {stale && <p className="text-sm text-amber-300">Your build changed after Optimize started; the changes are applied to the build as it is now.</p>}
+      {nothing ? (
+        <p className="text-base text-emerald-300">Your build is already the best for these parameters.</p>
+      ) : (
+        <>
+          {before && after && (
+            <p className="text-sm text-zinc-300">
+              <span className="text-zinc-400">Stats:</span> {after.name || before.name || "goal"} <span className="tabular-nums">{formatNumber(Math.round(before.damage))}</span> →{" "}
+              <b className="tabular-nums text-amber-300">{formatNumber(Math.round(after.damage))}</b>{" "}
+              <span style={ts({ color: after.damage >= before.damage ? "#55FF55" : "#FF5555" })}>
+                ({pct(after.damage, before.damage) >= 0 ? "+" : ""}
+                {pct(after.damage, before.damage).toFixed(0)}%)
+              </span>
+              , EHP <span className="tabular-nums">{formatNumber(Math.round(before.ehp))}</span> → <span className="tabular-nums">{formatNumber(Math.round(after.ehp))}</span>
+              {before.manaNet !== null && after.manaNet !== null ? (
+                <>
+                  , mana/s <span className="tabular-nums">{before.manaNet.toFixed(1)}</span> → <span className="tabular-nums">{after.manaNet.toFixed(1)}</span>
+                </>
+              ) : null}
+              , life/s <span className="tabular-nums">{formatNumber(Math.round(before.sustain))}</span> → <span className="tabular-nums">{formatNumber(Math.round(after.sustain))}</span>
+              {!after.valid ? <span className="text-amber-300"> · the checked set is over the skill point budget</span> : null}
+            </p>
+          )}
+          {OPT_AREAS.map(([area, label]) => {
+            const list = result.changes.filter((change) => change.area === area);
+            if (list.length === 0) return null;
+            return (
+              <div key={area} className="flex flex-col">
+                <h3 className="mc-gold text-xs uppercase">{label}</h3>
+                <ul className="mc-divide flex flex-col">{list.map(row)}</ul>
+              </div>
+            );
+          })}
+          {result.swaps.length > 0 && (
+            <div className="flex flex-col">
+              <h3 className="mc-gold text-xs uppercase">You could also swap</h3>
+              <p className="text-xs text-zinc-500">Your own items stay unless you check a swap here.</p>
+              <ul className="mc-divide flex flex-col">{result.swaps.map(row)}</ul>
+            </div>
+          )}
+        </>
+      )}
+      <div className="flex flex-wrap gap-2">
+        {!nothing && (
+          <button type="button" onClick={onAccept} className="mc-btn mc-btn-primary">
+            Accept changes
+          </button>
+        )}
+        <button type="button" onClick={onDiscard} className="mc-btn">
+          {nothing ? "Close" : "Discard"}
+        </button>
+      </div>
+    </section>
+  );
+}
+
+const WORKSPACE_TABS = [
+  ["build", "Build", "◈"],
+  ["tree", "Ability tree", "❋"],
+  ["aspects", "Aspects", "✧"],
+  ["tomes", "Tomes", "❖"],
+  ["guides", "Guide builds", "★"],
+  ["solver", "Build Solver", "⚙"],
+  ["info", "Build info", "☰"],
+];
+
+// Creator i Optimizer: ten sam edytor buildu gracza. Optimizer dokłada panel Optimize (optimizer.renderAside) i listę
+// zmian (optimizer.renderMain); podczas przeglądania zmian karty i statystyki pokazują build z zaznaczonymi zmianami.
+function ManualWorkspace({ mode, ws, onWs, tab, onTab, onSendToOptimizer = null, onEditInCreator = null, renderSolver = null, optimizer = null, initialUndo = null }) {
+  const [chooseFor, setChooseFor] = useState(null);
+  const [powdersFor, setPowdersFor] = useState(null);
+  const [rollsFor, setRollsFor] = useState(null);
+  const [openCards, setOpenCards] = useState({});
+  const [undo, setUndo] = useState(initialUndo); // { ws, label } - poprzedni build po wczytaniu / skopiowaniu innego
+  // podgląd Optimizera: build z zaznaczonymi zmianami (nie zapisany, dopóki gracz nie kliknie Accept changes)
+  const viewWs = (optimizer && optimizer.previewWs) || ws;
+  const previewing = viewWs !== ws;
+  const build = useMemo(() => manualBuild(viewWs), [viewWs]);
+  const stats = useMemo(() => (build ? computeBuildStats(build, build.treeSettings) : null), [build]);
+  const gaps = useMemo(() => workspaceGaps(ws, manualBuild(ws)), [ws]);
+  const extras = useMemo(() => workspaceExtras(viewWs), [viewWs]);
+  const level = build ? build.level : ws.level || 120;
+  const optimizerMode = mode === "optimizer";
+  const change = (patch) => onWs((current) => ({ ...current, ...(typeof patch === "function" ? patch(current) : patch) }));
+  const load = (next, label) => {
+    setUndo(workspaceHasContent(ws) ? { ws, label } : null);
+    onWs(next);
+    onTab("build");
+  };
+  const pickItem = (item, slotId) => {
+    setChooseFor(null);
+    onWs((current) => {
+      const next = { ...current, items: { ...current.items, [slotId]: item.name }, powders: { ...current.powders } };
+      if (current.items[slotId] !== item.name) delete next.powders[slotId];
+      if (slotId === "weapon" && !current.playerClass && WEAPON_CLASS[item.type]) next.playerClass = WEAPON_CLASS[item.type];
+      return next;
+    });
+  };
+  const removeItem = (slotId) =>
+    onWs((current) => {
+      const next = { ...current, items: { ...current.items }, powders: { ...current.powders } };
+      delete next.items[slotId];
+      delete next.powders[slotId];
+      return next;
+    });
+  const proposedSlots = (optimizer && optimizer.proposedSlots) || {};
+  const cardActions = previewing
+    ? { lockedSlots: new Set() }
+    : {
+        lockedSlots: new Set(),
+        onChoose: (slotId) => setChooseFor(slotId),
+        onRemove: removeItem,
+        onPowders: (slotId) => setPowdersFor(slotId),
+        onRolls: (slotId) => setRollsFor(slotId),
+        emptyHint: optimizerMode ? "Optimize will fill this slot for your goal." : null,
+      };
+  const treeIds = build ? build.treeSettings.selected : [];
+  const hint = (text) => (optimizerMode && text ? <FillHint>{text}</FillHint> : null);
+  const apHint = gaps.freeAp > 0 ? `Free AP: ${gaps.freeAp}. Optimize will fill them for your goal, without touching your nodes.` : null;
+  const extrasLockedNow = extrasLocked(level);
+  const filled = SLOTS.filter((slot) => viewWs.items && viewWs.items[slot.id]).length;
+
+  const chooseSlot = chooseFor ? SLOTS.find((slot) => slot.id === chooseFor) : null;
+  const powderSlot = powdersFor ? SLOTS.find((slot) => slot.id === powdersFor) : null;
+  const powderBase = powdersFor && ws.items[powdersFor] ? (ws.rolls[ws.items[powdersFor]] ? withRolls(ITEM_BY_NAME.get(ws.items[powdersFor]), ws.rolls[ws.items[powdersFor]]) : ITEM_BY_NAME.get(ws.items[powdersFor])) : null;
+  const rollsItem = rollsFor && build ? (build.slots.find((slot) => slot.id === rollsFor) || {}).item : null;
+
+  return (
+    <div className="flex flex-col gap-4 lg:grid lg:grid-cols-12 lg:items-start">
+      <aside className="flex flex-col gap-4 lg:col-span-4 xl:col-span-3">
+        <section className="mc-panel flex flex-col gap-4 p-4">
+          <div className="flex items-baseline justify-between gap-2">
+            <h2 className="mc-title text-sm uppercase">{optimizerMode ? "1 · Setup" : "Setup"}</h2>
+            {workspaceHasContent(ws) && (
+              <button type="button" onClick={() => load(emptyWorkspace(), "an empty build")} className="mc-link text-xs" title="Start again with an empty build (you can undo)">
+                New build
+              </button>
+            )}
+          </div>
+          <WorkspaceSetup mode={mode} ws={ws} onWs={onWs} />
+          {undo && (
+            <p className="text-xs text-zinc-400">
+              Loaded {undo.label}.{" "}
+              <button
+                type="button"
+                className="mc-link"
+                onClick={() => {
+                  onWs(undo.ws);
+                  setUndo(null);
+                }}
+              >
+                Undo
+              </button>
+            </p>
+          )}
+        </section>
+        {mode === "creator" && (
+          <section className="mc-panel flex flex-col gap-3 p-4">
+            <h2 className="mc-title text-sm uppercase">Save · import</h2>
+            <CreatorFiles ws={ws} onWs={onWs} onLoad={load} />
+          </section>
+        )}
+        {optimizerMode && optimizer && optimizer.renderAside && optimizer.renderAside({ build: manualBuild(ws), gaps })}
+        <p className="px-1 text-xs text-zinc-500">
+          <span className="mc-title uppercase">Item database</span> · Wynnbuilder {WYNNBUILDER_DATA.version} · <span className="tabular-nums text-zinc-300">{ITEM_DB.length.toLocaleString("en-US")}</span> items
+        </p>
+      </aside>
+
+      <main className="flex flex-col gap-4 lg:col-span-8 xl:col-span-9" aria-live="polite">
+        <div className="wbr-tabs" role="tablist" aria-label="Views">
+          {WORKSPACE_TABS.map(([id, label, icon]) => {
+            const lockedTab = (id === "aspects" || id === "tomes") && extrasLockedNow;
+            return (
+              <button
+                key={id}
+                type="button"
+                role="tab"
+                aria-selected={tab === id}
+                disabled={lockedTab && tab !== id}
+                onClick={() => onTab(id)}
+                className={`wbr-tab ${tab === id ? "wbr-tab-on" : ""}`}
+                title={lockedTab ? `${label} unlock at level ${RAID_CONTENT_MIN_LEVEL}.` : label}
+              >
+                <span className="wbr-tab-icon" aria-hidden="true">
+                  {icon}
+                </span>
+                {label}
+              </button>
+            );
+          })}
+        </div>
+
+        {optimizerMode && optimizer && optimizer.renderMain && optimizer.renderMain({ build, tab })}
+
+        {tab === "build" && !ws.playerClass && (
+          <section className="mc-panel flex flex-col gap-3 p-5">
+            <h2 className="mc-title text-xl">{optimizerMode ? "Start your build" : "Choose your class"}</h2>
+            <p className="text-sm text-zinc-300">
+              {optimizerMode
+                ? "Pick your class, archetype, rank and level on the left, then the ability tree and the items you already have. Leave the rest empty - Optimize fills it."
+                : "Pick the class on the left, or start from a weapon - its class becomes yours. You can also import a Wynnbuilder link or load a saved build."}
+            </p>
+            {!optimizerMode && (
+              <button type="button" onClick={() => setChooseFor("weapon")} className="mc-btn mc-btn-primary self-start">
+                Start from a weapon
+              </button>
+            )}
+          </section>
+        )}
+
+        {tab === "build" && ws.playerClass && build && (
+          <>
+            <section className="mc-panel flex flex-col gap-3 p-4">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <h2 className="mc-title text-xl">
+                  {ws.name || "Your build"}{" "}
+                  <span className="text-zinc-400">
+                    · {ws.archetype ? `${build.archetype} ` : ""}
+                    {build.playerClass} · level {build.level}
+                    {ws.level ? "" : " (no level set)"}
+                  </span>
+                </h2>
+                <p className="text-sm text-zinc-400">
+                  <span className="tabular-nums text-zinc-200">{filled}</span>/9 items · <span className="tabular-nums text-zinc-200">{build.apUsed}</span>/{build.apCap} AP · skill points{" "}
+                  <span className="tabular-nums" style={ts({ color: build.skillPoints.valid ? undefined : "#FF5555" })}>
+                    {build.skillPoints.required}/{build.skillPoints.available}
+                  </span>
+                </p>
+              </div>
+              {previewing && <p className="text-sm text-emerald-300">Showing your build with the checked changes - nothing is saved until you press Accept changes.</p>}
+              {build.warnings.map((warning) => (
+                <p key={warning} className="text-sm text-amber-300">
+                  ⚠ {warning}
+                </p>
+              ))}
+              {optimizerMode && !previewing && gaps.emptySlots.length > 0 && (
+                <FillHint>
+                  Empty slots: {gaps.emptySlots.length} ({gaps.emptySlots.map((slot) => slot.label).join(", ")}). Optimize will fill them for your goal, without touching your items.
+                </FillHint>
+              )}
+              {optimizerMode && !previewing && apHint && <FillHint>{apHint}</FillHint>}
+              {optimizerMode && !previewing && gaps.freeSp > 0 && <FillHint>Free skill points: {gaps.freeSp}. Optimize will spend them where they raise your goal.</FillHint>}
+              {optimizerMode && !previewing && gaps.emptyTomes.length + gaps.emptyAspects.length > 0 && (
+                <FillHint>
+                  Empty tome slots: {gaps.emptyTomes.length} · empty aspect slots: {gaps.emptyAspects.length}. Optimize can fill them (Tomes and Aspects tabs).
+                </FillHint>
+              )}
+              <div className="flex flex-wrap gap-2">
+                {onSendToOptimizer && (
+                  <button type="button" onClick={() => onSendToOptimizer(ws)} className="mc-btn mc-btn-primary" title="Copies this build to the Optimizer with everything you picked locked; this Creator build stays as it is">
+                    Send to Optimizer ⚒
+                  </button>
+                )}
+                {onEditInCreator && (
+                  <button type="button" onClick={() => onEditInCreator(ws)} className="mc-btn" title="Copies this build to the Creator for manual edits; the Optimizer build stays as it is">
+                    Edit in Creator ✎
+                  </button>
+                )}
+              </div>
+            </section>
+
+            <div className="wbr-fade flex flex-col gap-4 xl:grid xl:grid-cols-[minmax(0,1fr)_400px] xl:items-start">
+              <div className="flex flex-col gap-2">
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => setOpenCards(SLOTS.every((slot) => openCards[slot.id]) ? {} : Object.fromEntries(SLOTS.map((slot) => [slot.id, true])))}
+                    className="mc-link text-xs"
+                  >
+                    {SLOTS.every((slot) => openCards[slot.id]) ? "▲ Collapse all" : "▼ Expand all"}
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 items-start gap-3 sm:grid-cols-[repeat(auto-fill,minmax(300px,1fr))]">
+                  {build.slots.map((slot) => (
+                    <ItemCard
+                      key={slot.id}
+                      slot={proposedSlots[slot.id] ? { ...slot, proposed: true, previous: proposedSlots[slot.id].previous } : slot}
+                      build={build}
+                      actions={cardActions}
+                      open={Boolean(openCards[slot.id])}
+                      onToggle={() => setOpenCards((current) => ({ ...current, [slot.id]: !current[slot.id] }))}
+                    />
+                  ))}
+                </div>
+                {filled > 0 && <WynnbuilderExport build={build} treeSettings={build.treeSettings} fixedExtras={extras} />}
+              </div>
+              <div className="flex flex-col gap-3 xl:sticky xl:top-4 xl:max-h-[calc(100vh-2rem)] xl:overflow-y-auto xl:pr-1">
+                <DamagePanel build={build} stats={stats} onOpenTree={() => onTab("tree")} />
+                <SurvivabilityPanel build={build} stats={stats} />
+                <TreeEffectsPanel
+                  playerClass={build.playerClass}
+                  state={stats.tree}
+                  settings={ws.treeFx}
+                  onChange={(next) => change((current) => ({ treeFx: typeof next === "function" ? next(current.treeFx) : next }))}
+                  onOpenTree={() => onTab("tree")}
+                />
+                {previewing ? (
+                  <SkillPointPanel skillPoints={build.skillPoints} />
+                ) : (
+                  <ManualSkillPointPanel
+                    skillPoints={build.skillPoints}
+                    onFree={(skill, value) => change((current) => ({ freeSp: { ...current.freeSp, [skill]: value } }))}
+                    hint={optimizerMode && gaps.freeSp > 0 ? <FillHint>Optimize can spend the {gaps.freeSp} free points for you.</FillHint> : null}
+                  />
+                )}
+                <BuildTotals build={build} />
+              </div>
+            </div>
+          </>
+        )}
+
+        {tab === "tree" && !ws.playerClass && <NeedsPick what="a class" why="The ability tree is per class." />}
+        {tab === "tree" && ws.playerClass && (
+          <>
+            {optimizerMode && !previewing && (apHint ? <FillHint>{apHint}</FillHint> : <FillHint>No free AP: your tree uses all {build ? build.apCap : 0} ability points.</FillHint>)}
+            <AbilityTree
+              playerClass={ws.playerClass}
+              level={level}
+              rank={ws.rank || "none"}
+              selected={treeIds}
+              fullPoints={build ? build.treeFullPoints : 0}
+              onChange={(ids) => change({ tree: ids })}
+              buildArchetype={build ? build.archetype : ws.archetype}
+              onUseArchetype={(arch) => change({ archetype: arch })}
+            />
+            {stats && (
+              <TreeEffectsPanel
+                playerClass={ws.playerClass}
+                state={stats.tree}
+                settings={ws.treeFx}
+                onChange={(next) => change((current) => ({ treeFx: typeof next === "function" ? next(current.treeFx) : next }))}
+              />
+            )}
+          </>
+        )}
+
+        {(tab === "aspects" || tab === "tomes") && extrasLockedNow && <LockedExtras what={tab === "aspects" ? "Aspects" : "Tomes"} level={level} />}
+        {tab === "aspects" && !extrasLockedNow && !ws.playerClass && <NeedsPick what="a class" why="Aspects are per class." />}
+        {tab === "aspects" && !extrasLockedNow && ws.playerClass && (
+          <ManualAspectsPanel
+            ws={viewWs}
+            level={level}
+            onChange={(list) => !previewing && change({ aspects: list })}
+            hint={!previewing && gaps.emptyAspects.length > 0 ? hint(`Empty aspect slots: ${gaps.emptyAspects.length}. Optimize can fill them for your goal, without touching yours.`) : null}
+          />
+        )}
+        {tab === "tomes" && !extrasLockedNow && (
+          <ManualTomesPanel
+            ws={viewWs}
+            level={level}
+            onChange={(slotId, index, name) =>
+              !previewing &&
+              change((current) => {
+                const list = [...((current.tomes && current.tomes[slotId]) || [])];
+                while (list.length <= index) list.push(null);
+                list[index] = name;
+                return { tomes: { ...current.tomes, [slotId]: list } };
+              })
+            }
+            hint={!previewing && gaps.emptyTomes.length > 0 ? hint(`Empty tome slots: ${gaps.emptyTomes.length}. Optimize can fill them for your goal, without touching yours.`) : null}
+          />
+        )}
+        {tab === "guides" && !(ws.playerClass && build && build.archetype) && <NeedsPick what="a class" why="Guide builds are listed per archetype." />}
+        {tab === "guides" && ws.playerClass && build && build.archetype && (
+          <>
+            <p className="text-sm text-zinc-400">
+              Load loads a guide build into this {mode === "creator" ? "Creator" : "Optimizer"} build (items, powders, tree, tomes, aspects and skill points from its Wynnbuilder link); you can undo it.
+            </p>
+            <GuideBuilds
+              archetype={build.archetype}
+              activeUrl={null}
+              onShow={(guide) => {
+                let loaded;
+                try {
+                  loaded = workspaceFromWynnbuilderLink(guide.url).ws;
+                } catch (error) {
+                  loaded = emptyWorkspace();
+                  loaded.playerClass = guide.class;
+                  SLOTS.forEach((slot) => {
+                    if (guide.items[slot.id] && ITEM_BY_NAME.has(guide.items[slot.id])) loaded.items[slot.id] = guide.items[slot.id];
+                  });
+                }
+                load({ ...loaded, playerClass: loaded.playerClass || guide.class, archetype: guide.archetype, rank: ws.rank, name: guide.name }, `the guide build "${guide.name}"`);
+              }}
+              showLabel="Load"
+            />
+          </>
+        )}
+        {tab === "solver" && renderSolver && renderSolver((solverBuild) => load({ ...workspaceFromBuild(solverBuild, { rank: ws.rank }), name: `Solver #${solverBuild.rank || ""}`.trim() }, "the Build Solver result"))}
+        {tab === "info" && !(ws.playerClass && build) && <NeedsPick what="a class" why="Build info uses the build's spells, tree and powders." />}
+        {tab === "info" && ws.playerClass && build && stats && (
+          <BuildInfoPanel playerClass={build.playerClass} archetype={build.archetype} build={build} stats={stats} treeSettings={build.treeSettings} onOpenTree={() => onTab("tree")} />
+        )}
+      </main>
+
+      {chooseSlot && (
+        <ItemBrowserDialog
+          build={null}
+          manual
+          slotId={chooseSlot.id}
+          playerClass={ws.playerClass || null}
+          level={level}
+          options={{}}
+          currentName={ws.items[chooseSlot.id] || null}
+          onPick={pickItem}
+          onClose={() => setChooseFor(null)}
+          pickLabel="Use"
+        />
+      )}
+      {powderSlot && powderBase && (
+        <PowderDialog
+          slotLabel={powderSlot.label}
+          slotId={powderSlot.id}
+          item={powderBase}
+          text={ws.powders[powderSlot.id] || ""}
+          onChange={(text) =>
+            onWs((current) => {
+              const powders = { ...current.powders };
+              if (text) powders[powderSlot.id] = text;
+              else delete powders[powderSlot.id];
+              return { ...current, powders };
+            })
+          }
+          onClose={() => setPowdersFor(null)}
+        />
+      )}
+      {rollsItem && (
+        <RollsDialog
+          item={rollsItem}
+          rolls={ws.rolls[rollsItem.name] || null}
+          onChange={(next) =>
+            onWs((current) => {
+              const rolls = { ...current.rolls };
+              if (next) rolls[rollsItem.name] = next;
+              else delete rolls[rollsItem.name];
+              return { ...current, rolls };
+            })
+          }
+          onClose={() => setRollsFor(null)}
+        />
+      )}
+    </div>
+  );
+}
+
 export default function BuildRecommender() {
+  // Tryb strony (Recommender / Optimizer / Creator) i buildy gracza w Optimizerze i Creatorze (osobne, w przeglądarce)
+  const [appMode, setAppMode] = useState(loadSavedMode);
+  const [introFor, setIntroFor] = useState(() => {
+    const saved = loadSavedMode();
+    return saved !== "recommender" && !readIntroSeen(saved) ? saved : null;
+  });
+  const [workspaces, setWorkspaces] = useState(() => ({ creator: loadWorkspace("creator"), optimizer: loadWorkspace("optimizer") }));
+  const [modeTabs, setModeTabs] = useState({ creator: "build", optimizer: "build" });
+  // przejście między trybami kopiuje build; poprzedni build trybu docelowego da się przywrócić (Undo)
+  const [transfer, setTransfer] = useState({ count: 0, undo: {} });
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      storeWorkspace("creator", workspaces.creator);
+      storeWorkspace("optimizer", workspaces.optimizer);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [workspaces]);
+  const setWorkspace = (mode) => (next) => setWorkspaces((current) => ({ ...current, [mode]: typeof next === "function" ? next(current[mode]) : next }));
+  function switchMode(next) {
+    setAppMode(next);
+    saveMode(next);
+    if (next !== "recommender" && !readIntroSeen(next)) setIntroFor(next);
+    if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+  function closeIntro() {
+    if (introFor) markIntroSeen(introFor);
+    setIntroFor(null);
+  }
+  // kopia buildu do innego trybu ("Send to Optimizer", "Edit in Creator")
+  function copyToMode(target, ws, fromLabel) {
+    const previous = workspaces[target];
+    setWorkspaces((current) => ({ ...current, [target]: { ...sanitizeWorkspace(ws) } }));
+    setTransfer((current) => ({ count: current.count + 1, undo: { ...current.undo, [target]: workspaceHasContent(previous) ? { ws: previous, label: `your build from ${fromLabel} (your previous ${target === "creator" ? "Creator" : "Optimizer"} build was replaced)` } : null } }));
+    setModeTabs((current) => ({ ...current, [target]: "build" }));
+    switchMode(target);
+  }
+  // Optimizer: parametry (zapamiętane), okno, bieżące szukanie, propozycja zmian, odcisk ostatniego Optimize
+  const [optParams, setOptParamsState] = useState(loadOptParams);
+  const setOptParams = (next) => {
+    setOptParamsState(next);
+    saveOptParams(next);
+  };
+  const [optDialog, setOptDialog] = useState(false);
+  const [optRun, setOptRun] = useState(null);
+  const [optProposal, setOptProposal] = useState(null);
+  const [optLast, setOptLast] = useState(null);
+  const optStop = useRef(null);
+  const optWs = workspaces.optimizer;
+  const optRunParams = useMemo(() => (optWs.playerClass ? optParamsForRun(optWs, optParams) : optParams), [optWs, optParams]);
+  const optFp = useMemo(() => optFingerprint(optWs, optRunParams), [optWs, optRunParams]);
+  const optLocked = optLast === optFp;
+  const optSelected = useMemo(() => (optProposal ? [...optProposal.result.changes, ...optProposal.result.swaps].filter((change) => optProposal.checked[change.id]) : []), [optProposal]);
+  const optPreviewWs = useMemo(() => (optProposal ? applyOptimizerChanges(optWs, optSelected) : null), [optProposal, optWs, optSelected]);
+  const optProposedSlots = useMemo(() => {
+    const map = {};
+    optSelected.forEach((change) => {
+      if (change.patch.type === "item") map[change.patch.slotId] = { previous: optWs.items[change.patch.slotId] || null };
+    });
+    return map;
+  }, [optSelected, optWs]);
+  const optBefore = useMemo(() => (optProposal ? optSummary(optWs, optProposal.params) : null), [optProposal, optWs]);
+  const optAfter = useMemo(() => (optProposal && optPreviewWs ? optSummary(optPreviewWs, optProposal.params) : null), [optProposal, optPreviewWs]);
+  async function startOptimize() {
+    const ws = optWs;
+    const params = optRunParams;
+    const fingerprint = optFp;
+    const executor = optimizerExecutor();
+    const stopRef = { current: false };
+    optStop.current = { stopRef, executor };
+    setOptProposal(null);
+    setOptRun({ running: true, progress: { stage: "tree" }, choice: null });
+    try {
+      const allowedNames = params.listed && hasLiveData() ? ITEM_DB.filter((item) => marketStatus(item).state === "listed").map((item) => item.name) : null;
+      const result = await runOptimizer({
+        ws,
+        params,
+        allowedNames,
+        executor,
+        makeExecutor: optimizerExecutor,
+        stopRef,
+        onProgress: (progress) => setOptRun((current) => (current ? { ...current, progress: { ...(current.progress || {}), ...progress } } : current)),
+        askChoice: (info) =>
+          new Promise((resolve) =>
+            setOptRun((current) => ({
+              ...current,
+              choice: {
+                ...info,
+                resolve: (answer) => {
+                  setOptRun((now) => (now ? { ...now, choice: null } : now));
+                  resolve(answer);
+                },
+              },
+            }))
+          ),
+      });
+      setOptProposal({ result, params, baseWs: ws, checked: Object.fromEntries([...result.changes.map((change) => [change.id, true]), ...result.swaps.map((swap) => [swap.id, false])]) });
+      setOptLast(fingerprint);
+      setOptRun(null);
+      setOptDialog(false);
+      setModeTabs((current) => ({ ...current, optimizer: "build" }));
+    } catch (error) {
+      setOptRun({ running: false, error: String((error && error.message) || error) });
+    } finally {
+      optStop.current = null;
+    }
+  }
+  function stopOptimize() {
+    const current = optStop.current;
+    if (!current) return;
+    current.stopRef.current = true;
+    current.executor.cancel();
+  }
   const [theme, setTheme] = useState(loadSavedTheme);
   THEME = theme; // style inline całego drzewa (ts/tc) czytają motyw w tym samym renderze
   useEffect(() => {
@@ -15293,11 +19308,11 @@ export default function BuildRecommender() {
   }
 
   // Solver liczy synchronicznie (ułamek sekundy do kilku sekund); setTimeout daje przeglądarce czas na "Solving…".
-  function runSolver() {
+  function runSolver(levelOverride = null) {
     setSolverRunning(true);
     setTimeout(() => {
       try {
-        setSolverResult(solveBuilds(effectiveLevel, solver, options));
+        setSolverResult(solveBuilds(Number.isFinite(levelOverride) ? levelOverride : effectiveLevel, solver, options));
         setBuildError(null);
       } catch (error) {
         setBuildError(error.message);
@@ -15348,6 +19363,66 @@ export default function BuildRecommender() {
           </div>
         </header>
 
+        <ModeBar mode={appMode} onMode={switchMode} onHelp={(mode) => setIntroFor(mode)} />
+
+        {appMode !== "recommender" && (
+          <ManualWorkspace
+            key={`${appMode}-${transfer.count}`}
+            mode={appMode}
+            ws={workspaces[appMode]}
+            onWs={setWorkspace(appMode)}
+            tab={modeTabs[appMode]}
+            onTab={(next) => setModeTabs((current) => ({ ...current, [appMode]: next }))}
+            initialUndo={transfer.undo[appMode] || null}
+            optimizer={
+              appMode === "optimizer"
+                ? {
+                    previewWs: optPreviewWs,
+                    proposedSlots: optProposedSlots,
+                    renderAside: ({ build: current, gaps }) => (
+                      <OptimizeAside gaps={gaps} build={current} locked={optLocked} onOpen={() => setOptDialog(true)} run={optRun} onStop={stopOptimize} proposal={Boolean(optProposal)} />
+                    ),
+                    renderMain: ({ tab: current }) =>
+                      optProposal ? (
+                        current === "build" ? (
+                          <OptimizeResult
+                            proposal={optProposal}
+                            checked={optProposal.checked}
+                            onToggle={(id) => setOptProposal((now) => ({ ...now, checked: { ...now.checked, [id]: !now.checked[id] } }))}
+                            onAccept={() => {
+                              setWorkspace("optimizer")((current2) => applyOptimizerChanges(current2, optSelected));
+                              setOptProposal(null);
+                            }}
+                            onDiscard={() => setOptProposal(null)}
+                            before={optBefore}
+                            after={optAfter}
+                            stale={optProposal.baseWs !== optWs}
+                          />
+                        ) : (
+                          <p className="wbr-fill-hint text-sm">Proposed changes are waiting in the Build tab (shown here with the checked ones applied).</p>
+                        )
+                      ) : null,
+                  }
+                : null
+            }
+            onSendToOptimizer={appMode === "creator" ? (ws) => copyToMode("optimizer", ws, "the Creator") : null}
+            onEditInCreator={appMode === "optimizer" ? (ws) => copyToMode("creator", ws, "the Optimizer") : null}
+            renderSolver={(onLoad) => (
+              <SolverPanel
+                solver={solver}
+                onChange={setSolver}
+                level={workspaces[appMode].level || 120}
+                result={solverResult}
+                running={solverRunning}
+                onSolve={() => runSolver(workspaces[appMode].level || 120)}
+                onShow={(candidate) => onLoad({ ...solverBuildResult(candidate, solverResult, solverResult.archetype), rank: candidate.rank })}
+                activeRank={null}
+              />
+            )}
+          />
+        )}
+
+        {appMode === "recommender" && (
         <div className="flex flex-col gap-4 lg:grid lg:grid-cols-12 lg:items-start">
           {/* w kreatorze (wybór klasy i kolejne kroki, zanim powstanie build) lewy panel znika; wraca po wygenerowaniu */}
           {!setupGuideOn && (
@@ -15766,6 +19841,14 @@ export default function BuildRecommender() {
                   ))}
                 </div>
                 {build.mode === "damage" && !guideView && !solverView && <WynnbuilderExport build={build} treeSettings={buildTreeSettings} />}
+                <button
+                  type="button"
+                  onClick={() => copyToMode("creator", workspaceFromBuild(build, { rank, treeIds: buildTreeSettings.selected, rolls, treeFx: treeEffects[build.playerClass] || {} }), guideView ? "the guide builds" : solverView ? "the Build Solver" : "the Recommender")}
+                  className="mc-btn mt-1 w-full"
+                  title="Copies this build (items, powders, rolls, tree, skill points) to the Build Creator for manual edits; this build stays here"
+                >
+                  Edit in Creator ✎
+                </button>
                 {build.mode === "damage" && !guideView && !solverView && (
                   <button type="button" onClick={() => setWhyOpen(true)} className="mc-btn mc-btn-primary wbr-why-btn mt-2 w-full">
                     Why this build?
@@ -15820,7 +19903,22 @@ export default function BuildRecommender() {
             )}
           </main>
         </div>
+        )}
       </div>
+      {introFor && <ModeIntroDialog mode={introFor} onClose={closeIntro} />}
+      {appMode === "optimizer" && optDialog && (
+        <OptimizeDialog
+          ws={optWs}
+          gaps={workspaceGaps(optWs, manualBuild(optWs))}
+          params={optParams}
+          onParams={setOptParams}
+          onStart={startOptimize}
+          onClose={() => setOptDialog(false)}
+          run={optRun}
+          onStop={stopOptimize}
+          locked={optLocked}
+        />
+      )}
       {browseOpen && (
         <ItemBrowserDialog
           build={generated && !viewed && generated.playerClass === playerClass && generated.archetype === archetype ? build : null}
@@ -15841,6 +19939,30 @@ export default function BuildRecommender() {
 // interfejs - testy nie mają własnej kopii wzorów. Dodatkowy eksport obok komponentu wyłącza tylko Fast Refresh
 // tego pliku w `npm run dev` (po zapisie strona przeładowuje się w całości).
 export const __engine = {
+  armourWithPowderList,
+  workspaceGaps,
+  optItemsOf,
+  optSkillInfo,
+  optPlane,
+  optPlaneBound,
+  optimizerSpec,
+  runOptimizer,
+  optLocalExecutor,
+  optRunTask,
+  optContext,
+  optBranchAndBound,
+  optEvaluate,
+  optEmptySlots,
+  applyOptimizerChanges,
+  manualBuild,
+  emptyWorkspace,
+  workspaceFromBuild,
+  workspaceFromWynnbuilderLink,
+  workspaceExtras,
+  workspaceTreeIds,
+  sanitizeWorkspace,
+  powderListFromText,
+  applyPowderList,
   wynnbuilderLink,
   decodeTreeHash,
   encodeTreeHash,
