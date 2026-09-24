@@ -2488,53 +2488,6 @@
    ]
   },
   {
-   "name": "Vengeance - Heavy Melee Shadestepper (Crafted)",
-   "class": "Assassin",
-   "archetype": "Shadestepper",
-   "source": "guide",
-   "version": "2.2.2.0",
-   "status": "unchanged",
-   "nodes": [
-    "Spin Attack",
-    "Dagger Proficiency I",
-    "Cheaper Spin Attack I",
-    "Double Spin",
-    "Dash",
-    "Poisoned Blade",
-    "Smoke Bomb",
-    "Cheaper Dash",
-    "Multihit",
-    "Fire Mastery",
-    "Bamboozle",
-    "Vanish",
-    "Surprise Strike",
-    "Silent Killer",
-    "Shadow Travel",
-    "Blazing Powder",
-    "Sandbagging",
-    "Duplicity",
-    "Violent Vortex",
-    "Marked",
-    "Ambush",
-    "Nightcloak Knife",
-    "Cheaper Multihit II",
-    "Fatal Spin",
-    "Bladestorm",
-    "Harvester",
-    "More Marks",
-    "Satsujin",
-    "Marked for Death",
-    "Toxic Sludge",
-    "Malicious Mockery",
-    "Mirror Image",
-    "Last Laugh",
-    "Foul Play",
-    "Earth Mastery",
-    "Thunder Mastery",
-    "Sticky Bomb"
-   ]
-  },
-  {
    "name": "Vengeance - Heavy Melee Shadestepper (Non-Crafted)",
    "class": "Assassin",
    "archetype": "Shadestepper",
@@ -3077,7 +3030,7 @@
   },
   "Shaman/Acolyte": {
    "outdated": 0,
-   "invalid": 9
+   "invalid": 7
   },
   "Shaman/Summoner": {
    "outdated": 0,

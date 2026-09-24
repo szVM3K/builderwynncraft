@@ -192,7 +192,7 @@ be worn once, set pieces that can't be worn together, a tree above your AP (trim
 disconnected abilities, tomes/aspects above what the level opens, two Mythic aspects. **Open in Wynnbuilder** exports
 the build (items with every powder, tomes, aspects, skill points, level, tree); **Import from Wynnbuilder** reads a
 builder link back (the binary format 12 - crafted and custom items are skipped with a note and their slot stays
-empty; more powders than the item has slots today are cut, with a note). All 126 guide links decode, and every one
+empty; more powders than the item has slots today are cut, with a note). All 123 guide links decode, and every one
 survives import → export → import unchanged. Builds can be **saved in the browser** under your own names
 (`wbr-creator-saved-v1`), and the Guide builds and Build Solver tabs load a build into the editor.
 
@@ -372,6 +372,23 @@ behaviour). All 30 default builds pass, with no warnings.
   damage-first search; what is left over is left over because it was free.
 - **Time.** When the *Any* build doesn't fit, the default run takes a median 1.2-1.3× as long (0.6-4.7× on a
   2-core machine running both shards at once).
+
+### Fixes: dialogs, guide tree button, guide builds (0.39.1)
+
+**Dialogs open on top of the page.** Panels (`.mc-panel`) have pixel corners made with `clip-path`, and a
+`clip-path` also clips `position: fixed` children. A dialog opened from inside a panel (*Publish* in the Creator's Save
+panel, *Add a guide tree*) showed only as a dark blur over that panel, its content was cut away and the page
+stopped responding. Every dialog now renders through a React portal into the app root (`Overlay` in
+`src/BuildRecommender.jsx`); the single-file build maps `react-dom` to the global ReactDOM.
+
+**＋ Add a guide tree in the Ability tree tab.** Next to *Copy tree / Paste tree / Reset tree* (when the Build Library
+is connected): it opens the same dialog as setup step 4 with *This tree* preselected and the build's archetype -
+you give the tree a name, the ability points it's for (1-50), your name and a description, and it goes to review.
+
+**Guide builds.** Three guide builds were taken out: Hadal - Acolyte (Non-Crafted and Crafted) and Vengeance - Heavy Melee
+Shadestepper (Crafted). They are gone from the Guide builds tab, from the guide start sets of the generator, from
+*Prefer items from guide builds* and from the guide trees (`src/guide-builds.json`: 123 builds, `src/guide-trees.json`:
+63 guide trees + 1 extra). The archetype weights stay as they were calibrated.
 
 ### Build Library, Build Solver mode and community trees (0.39.0)
 
@@ -830,7 +847,7 @@ of the site):
   Guide's Wynnbuilder links are decoded (`src/guide-trees.json`, `npm run update-guide-trees`), and a guide tree is
   only used if its link is from the same data version, or from an older one where that archetype's abilities and
   the tree's abilities have exactly the same structure and the whole tree is still valid. After the latest
-  reworks that leaves 64 of 126 guide trees; Shaman, Arcanist and Light Bender have none, so their suggestions
+  reworks that leaves 63 of 123 guide trees; Shaman, Arcanist and Light Bender have none, so their suggestions
   come from the tree data alone, except Acolyte, which also follows an extra 2.2.4 reference build
   (`scripts/extra-guide-links.json`, counted like two guide trees; add more links there). An ability's value grows
   with its AP cost, and the tree is picked greedily by value per AP, together with the cheapest path of abilities
@@ -873,8 +890,9 @@ tomes need level 60, so one threshold covers both tabs.
   steal, speed, SP budget), priorities, allowed tiers, minimum item level and "Advanced IDs" (ranges of any
   identifications in order of importance). A beam search with an exact summary of every state returns several
   sets that meet the targets, or the closest ones with a list of what's missing; each can be shown in the grid.
-- **Guide builds**: 126 builds from The Ultimate Build Guide (forums.wynncraft.com, thread 320092), decoded from
-  Wynnbuilder links, viewable in the grid. The archetype weights were calibrated on these builds.
+- **Guide builds**: 123 builds from The Ultimate Build Guide (forums.wynncraft.com, thread 320092), decoded from
+  Wynnbuilder links, viewable in the grid. The archetype weights were calibrated on the guide's 126 builds, before
+  three were taken out in 0.39.1.
 
 ### UI
 

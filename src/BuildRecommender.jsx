@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import WYNNBUILDER_DATA from "./wynncraft-items.json";
 import GUIDE_DATA from "./guide-builds.json";
 import PRICE_DATA from "./item-prices.json";
@@ -369,6 +370,8 @@ const GUIDE_ITEM_COUNTS = GUIDE_DATA.builds.reduce((byArchetype, build) => {
   });
   return byArchetype;
 }, {});
+// Liczba buildów z poradnika na archetyp, które aplikacja pokazuje (ARCHETYPES.guideBuilds to liczba z kalibracji wag).
+const GUIDE_BUILD_COUNTS = GUIDE_DATA.builds.reduce((counts, build) => ({ ...counts, [build.archetype]: (counts[build.archetype] || 0) + 1 }), {});
 
 // SYSTEM WAG ARCHETYPÓW
 // weights: mnożnik dla każdej statystyki z STAT_META (brak klucza = statystyka ignorowana).
@@ -6103,7 +6106,14 @@ const fitsSkillPoints = (entry) => entry.score !== null && entry.overflow === 0 
 // manual (Creator / Optimizer): bez ocen i propozycji; bez klasy widać bronie wszystkich klas (klasa wynika z broni),
 // a maksymalny poziom można podnieść ponad poziom postaci (taki przedmiot dostaje ostrzeżenie, nie blokadę).
 // onExclude (Browse items z lewego panelu): przycisk Exclude obok Pin w każdym wierszu.
-function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, onPick, onClose, pickLabel = "Use", manual = false, currentName = null, onExclude = null }) {
+function ItemBrowserDialog(props) {
+  return (
+    <Overlay>
+      <ItemBrowserDialogBody {...props} />
+    </Overlay>
+  );
+}
+function ItemBrowserDialogBody({ build, slotId = null, playerClass, level, options, onPick, onClose, pickLabel = "Use", manual = false, currentName = null, onExclude = null }) {
   const slot = slotId ? SLOTS.find((entry) => entry.id === slotId) : null;
   const weaponType = playerClass ? CLASSES[playerClass].weapon : null;
   const normalized = normalizeOptions(options);
@@ -6556,7 +6566,14 @@ function WynnpoolPanel({ item, rolls, onChange }) {
   );
 }
 
-function RollsDialog({ item, rolls, onChange, onClose }) {
+function RollsDialog(props) {
+  return (
+    <Overlay>
+      <RollsDialogBody {...props} />
+    </Overlay>
+  );
+}
+function RollsDialogBody({ item, rolls, onChange, onClose }) {
   const current = rolls || {};
   const lines = ID_DISPLAY.filter((display) => idVaries(item, display.key));
   const wholeValue = current.all !== undefined ? current.all : DEFAULT_ROLL;
@@ -11000,7 +11017,7 @@ function CustomStats({ options, onChange, archetype, weaponType, weaponCounts, l
         <span>
           Prefer items from guide builds
           <span className="block text-zinc-500" title="Builds from The Ultimate Build Guide (Wynncraft forums), per archetype. Off by default. The damage generator never gets a guide bonus: it scores guide builds like any other set.">
-            {archetypeConfig ? `${archetypeConfig.guideBuilds} guide build${archetypeConfig.guideBuilds === 1 ? "" : "s"}; off by default, items get +15–30% when on.` : "126 guide builds; off by default."}
+            {archetypeConfig ? `${GUIDE_BUILD_COUNTS[archetype] || 0} guide build${GUIDE_BUILD_COUNTS[archetype] === 1 ? "" : "s"}; off by default, items get +15–30% when on.` : `${GUIDE_DATA.builds.length} guide builds; off by default.`}
           </span>
         </span>
       </label>
@@ -11957,7 +11974,14 @@ function InfoButton() {
   );
 }
 
-function InfoDialog({ onClose }) {
+function InfoDialog(props) {
+  return (
+    <Overlay>
+      <InfoDialogBody {...props} />
+    </Overlay>
+  );
+}
+function InfoDialogBody({ onClose }) {
   const hl = (text) => <b className="wbr-welcome-hl">{text}</b>;
   return (
     <div className="wbr-backdrop wbr-welcome-backdrop fixed inset-0 z-[60] flex items-center justify-center p-3 sm:p-6" role="dialog" aria-modal="true" aria-labelledby="wbr-info-title" onClick={(event) => event.target === event.currentTarget && onClose()}>
@@ -12090,7 +12114,14 @@ function InfoDialog({ onClose }) {
   );
 }
 
-function WelcomeDialog() {
+function WelcomeDialog(props) {
+  return (
+    <Overlay>
+      <WelcomeDialogBody {...props} />
+    </Overlay>
+  );
+}
+function WelcomeDialogBody() {
   const [open, setOpen] = useState(() => !readWelcomeConfirmed());
   const [remaining, setRemaining] = useState(Math.ceil(WELCOME_WAIT_MS / 1000));
   const [atBottom, setAtBottom] = useState(false);
@@ -13168,7 +13199,14 @@ function SharedExtrasPanel({ build, what }) {
   );
 }
 
-function WhyBuildDialog({ build, onClose }) {
+function WhyBuildDialog(props) {
+  return (
+    <Overlay>
+      <WhyBuildDialogBody {...props} />
+    </Overlay>
+  );
+}
+function WhyBuildDialogBody({ build, onClose }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   useEffect(() => {
@@ -14139,6 +14177,7 @@ function AbilityTree({ playerClass, level, rank, selected, fullPoints = 0, onCha
   const [pasteOpen, setPasteOpen] = useState(false);
   const [pasteText, setPasteText] = useState("");
   const [undo, setUndo] = useState(null); // { ids, message } - poprzednie drzewko po "Suggest"
+  const [addTree, setAddTree] = useState(false); // 0.39.1: "Add a guide tree" także w zakładce Ability tree
   const say = (text) => {
     setUndo(null);
     setMessage(text);
@@ -14274,8 +14313,22 @@ function AbilityTree({ playerClass, level, rank, selected, fullPoints = 0, onCha
           >
             Reset tree
           </button>
+          {apiReady() && (
+            <button type="button" onClick={() => setAddTree(true)} className="mc-btn mc-btn-sm" title="Share this tree: give it a name, it's checked, then everyone sees it among the guide trees">
+              ＋ Add a guide tree
+            </button>
+          )}
         </div>
       </div>
+      {addTree && (
+        <TreeSubmitDialog
+          playerClass={playerClass}
+          treeIds={[...resolved.reachable]}
+          archetype={buildArchetype || null}
+          currentLabel="This tree"
+          onClose={() => setAddTree(false)}
+        />
+      )}
       {pasteOpen && (
         <div className="mc-slot flex flex-wrap items-center gap-2 px-3 py-2 text-sm">
           <label htmlFor="tree-code" className="text-zinc-300">
@@ -18338,7 +18391,14 @@ const MODE_INTROS = {
     ],
   },
 };
-function ModeIntroDialog({ mode, onClose }) {
+function ModeIntroDialog(props) {
+  return (
+    <Overlay>
+      <ModeIntroDialogBody {...props} />
+    </Overlay>
+  );
+}
+function ModeIntroDialogBody({ mode, onClose }) {
   const intro = MODE_INTROS[mode];
   const buttonRef = useRef(null);
   useEffect(() => {
@@ -18417,7 +18477,14 @@ function FillHint({ children }) {
 }
 
 // Okno powderów jednego przedmiotu (Creator / Optimizer): dowolna kolejność i mieszanka, najwyżej tyle, ile slotów.
-function PowderDialog({ slotLabel, slotId, item, text, onChange, onClose }) {
+function PowderDialog(props) {
+  return (
+    <Overlay>
+      <PowderDialogBody {...props} />
+    </Overlay>
+  );
+}
+function PowderDialogBody({ slotLabel, slotId, item, text, onChange, onClose }) {
   const maxTier = powderTierFor(item.level);
   const [tier, setTier] = useState(maxTier);
   const list = powderListFromText(text, item);
@@ -19102,7 +19169,14 @@ function OptimizeAside({ gaps, build, locked, onOpen, run, onStop, proposal }) {
 }
 
 // Okno parametrów Optimize i postępu szukania.
-function OptimizeDialog({ ws, gaps, params, onParams, onStart, onClose, run, onStop, locked }) {
+function OptimizeDialog(props) {
+  return (
+    <Overlay>
+      <OptimizeDialogBody {...props} />
+    </Overlay>
+  );
+}
+function OptimizeDialogBody({ ws, gaps, params, onParams, onStart, onClose, run, onStop, locked }) {
   const goals = useMemo(() => optGoalOptions(ws), [ws]);
   const set = (patch) => onParams({ ...params, ...patch });
   const running = Boolean(run && run.running);
@@ -19950,7 +20024,22 @@ function storeAuthor(name) {
     // bez zapisu
   }
 }
-function DialogShell({ title, label, onClose, children, wide = false }) {
+// Okna (fixed inset-0) idą do korzenia aplikacji (.wbr-mc): .mc-panel ma clip-path, a clip-path przycina też potomków
+// z position:fixed - okno otwarte z panelu (Publish, Add a guide tree) było widać tylko w obrysie panelu, bez treści,
+// a przyciemnienie blokowało stronę (0.39.1). Miejsce ustalane raz na okno (bez przeskoku = bez ponownego montowania);
+// okno otwarte przy pierwszym renderze (powitanie) zostaje na miejscu - i tak leży w korzeniu.
+function Overlay({ children }) {
+  const [host] = useState(() => (typeof document !== "undefined" ? document.querySelector(".wbr-mc") : null));
+  return host ? createPortal(children, host) : children;
+}
+function DialogShell(props) {
+  return (
+    <Overlay>
+      <DialogShellBody {...props} />
+    </Overlay>
+  );
+}
+function DialogShellBody({ title, label, onClose, children, wide = false }) {
   useEffect(() => {
     const onKey = (event) => event.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
@@ -20083,7 +20172,7 @@ function PublishDialog({ source, onClose }) {
 }
 
 // Krok "Ability tree" w kreatorze: "Add a guide tree" - drzewko (obecne albo wklejone), AP 1-50, nazwa, archetyp.
-function TreeSubmitDialog({ playerClass, treeIds, archetype, onClose }) {
+function TreeSubmitDialog({ playerClass, treeIds, archetype, currentLabel = "The tree picked above", onClose }) {
   const classConfig = CLASSES[playerClass];
   const [from, setFrom] = useState(treeIds.length > 0 ? "current" : "paste");
   const [pasted, setPasted] = useState("");
@@ -20136,7 +20225,7 @@ function TreeSubmitDialog({ playerClass, treeIds, archetype, onClose }) {
           <div className="flex flex-col gap-1.5" role="radiogroup" aria-label="Which tree">
             <label className="flex items-center gap-2 text-sm text-zinc-200">
               <input type="radio" name="tree-from" checked={from === "current"} disabled={treeIds.length === 0} onChange={() => setFrom("current")} />
-              The tree picked above{treeIds.length > 0 && tree ? ` (${treeIds.length} abilities, ${resolveTree(tree, treeIds).points} AP)` : " (none yet)"}
+              {currentLabel}{treeIds.length > 0 && tree ? ` (${treeIds.length} abilities, ${resolveTree(tree, treeIds).points} AP)` : " (none yet)"}
             </label>
             <label className="flex items-center gap-2 text-sm text-zinc-200">
               <input type="radio" name="tree-from" checked={from === "paste"} onChange={() => setFrom("paste")} />
@@ -20582,7 +20671,14 @@ function ReviewCard({ entry, kind, selected, onSelect, onAction, busy }) {
     </article>
   );
 }
-function ReviewPanel({ onClose }) {
+function ReviewPanel(props) {
+  return (
+    <Overlay>
+      <ReviewPanelBody {...props} />
+    </Overlay>
+  );
+}
+function ReviewPanelBody({ onClose }) {
   const [token, setToken] = useState(() => {
     try {
       const saved = window.sessionStorage.getItem(REVIEW_TOKEN_KEY);
