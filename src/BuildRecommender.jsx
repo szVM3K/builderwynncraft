@@ -19,10 +19,9 @@ import WB_IDS from "./wynnbuilder-ids.json";
  *    Wynik przedmiotu = suma(waga * wartość / STAT_META[stat].scale) + wynik broni (DPS)
  *    - kara za wymagania SP w umiejętnościach spoza archetypu.
  *    `scale` sprowadza różne jednostki do wspólnej skali: 1000 HP, 10% Spell Damage i 5 Mana Regen dają po 1 punkcie przed wagą.
- * 2. generateOptimizedBuild() odrzuca przedmioty z za wysokim poziomem i bronie innych klas, liczy wynik każdego przedmiotu,
- *    sortuje malejąco, bierze top 10 kandydatów na slot i składa 9 slotów przeszukiwaniem wiązkowym (beam search).
- *    Zestawy wymagające więcej Skill Pointów niż (poziom - 1) * 2 (max 200, max 100 na umiejętność) są odrzucane,
- *    a każdy wolny SP lekko podnosi wynik zestawu.
+ * 2. Wagi archetypów służą dziś ocenie przedmiotów w "Other picks", Build Solverowi i buildom z poradnika; build
+ *    generuje generateDamageBuild() (obrażenia celu przy twardych filtrach). Stary generator wag
+ *    (generateOptimizedBuild) usunięto w 0.37 - Exclude, Pin i Other picks liczą tym samym generatorem co Generate.
  * 3. Nowy archetyp: dodaj wpis w ARCHETYPES (focus, skills, elements, weights, opcjonalnie weaponWeight)
  *    i jego nazwę w CLASSES[klasa].archetypes. Nowa statystyka: wpis w STAT_META (label, scale); normalizer sam ją pobierze.
  * 4. Personalizowane statystyki (options) nakładają się na profil archetypu w getArchetypeProfile():
@@ -740,8 +739,8 @@ function getArchetypeProfile(archetype, rawOptions = DEFAULT_OPTIONS) {
     meleeBlend: focusResult.meleeBlend,
     baseWeaponWeight,
     elementFactors: Object.fromEntries(["n", "e", "t", "w", "f", "a"].map((prefix) => [prefix, elementFactor(prefixElement[prefix])])),
-    refDps: 300, // nadpisywane w generateOptimizedBuild typowym DPS broni klasy na danym poziomie
-    playerLevel: null, // ustawiane w generateOptimizedBuild; bez poziomu (np. buildy z poradnika) nie ma kary za okno poziomu
+    refDps: 300, // typowy DPS broni (ocena przedmiotów wagami archetypu)
+    playerLevel: null, // bez poziomu (np. buildy z poradnika) nie ma kary za okno poziomu
     levelGapWindow: (LEVEL_WINDOWS.find((entry) => entry.id === options.levelWindow) || LEVEL_WINDOWS[0]).window,
     gearHps: HITS_PER_SECOND.NORMAL,
     weaponFactor: focusResult.weaponFactor,
@@ -1614,235 +1613,6 @@ function repairState(state, available, lockedSlots = new Set(), baseHp = 0, prof
   return current;
 }
 
-function generateOptimizedBuild(level, playerClass, archetype, allItems = ITEM_DB, options = DEFAULT_OPTIONS) {
-  const playerLevel = Math.min(120, Math.max(1, Math.round(Number(level) || 1)));
-  const classConfig = CLASSES[playerClass];
-  if (!classConfig) throw new Error(`Unknown class: ${playerClass}`);
-  if (!classConfig.archetypes.includes(archetype)) throw new Error(`${archetype} is not a ${playerClass} archetype`);
-  const profile = getArchetypeProfile(archetype, options);
-  const available = availableSkillPoints(playerLevel);
-  // Powdery broni (Custom stats › Weapon powders): każda broń klasy dostaje powdery najwyższego tieru dla swojego
-  // poziomu w każdym slocie, więc wynik i obrażenia widzą np. 5 slotów Lightshow kontra 2 sloty Jolt.
-  const pool = profile.powderElement
-    ? allItems.map((item) => (item.category === "weapon" && item.type === classConfig.weapon ? powderedWeapon(item, profile.powderElement) : item))
-    : allItems;
-  // Typowa broń na tym poziomie (80. percentyl DPS broni klasy z ostatnich 20 poziomów) i uderzenia/s dla pancerza.
-  const typicalDps = (items) => {
-    const recent = items
-      .filter((item) => item.type === classConfig.weapon && item.level <= playerLevel && item.level >= playerLevel - 20)
-      .map((item) => item.dps || 0)
-      .sort((a, b) => a - b);
-    return recent.length > 0 ? recent[Math.floor(recent.length * 0.8)] || 0 : 0;
-  };
-  const baseRefDps = typicalDps(allItems);
-  const poolRefDps = pool === allItems ? baseRefDps : typicalDps(pool);
-  if (poolRefDps > 0) profile.refDps = poolRefDps;
-  // Waga broni była kalibrowana na DPS bez powderów: skala typowej broni bez/z powderami trzyma równowagę broń-pancerz,
-  // a ranking broni między sobą liczy już obrażenia z powderami.
-  profile.powderNorm = baseRefDps > 0 && poolRefDps > 0 ? baseRefDps / poolRefDps : 1;
-  applyRawBoost(profile, playerClass, playerLevel, allItems);
-  if (profile.options.attackSpeeds.length > 0) {
-    profile.gearHps = profile.options.attackSpeeds.reduce((sum, speed) => sum + HITS_PER_SECOND[speed], 0) / profile.options.attackSpeeds.length;
-  }
-  setMeleeModelWeights(profile);
-
-  const { attackSpeeds, locked, excluded } = profile.options;
-  const excludedNames = new Set(excluded);
-  const lockedNames = new Set(Object.values(locked));
-  // Budżet (ceny z Trade Marketu): przypięte przedmioty się nie liczą (gracz je ma).
-  profile.budget = hasPriceData() && profile.options.budget > 0 ? profile.options.budget : null;
-  profile.budgetFree = lockedNames;
-  // "Only items on the market": tylko przedmioty wystawione dziś (snapshot WynnVentory); przypięte zostają.
-  profile.onlyListed = hasLiveData() && profile.options.onlyListed;
-  profile.playerLevel = playerLevel;
-  const levelWindow = LEVEL_WINDOWS.find((entry) => entry.id === profile.options.levelWindow) || LEVEL_WINDOWS[0];
-  const minLevel = levelWindow.strict ? playerLevel - levelWindow.window : -Infinity;
-
-  // Krok 1: filtrowanie po poziomie (i oknie poziomu w trybie "only"), klasie broni, zaznaczonych szybkościach ataku
-  // (brak zaznaczenia = każda) i przedmiotach wykluczonych przez gracza.
-  const excludedTiers = new Set(profile.options.excludedTiers);
-  const eligible = pool.filter((item) => {
-    if (item.level > playerLevel) return false;
-    if (item.level < minLevel && !lockedNames.has(item.name)) return false;
-    if (excludedNames.has(item.name) && !lockedNames.has(item.name)) return false;
-    if (excludedTiers.has(item.tier) && !lockedNames.has(item.name)) return false;
-    if (profile.budget && !lockedNames.has(item.name) && !withinBudget(item, profile.budget)) return false;
-    if (profile.onlyListed && !lockedNames.has(item.name) && marketStatus(item).state !== "listed") return false;
-    if (item.category !== "weapon") return true;
-    return item.type === classConfig.weapon && (attackSpeeds.length === 0 || attackSpeeds.includes(item.atkSpd));
-  });
-  const baseHp = 5 * playerLevel + 5;
-
-  // Focus main attacku wyraźnie ponad metę archetypu: szersza pula kandydatów i drugi przebieg wyszukiwania.
-  const heavyMelee = profile.meleeBlend > 0.05;
-
-  // Kroki 2-4 dla danego profilu (drugi przebieg używa profilu z refDps/gearHps wybranej broni).
-  function search(searchProfile, referenceWeapon = null) {
-    // Krok 2-3: wynik każdego przedmiotu według wag archetypu, sortowanie malejąco, top N kandydatów na slot.
-    const perSlot = heavyMelee ? MELEE_CANDIDATES_PER_SLOT : CANDIDATES_PER_SLOT;
-    const scored = eligible
-      .map((item) => ({ item, ...scoreItem(item, searchProfile) }))
-      .sort((a, b) => b.score - a.score);
-    const candidatesByType = {};
-    const typeKey = (item) => (item.category === "weapon" ? "weapon" : item.type);
-    scored.forEach((entry) => {
-      const key = typeKey(entry.item);
-      if (!candidatesByType[key]) candidatesByType[key] = [];
-      if (entry.score > 0 && candidatesByType[key].length < perSlot) candidatesByType[key].push(entry);
-    });
-    // Focus main attacku: do puli dochodzą przedmioty z największym dokładnym zyskiem DPS przy broni odniesienia
-    // (broń: własny DPS main attacku), bo liniowy ranking nie widzi tierów szybkości ani raw × uderzenia/s.
-    if (heavyMelee) {
-      const weapons = scored.filter((entry) => entry.item.category === "weapon" && entry.item.dps > 0);
-      const reference = referenceWeapon || weapons.map((entry) => entry.item).sort((a, b) => weaponMainAttackDps(b) - weaponMainAttackDps(a))[0];
-      if (reference) {
-        const gain = (item) =>
-          item.category === "weapon"
-            ? weaponMainAttackDps(item)
-            : buildMainAttackDps(reference, [reference, item], computeSkillPoints([reference, item]).totals);
-        const byGain = {};
-        scored.forEach((entry) => {
-          if (entry.score <= 0) return;
-          const key = typeKey(entry.item);
-          (byGain[key] || (byGain[key] = [])).push({ entry, gain: gain(entry.item) });
-        });
-        Object.entries(byGain).forEach(([key, list]) => {
-          list.sort((a, b) => b.gain - a.gain);
-          const pool = candidatesByType[key] || (candidatesByType[key] = []);
-          list.slice(0, perSlot).forEach(({ entry }) => {
-            if (!pool.includes(entry)) pool.push(entry);
-          });
-        });
-      }
-    }
-
-    // Budżet: do puli dochodzą najlepsze przedmioty w tańszych przedziałach (≤ 1/3 i ≤ 1/9 budżetu), żeby wiązka
-    // miała z czego złożyć zestaw mieszczący się w limicie.
-    if (searchProfile.budget) {
-      [3, 9].forEach((share) => {
-        const cap = searchProfile.budget / share;
-        const added = {};
-        scored.forEach((entry) => {
-          if (entry.score <= 0) return;
-          const key = typeKey(entry.item);
-          if ((added[key] || 0) >= Math.ceil(perSlot / 2) || (itemPrice(entry.item).price || 0) > cap) return;
-          const list = candidatesByType[key] || (candidatesByType[key] = []);
-          if (!list.includes(entry)) list.push(entry);
-          added[key] = (added[key] || 0) + 1;
-        });
-      });
-    }
-
-    // Przypięte przedmioty: slot ma tylko jedną opcję. Przypięcie, którego nie da się użyć, trafia do ostrzeżeń.
-    const lockedEntries = {};
-    const warnings = [];
-    Object.entries(locked).forEach(([slotId, name]) => {
-      const slot = SLOTS.find((entry) => entry.id === slotId);
-      const entry = scored.find(
-        (candidate) => candidate.item.name === name && (slot.type === "weapon" ? candidate.item.category === "weapon" : candidate.item.type === slot.type)
-      );
-      if (entry) lockedEntries[slotId] = entry;
-      else warnings.push(`${name} can't go in ${slot.label} for a level ${playerLevel} ${playerClass} with these settings, so it was skipped.`);
-    });
-    const lockedSlots = new Set(Object.keys(lockedEntries));
-    const ringSymmetry = !lockedSlots.has("ring1") && !lockedSlots.has("ring2");
-
-    // Krok 4: beam search po slotach z walidacją Skill Pointów (pusty slot jest zawsze dozwoloną opcją).
-    let beam = [{ ...evaluateState({}, available, baseHp, searchProfile), ringIndex: 0 }];
-    SEARCH_ORDER.forEach((slotId) => {
-      const slot = SLOTS.find((entry) => entry.id === slotId);
-      const options = lockedEntries[slotId] ? [lockedEntries[slotId]] : [null, ...(candidatesByType[slot.type] || [])];
-      const next = [];
-      beam.forEach((state) => {
-        options.forEach((option, index) => {
-          if (ringSymmetry && slotId === "ring2" && index !== 0 && (state.ringIndex === 0 || index < state.ringIndex)) return;
-          if (option && ringsClash(state.picks, slotId, option.item)) return;
-          const evaluated = evaluateState({ ...state.picks, [slotId]: option }, available, baseHp, searchProfile);
-          next.push({ ...evaluated, ringIndex: slotId === "ring1" ? index : state.ringIndex });
-        });
-      });
-      next.sort((a, b) => b.base - b.overflow * OVERFLOW_PENALTY - (a.base - a.overflow * OVERFLOW_PENALTY));
-      beam = next.slice(0, BEAM_WIDTH);
-      // Rezerwa wykonalnych stanów: stany z dużym przekroczeniem SP (np. same przedmioty z wysokim raw) nie mogą
-      // wypchnąć z wiązki wszystkich zestawów, które da się założyć - inaczej na końcu zostają puste sloty.
-      let feasibleCount = beam.filter((state) => state.overflow === 0).length;
-      for (let index = BEAM_WIDTH; index < next.length && feasibleCount < FEASIBLE_RESERVE; index += 1) {
-        if (next[index].overflow === 0) {
-          beam.push(next[index]);
-          feasibleCount += 1;
-        }
-      }
-    });
-
-    const feasible = beam.filter((state) => state.overflow === 0);
-    const pool = feasible.length > 0 ? feasible : beam.map((state) => repairState(state, available, lockedSlots, baseHp, searchProfile));
-    const best = pool.reduce((top, state) => (finalValue(state, available) > finalValue(top, available) ? state : top));
-    return { profile: searchProfile, best, lockedSlots, warnings };
-  }
-
-  let result = search(profile);
-  // Drugi przebieg przy focusie main attacku: przybliżony ranking kandydatów liczony dla wybranej broni
-  // (jej DPS i szybkość zamiast typowej broni klasy). Waga dokładnego DPS zostaje ta sama, więc wyniki są porównywalne.
-  if (heavyMelee) {
-    const weapon = result.best.picks.weapon && result.best.picks.weapon.item;
-    if (weapon && weapon.dps > 0) {
-      const tuned = { ...profile, refDps: weapon.dps, gearHps: HITS_PER_SECOND[attackSpeedAfterTier(weapon, weapon.ids.atkTier)] };
-      const second = search(tuned, weapon);
-      if (finalValue(second.best, available) > finalValue(result.best, available)) result = second;
-    }
-  }
-  const { best, lockedSlots, warnings } = result;
-  const finalProfile = result.profile;
-
-  const totals = itemStatTotals(Object.values(best.picks).filter(Boolean).map((pick) => pick.item));
-  const finalSp = computeSkillPoints(Object.values(best.picks).filter(Boolean).map((pick) => pick.item), true);
-  const marketWarnings = [];
-  if (profile.onlyListed) {
-    const shown = new Set();
-    SLOTS.forEach((slot) => {
-      if (best.picks[slot.id] || shown.has(slot.type)) return;
-      const fits = (item) => (slot.type === "weapon" ? item.category === "weapon" : item.type === slot.type);
-      if (eligible.some(fits)) return;
-      shown.add(slot.type);
-      const label = slot.type === "weapon" ? classConfig.weapon : slot.type;
-      marketWarnings.push(`Nothing listed on the Trade Market today fits the ${label} slot (up to level ${playerLevel}), so it stays empty.`);
-    });
-  }
-
-  return {
-    level: playerLevel,
-    playerClass,
-    archetype,
-    options: profile.options,
-    profile: finalProfile,
-    mainAttack: finalProfile.meleeBlend > 0 ? { dps: best.meleeDps, weight: finalProfile.meleeModelWeight * finalProfile.meleeBlend, blend: finalProfile.meleeBlend } : null,
-    warnings: [
-      ...warnings,
-      ...marketWarnings,
-      ...(best.overflow > 0 ? [best.costOverflow > 0 ? "No build fits the budget with these settings; the closest one is shown." : "The pinned items need more skill points than this level gives."] : []),
-    ],
-    cost: hasPriceData() ? { ...buildCost(Object.values(best.picks).filter(Boolean).map((pick) => pick.item), lockedNames), budget: profile.budget } : null,
-    lockedSlots: [...lockedSlots],
-    score: finalValue(best, available),
-    slots: SLOTS.map((slot) => {
-      const pick = best.picks[slot.id];
-      if (!pick) return { ...slot, item: null, score: 0, contributions: [] };
-      const inBuild = inBuildScore(best.picks, slot.id, pick, available, baseHp, finalProfile);
-      return { ...slot, item: pick.item, score: inBuild.score, contributions: inBuild.contributions };
-    }),
-    skillPoints: {
-      available,
-      assigned: finalSp.assigned,
-      totals: finalSp.totals,
-      required: finalSp.total,
-      remaining: available - finalSp.total,
-      valid: best.overflow === 0,
-    },
-    totals,
-    stats: { eligible: eligible.length, database: allItems.length },
-  };
-}
-
 // ============================ GENERATOR "DAMAGE-FIRST" (zakładka New) ============================
 // Kolejność: klasa → ranga → poziom → drzewko → cel (czar albo main attack) → próg EHP → cykl czarów.
 // Zamiast wag archetypu liczymy PRAWDZIWE obrażenia celu (ten sam silnik co panel Damage) dla całej bazy
@@ -1925,31 +1695,108 @@ function cycleText(ids) {
 // a ilość na trafienie to (wartość ÷ 3) ÷ trafienia na sekundę broni (jak "Mana per hit" w Wynnbuilderze) - przy
 // ciągłym biciu daje to wartość ÷ 3 na sekundę. Czar to 3 kliknięcia; main attack to 1 kliknięcie, ale nie szybciej
 // niż pozwala szybkość ataku. Cykl bez M nie kradnie nic (feedback: "zakłada, że między czarami bijesz melee").
+// ZAKRESY (suwaki z dwoma uchwytami, 0.37): bilans many cyklu (mana/s), odnawianie życia (HP/s), Walk Speed (%).
+// Zakres to { min, max }, a null po którejś stronie = "Any" (bez granicy z tej strony); null zamiast całego zakresu =
+// bez warunku. Generator szuka tylko buildów w zakresie: łagodne kary w trakcie szukania, twarde odcięcie na końcu.
+// Kara za wyjście poza zakres (z dołu i z góry tak samo) = odległość od zakresu względem jego szerokości; przy
+// zakresie otwartym z jednej strony - względem skali wielkości (RANGE_SCALE).
+const RANGE_SCALE = { mana: 5, life: 100, spd: 20 };
+function normalizeRange(range) {
+  if (!range || typeof range !== "object") return null;
+  const num = (value) => (value === null || value === undefined || value === "" || !Number.isFinite(Number(value)) ? null : Number(value));
+  let min = num(range.min);
+  let max = num(range.max);
+  if (min !== null && max !== null && min > max) [min, max] = [max, min];
+  return min === null && max === null ? null : { min, max };
+}
+function inRange(value, range) {
+  if (!range) return true;
+  const x = Number.isFinite(value) ? value : 0;
+  return (range.min === null || x >= range.min - 1e-9) && (range.max === null || x <= range.max + 1e-9);
+}
+function rangeMiss(value, range, scale) {
+  if (!range) return 0;
+  const x = Number.isFinite(value) ? value : 0;
+  const width = range.min !== null && range.max !== null ? Math.max(range.max - range.min, scale * 0.2) : scale;
+  if (range.min !== null && x < range.min - 1e-9) return (range.min - x) / width;
+  if (range.max !== null && x > range.max + 1e-9) return (x - range.max) / width;
+  return 0;
+}
+// Stare ustawienia (0.35-0.36): dren d -> { min: -d, max: null }, minimum życia x -> { min: x, max: null }.
+function rangeFromDrain(drain) {
+  return { min: -Math.max(0, Number(drain) || 0), max: null };
+}
+function rangeFromMinimum(value) {
+  return Number(value) > 0 ? { min: Number(value), max: null } : null;
+}
+function formatRange(range, unit, digits = 0, signed = false) {
+  if (!range) return "any";
+  const text = (value) => `${signed && value > 0 ? "+" : ""}${digits > 0 ? Number(value).toFixed(digits) : formatNumber(Math.round(value))}`;
+  if (range.min !== null && range.max !== null) return `${text(range.min)} to ${text(range.max)}${unit}`;
+  if (range.min !== null) return `≥ ${text(range.min)}${unit}`;
+  return `≤ ${text(range.max)}${unit}`;
+}
 // Ustawienia cyklu w jednym miejscu: czary + M, kliknięcia/s, kradzież many, mana z umiejętności, poison w celu,
-// dopuszczalny dren many (mana/s).
+// zakres bilansu many (cycle.mana, mana/s; stary zapis: dopuszczalny dren "drain").
 function normalizeCycle(cycle) {
+  const mana = cycle && cycle.mana !== undefined ? normalizeRange(cycle.mana) : rangeFromDrain(cycle && cycle.drain);
   return {
     ids: (cycle && cycle.ids) || [],
     cps: (cycle && cycle.cps) || SPELL_CLICKS_PER_SECOND,
     steal: cycle ? cycle.steal !== false : true,
     gain: cycle ? cycle.gain !== false : true,
     poison: Boolean(cycle && cycle.poison),
-    drain: Math.max(0, Number(cycle && cycle.drain) || 0),
+    mana,
+    // dopuszczalny dren (do opisów i starych wywołań): 999 = bez dolnej granicy
+    drain: !mana || mana.min === null ? 999 : Math.max(0, -mana.min),
     // mana z buffów w raidzie (Advanced, mana/s): dodatkowy dochód many cyklu
     buff: Math.max(0, Number(cycle && cycle.buff) || 0),
     // Optimizer, suwak Damage ↔ EHP (0-1): cel = obrażenia^(1-b) × EHP^b (0 = same obrażenia, 1 = samo EHP)
     blend: Math.max(0, Math.min(1, Number(cycle && cycle.blend) || 0)),
   };
 }
-// Mana wystarcza, gdy bilans nie spada poniżej dopuszczalnego drenu.
-function manaOk(metrics, cycle) {
-  return !cycle || !cycle.ids || cycle.ids.length === 0 || (metrics.cycleOk && metrics.manaNet >= -((cycle && cycle.drain) || 0) - 1e-9);
+// Zakres bilansu many cyklu (także z nieznormalizowanego cyklu ze starym "drain").
+function manaRangeOf(cycle) {
+  if (!cycle) return null;
+  return cycle.mana !== undefined ? normalizeRange(cycle.mana) : rangeFromDrain(cycle.drain);
 }
-// Filtr życia builda: "> 0" (Life sustain) i/lub minimalne odnawianie życia (suwak Life recovery, HP/s).
+// Mana: cykl da się rzucać (czary w drzewku) i bilans mieści się w zakresie (bez cyklu - bez warunku).
+function manaOk(metrics, cycle) {
+  if (!cycle || !cycle.ids || cycle.ids.length === 0) return true;
+  return Boolean(metrics.cycleOk) && inRange(metrics.manaNet, manaRangeOf(cycle));
+}
+// Zakres życia buildu (metryki buildu: lifeRange z 0.37 albo stare requireSustain / minSustain).
+function lifeRangeOf(metrics) {
+  if (!metrics) return null;
+  if (metrics.lifeRange !== undefined) return normalizeRange(metrics.lifeRange);
+  return rangeFromMinimum(metrics.minSustain);
+}
+// Filtr życia builda: zakres Life recovery (HP/s) i stary warunek "> 0" (Life sustain).
 function sustainPasses(metrics) {
   if (!metrics) return true;
   if (metrics.requireSustain && !(metrics.sustain > 0)) return false;
-  return !(metrics.minSustain > 0) || metrics.sustain >= metrics.minSustain - 1e-9;
+  return inRange(metrics.sustain, lifeRangeOf(metrics));
+}
+// Filtr Walk Speed buildu (metryki buildu: spdRange, walkSpeed).
+function speedPasses(metrics) {
+  if (!metrics || !metrics.spdRange) return true;
+  return inRange(metrics.walkSpeed, normalizeRange(metrics.spdRange));
+}
+// Wszystkie filtry zakresów naraz (mana, życie, Walk Speed) - Optimizer, Other picks, podmiany.
+function rangesOk(metrics, cycle, lifeRange, spdRange, requireSustain = false) {
+  return manaOk(metrics, cycle) && (!requireSustain || metrics.sustain > 0) && inRange(metrics.sustain, lifeRange) && inRange(metrics.walkSpeed, spdRange);
+}
+// Jak daleko do zakresów (0 = mieści się): do rozdziału wolnych punktów i porównań buildów, które nie przechodzą.
+function rangesMiss(metrics, cycle, lifeRange, spdRange, requireSustain = false) {
+  let miss = 0;
+  if (cycle && cycle.ids && cycle.ids.length > 0) {
+    if (!metrics.cycleOk) miss += 1;
+    miss += Math.min(2, rangeMiss(metrics.manaNet, manaRangeOf(cycle), RANGE_SCALE.mana));
+  }
+  if (requireSustain && !(metrics.sustain > 0)) miss += 0.5;
+  miss += Math.min(2, rangeMiss(metrics.sustain, lifeRange, RANGE_SCALE.life));
+  miss += Math.min(2, rangeMiss(metrics.walkSpeed, spdRange, RANGE_SCALE.spd));
+  return miss;
 }
 function cycleTiming(ids, cps, hps) {
   const clicks = Math.max(0.1, cps || SPELL_CLICKS_PER_SECOND);
@@ -1984,7 +1831,9 @@ function evaluateGoal(ctx, items, weapon, skillTotals, goal, cycle, altGoals = n
   // Life Steal: z cyklem tylko z jego trafień main attackiem; bez cyklu zakładamy ciągłe bicie (jak dawniej)
   const lifeStealPerSecond = timing ? stealPerSecond(lifeSteal, timing, hps) : lifeSteal / 3;
   const sustain = hpr / 4 + lifeStealPerSecond;
-  const result = { damage: 0, ehp, hp, hpr, lifeSteal, sustain, healthGain: (sustain * ehp) / hp, manaIncome: 0, manaUsed: 0, manaGain: 0, manaSteal: 0, manaNet: 0, cycleOk: true, goalName: "", stats };
+  // Walk Speed buildu (suwak zakresu Walk Speed): ta sama liczba co "Walk Speed" w podsumowaniu (computeBuildStats)
+  const walkSpeed = statValue(stats, "spd");
+  const result = { damage: 0, ehp, hp, hpr, lifeSteal, sustain, walkSpeed, healthGain: (sustain * ehp) / hp, manaIncome: 0, manaUsed: 0, manaGain: 0, manaSteal: 0, manaNet: 0, cycleOk: true, goalName: "", stats };
   if (!weapon) return result;
   let spells = ctx.spellCache ? ctx.spellCache.get(spellKey) : null;
   if (!spells) {
@@ -2062,8 +1911,9 @@ function evaluateGoal(ctx, items, weapon, skillTotals, goal, cycle, altGoals = n
     result.manaGain = gained / seconds;
   }
   result.manaNet = result.manaIncome + result.manaGain - result.manaUsed;
-  // dopuszczalny dren many (mana/s, suwak "Allowed mana drain"): zestaw przechodzi, gdy manaNet >= -drain
-  result.manaDrain = Math.max(0, (cycle && cycle.drain) || 0);
+  // dopuszczalny dren many (mana/s, dolna granica suwaka "Allowed mana drain"; 999 = bez granicy)
+  const manaRange = manaRangeOf(cycle);
+  result.manaDrain = !manaRange || manaRange.min === null ? 999 : Math.max(0, -manaRange.min);
   // Optimizer: cel mieszany obrażenia ↔ EHP (surowe obrażenia zostają w rawDamage)
   const blend = cycle && cycle.blend > 0 ? Math.min(1, cycle.blend) : 0;
   if (blend > 0) {
@@ -2183,7 +2033,42 @@ function yieldToBrowser() {
   });
 }
 
-async function generateDamageBuild({ playerClass, level, archetype = null, treeSettings, goal, cycle, minEhp = 0, requireSustain = false, minSustain = 0, options = DEFAULT_OPTIONS, items = ITEM_DB, powders = "auto", objective = "damage", onProgress = null, seeds = [], excludeEvents = true, tradeableOnly = false, effort = "full", spendFreeSkillPoints = true, task = null, parallel = null, caches = null, rollPercent = 100, spReserve = 0 }) {
+// Zakresy (0.37): dolne granice (dren many, minimum życia, minimum Walk Speed) szukanie traktuje jak próg EHP. Górne
+// granice (nadwyżka many, maksimum życia i Walk Speed) - najpierw szukanie bez nich. Jeśli jego wynik mieści się w nich,
+// jest wynikiem: granica, która nie przeszkadza, niczego nie zabiera (twarda górna granica od początku potrafiła zepchnąć
+// szukanie w gorszy zestaw: testy -2-7%, choć wynik bez niej się w niej mieścił). Inaczej drugie szukanie z całymi
+// zakresami, z wynikiem pierwszego jako jednym z punktów startu. Bez zakresów (Any) - jedno szukanie, jak w 0.35.
+async function generateDamageBuild(args) {
+  if (args.task || args.rangesExact) return generateDamageBuildOnce(args);
+  const cycleIn = args.cycle;
+  const hasCycle = Boolean(cycleIn && cycleIn.ids && cycleIn.ids.length > 0);
+  const mana = hasCycle ? manaRangeOf(cycleIn) : null;
+  const life = args.lifeRange !== undefined ? normalizeRange(args.lifeRange) : rangeFromMinimum(args.minSustain);
+  const spd = normalizeRange(args.spdRange);
+  if (!(mana && mana.max !== null) && !(life && life.max !== null) && !(spd && spd.max !== null)) return generateDamageBuildOnce(args);
+  const relaxed = await generateDamageBuildOnce({
+    ...args,
+    cycle: hasCycle ? { ...cycleIn, mana: mana ? { min: mana.min, max: null } : null } : cycleIn,
+    lifeRange: life ? normalizeRange({ min: life.min, max: null }) : null,
+    minSustain: 0,
+    spdRange: spd ? normalizeRange({ min: spd.min, max: null }) : null,
+    rangesExact: true,
+  });
+  const m = relaxed.metrics;
+  const fullCycle = normalizeCycle(cycleIn);
+  const fits = relaxed.passed && (!hasCycle || manaOk(m, fullCycle)) && inRange(m.sustain, life) && inRange(m.walkSpeed, spd);
+  if (fits) {
+    // ten sam build, opisany zakresami gracza (podsumowanie, Why this build?, link)
+    return { ...relaxed, metrics: { ...m, cycle: fullCycle, lifeRange: life, spdRange: spd, minSustain: life && life.min !== null ? Math.max(0, life.min) : 0 }, stats: { ...relaxed.stats, ranges: "fit on the first search" } };
+  }
+  const seed = { picks: Object.fromEntries(relaxed.slots.filter((slot) => slot.item && slot.id !== "weapon").map((slot) => [slot.id, slot.item])), weapon: relaxed.slots.find((slot) => slot.id === "weapon").item };
+  const onProgress = args.onProgress ? (progress) => args.onProgress({ ...progress, label: `Fitting the ranges: ${String(progress.label || "").charAt(0).toLowerCase()}${String(progress.label || "").slice(1)}` }) : null;
+  // drugie szukanie bez przebiegów "z zapasem EHP" i "pod inne czary" - pierwsze już je zrobiło, a jego wynik jest punktem startu
+  const constrained = await generateDamageBuildOnce({ ...args, seeds: [...(args.seeds || []), ...(seed.weapon ? [seed] : [])], onProgress, rangesExact: true, secondSearch: true });
+  return { ...constrained, stats: { ...constrained.stats, ranges: "second search with the ranges" } };
+}
+
+async function generateDamageBuildOnce({ playerClass, level, archetype = null, treeSettings, goal, cycle, minEhp = 0, requireSustain = false, minSustain = 0, lifeRange = undefined, spdRange = null, secondSearch = false, options = DEFAULT_OPTIONS, items = ITEM_DB, powders = "auto", objective = "damage", onProgress = null, seeds = [], excludeEvents = true, tradeableOnly = false, effort = "full", spendFreeSkillPoints = true, task = null, parallel = null, caches = null, rollPercent = 100, spReserve = 0 }) {
   // "Realistic rolls": wszystkie losowane ID przy podanym rollu (np. 50%) zamiast maksymalnych
   if (rollPercent < 100) items = rolledItems(items, rollPercent);
   // effort "quick" (lista buildów dla każdego progu EHP): bez wiązki z zapasem EHP i wiązek pod inne czary,
@@ -2330,29 +2215,63 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
   // Jak daleko zestawowi do progów (0 = przechodzi): używane przy naprawie, gdy nic nie przechodzi od razu.
   // Próg EHP, na który aktualnie szukamy: zwykle minEhp, na czas przebiegu "z zapasem" wyższy (krok 2b).
   let ehpTarget = minEhp;
-  // Życie: "> 0" (requireSustain) i/lub minimalne odnawianie życia w HP/s (suwak "Life recovery", minSustain):
+  // Życie: zakres Life recovery w HP/s (lifeRange; stary zapis: minSustain) i stary warunek "> 0" (requireSustain):
   // Health Regen / 4 s + Life Steal z trafień main attacku w cyklu.
-  const lifeFloor = Math.max(0, Number(minSustain) || 0);
+  const lifeLimits = lifeRange !== undefined ? normalizeRange(lifeRange) : rangeFromMinimum(minSustain);
+  const lifeFloor = lifeLimits && lifeLimits.min !== null ? Math.max(0, lifeLimits.min) : 0;
   const needSustain = requireSustain || lifeFloor > 0;
-  const sustainOk = (metrics) => (!requireSustain || metrics.sustain > 0) && (lifeFloor <= 0 || metrics.sustain >= lifeFloor - 1e-9);
+  const sustainOk = (metrics) => (!requireSustain || metrics.sustain > 0) && inRange(metrics.sustain, lifeLimits);
+  // Mana: zakres bilansu cyklu (cycleCfg.mana: dolna granica = dopuszczalny dren, górna = najwyżej tyle nadwyżki).
+  const manaLimits = cycleCfg.ids.length > 0 ? cycleCfg.mana : null;
+  const manaFloor = manaLimits && manaLimits.min !== null ? manaLimits.min : null;
+  const manaCeil = manaLimits && manaLimits.max !== null ? manaLimits.max : null;
+  // Walk Speed: zakres w % (spdRange); poniżej minimum przedmioty z Walk Speed dostają miejsce wśród kandydatów.
+  const spdLimits = normalizeRange(spdRange);
+  const spdFloor = spdLimits && spdLimits.min !== null ? spdLimits.min : null;
+  const spdOk = (metrics) => inRange(metrics.walkSpeed, spdLimits);
+  // górne granice (nadwyżka many, życie, Walk Speed) - wolne skill pointy ich nie obniżają, więc sprawdza je ocena bez
+  // wolnych punktów (zob. evaluateExact)
+  const upperOk = (metrics) =>
+    (manaCeil === null || metrics.manaNet <= manaCeil + 1e-9) &&
+    (!lifeLimits || lifeLimits.max === null || metrics.sustain <= lifeLimits.max + 1e-9) &&
+    (!spdLimits || spdLimits.max === null || metrics.walkSpeed <= spdLimits.max + 1e-9);
+  const upperMiss = (metrics) =>
+    (manaCeil !== null && metrics.manaNet > manaCeil ? rangeMiss(metrics.manaNet, manaLimits, RANGE_SCALE.mana) : 0) +
+    (lifeLimits && lifeLimits.max !== null && metrics.sustain > lifeLimits.max ? rangeMiss(metrics.sustain, lifeLimits, RANGE_SCALE.life) : 0) +
+    (spdLimits && spdLimits.max !== null && metrics.walkSpeed > spdLimits.max ? rangeMiss(metrics.walkSpeed, spdLimits, RANGE_SCALE.spd) : 0);
   const shortfall = (metrics) => {
     let miss = metrics.spOver / 10;
     if (ehpTarget > 0 && metrics.ehp < ehpTarget) miss += 1 - metrics.ehp / ehpTarget;
-    if (!sustainOk(metrics)) miss += 0.5 + Math.min(1, Math.max(0, lifeFloor - metrics.sustain) / Math.max(100, lifeFloor));
+    if (!sustainOk(metrics)) miss += 0.5 + Math.min(1, lifeLimits ? rangeMiss(metrics.sustain, lifeLimits, Math.max(RANGE_SCALE.life, lifeFloor)) : Math.max(0, -metrics.sustain) / RANGE_SCALE.life);
     if (cycleCfg.ids.length > 0 && metrics.manaUsed > 0) {
-      const share = (metrics.manaIncome + metrics.manaGain + cycleCfg.drain) / metrics.manaUsed;
-      if (share < 1) miss += 1 - share;
+      if (manaFloor !== null) {
+        const share = (metrics.manaIncome + metrics.manaGain - manaFloor) / metrics.manaUsed;
+        if (share < 1) miss += 1 - share;
+      }
       if (!metrics.cycleOk) miss += 1;
-    }
+    } else if (cycleCfg.ids.length > 0 && manaFloor !== null && manaFloor > 0 && metrics.manaNet < manaFloor) miss += Math.min(1, (manaFloor - metrics.manaNet) / RANGE_SCALE.mana);
+    if (manaCeil !== null && metrics.manaNet > manaCeil) miss += Math.min(1, rangeMiss(metrics.manaNet, manaLimits, RANGE_SCALE.mana));
+    if (!spdOk(metrics)) miss += 0.5 + Math.min(1, rangeMiss(metrics.walkSpeed, spdLimits, RANGE_SCALE.spd));
     if (budget && metrics.cost > budget) miss += metrics.cost / budget - 1;
     return miss;
   };
+  // dolne granice zakresów (dren many, minimum życia, minimum Walk Speed) - twarde już w przybliżonym szukaniu, jak EHP
+  const lowerRangesOk = (metrics) =>
+    (!requireSustain || metrics.sustain > 0) &&
+    (!lifeLimits || lifeLimits.min === null || metrics.sustain >= lifeLimits.min - 1e-9) &&
+    (cycleCfg.ids.length === 0 || (metrics.cycleOk && (manaFloor === null || metrics.manaNet >= manaFloor - 1e-9))) &&
+    (spdFloor === null || metrics.walkSpeed >= spdFloor - 1e-9);
+  // Przybliżone szukanie (wiązka, dopieszczanie, pary): górne granice zakresów tylko jako łagodna kara w wartości
+  // zestawu - twardo liczą się dopiero w dokładnym etapie (exactOk). Twarda górna granica już tutaj spychała
+  // dopieszczanie do pierwszego zestawu pod granicą i gubiła lepsze (testy: -5-7% przy nadwyżce many ≤ +1, choć
+  // wynik bez granicy też się w niej mieścił).
   const feasible = (metrics) =>
     metrics.spOver === 0 &&
     (ehpTarget <= 0 || metrics.ehp >= ehpTarget) &&
-    sustainOk(metrics) &&
-    manaOk(metrics, cycleCfg) &&
+    lowerRangesOk(metrics) &&
     (!budget || metrics.cost <= budget);
+  // zestaw blisko minimum Walk Speed (albo pod nim): pule dopieszczania dostają też najszybsze przedmioty slotu
+  const spdNear = (metrics) => spdFloor !== null && metrics.walkSpeed < spdFloor + 10;
   // Wartość w wiązce: obrażenia × kary za niespełnione progi (twarde odcięcie dopiero na końcu, żeby wiązka
   // nie zgubiła zestawów, które dopiero z kolejnym slotem wchodzą w próg).
   // Jak daleko zaszła wiązka (1 = zestaw kompletny). Zestaw z dwoma założonymi slotami nie ma jeszcze prawa mieć
@@ -2369,11 +2288,17 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
       if (metrics.ehp < target) factor *= Math.pow(Math.max(0.02, metrics.ehp / target), power);
     }
     // ujemne życie da się naprawić jednym przedmiotem pod koniec, więc na początku wiązki kara jest łagodna
-    if (!sustainOk(metrics)) factor *= 1 - 0.7 * progress;
-    if (cycleCfg.ids.length > 0 && metrics.manaUsed > 0) {
-      const share = (metrics.manaIncome + metrics.manaGain + cycleCfg.drain) / metrics.manaUsed;
+    if ((requireSustain && !(metrics.sustain > 0)) || (lifeFloor > 0 && metrics.sustain < lifeFloor - 1e-9)) factor *= 1 - 0.7 * progress;
+    // górne granice (nadwyżka many, życie, Walk Speed): łagodna kara, rośnie z postępem
+    const over = upperMiss(metrics);
+    if (over > 0) factor *= Math.exp(-over * progress);
+    if (cycleCfg.ids.length > 0 && manaFloor !== null && metrics.manaUsed > 0) {
+      const share = (metrics.manaIncome + metrics.manaGain - manaFloor) / metrics.manaUsed;
       if (share < progress) factor *= Math.pow(Math.max(0.02, share / progress), power);
     }
+    // Walk Speed poniżej minimum: łagodna kara rosnąca z postępem (kolejny przedmiot może ją jeszcze podnieść; kara
+    // skalowana postępem granicy albo z wykładnikiem jak EHP gubiła lepsze zestawy - testy: -7%)
+    if (spdFloor !== null && metrics.walkSpeed < spdFloor) factor *= Math.exp(-((spdFloor - metrics.walkSpeed) / RANGE_SCALE.spd) * progress);
     if (budget && metrics.cost > budget) factor *= Math.pow(budget / metrics.cost, 2);
     return factor;
   }
@@ -2473,7 +2398,7 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
       const scored = bySlot[slotId].map((item) => {
         const reqs = SKILLS.reduce((sum, skill) => sum + (item.reqs[skill] || 0), 0);
         const damage = phase === "ehp" ? proxyScore(item, weights.ehp) : proxyScore(item, weights.damage);
-        return { item, damage, perSp: damage / (1 + reqs / 20), ehp: proxyScore(item, weights.ehp), mana: proxyScore(item, weights.mana), sustain: sustainProxy(item) };
+        return { item, damage, perSp: damage / (1 + reqs / 20), ehp: proxyScore(item, weights.ehp), mana: proxyScore(item, weights.mana), sustain: sustainProxy(item), spd: item.ids.spd || 0 };
       });
       const pool = new Set();
       const take = (key, count) => [...scored].sort((a, b) => b[key] - a[key]).slice(0, count).forEach((entry) => pool.add(entry.item));
@@ -2482,7 +2407,9 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
       if (minEhp > 0) take("ehp", DAMAGE_BEAM.extraPerSlot);
       if (cycleCfg.ids.length > 0) take("mana", DAMAGE_BEAM.extraPerSlot);
       if (needSustain) take("sustain", DAMAGE_BEAM.extraPerSlot);
-      candidates[slotId] = [...pool].map((item) => ({ item, damage: phase === "ehp" ? proxyScore(item, weights.ehp) : proxyScore(item, weights.damage), ehp: proxyScore(item, weights.ehp), mana: proxyScore(item, weights.mana) }));
+      // minimum Walk Speed: najszybsze przedmioty slotu też są kandydatami (inaczej wiązka odrzuca je, zanim filtr je zobaczy)
+      if (spdFloor !== null) take("spd", DAMAGE_BEAM.extraPerSlot);
+      candidates[slotId] = [...pool].map((item) => ({ item, damage: phase === "ehp" ? proxyScore(item, weights.ehp) : proxyScore(item, weights.damage), ehp: proxyScore(item, weights.ehp), mana: proxyScore(item, weights.mana), spd: item.ids.spd || 0 }));
     });
     let beam = [{ items: [], picks: {}, metrics: evaluate([], weapon) }];
     gearSlots.forEach((slotId, slotIndex) => {
@@ -2504,6 +2431,13 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
         });
         rough.sort((a, b) => b.approx - a.approx);
         const tried = [...emptyOption(slotId), ...rough.slice(0, exactPer).map((row) => row.entry)];
+        // zestaw poniżej minimum Walk Speed (skalowanego postępem): dwa najszybsze przedmioty slotu też dostają dokładną ocenę
+        if (spdFloor !== null && state.metrics.walkSpeed < spdFloor)
+          rough
+            .filter((row) => row.entry.spd > 0 && !tried.includes(row.entry))
+            .sort((a, b) => b.entry.spd - a.entry.spd)
+            .slice(0, 2)
+            .forEach((row) => tried.push(row.entry));
         tried.forEach((entry) => {
           const items2 = entry ? [...state.items, entry.item] : state.items;
           const picks = entry ? { ...state.picks, [slotId]: entry.item } : state.picks;
@@ -2598,7 +2532,7 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
   // Krok 2b: druga wiązka z zapasem EHP (+20%). Zestaw, który przechodzi wyższy próg, przechodzi też niższy, a wiązka
   // prowadzona od początku "bardziej obronnie" trafia w inne kombinacje - bez tego zdarzało się, że wyższy próg dawał
   // większe obrażenia niż niższy (np. 35% EHP > 30%), czyli przy niższym progu gubiliśmy lepszy zestaw.
-  if (objective === "damage" && minEhp > 0 && !quickEffort && !task) {
+  if (objective === "damage" && minEhp > 0 && !quickEffort && !task && !secondSearch) {
     for (const [index, margin] of DAMAGE_BEAM.ladder.entries()) {
       ehpTarget = minEhp * margin;
       const span = 0.29 / DAMAGE_BEAM.ladder.length;
@@ -2611,7 +2545,7 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
   // Zestaw zbudowany "pod Uproot" bywał mocniejszy w Blood Sorrow niż zestaw zbudowany pod sam Blood Sorrow
   // (testy portfelowe: +2-29%), bo liniowe wagi celu przy pustym zestawie źle przewidują, co się opłaci.
   // Kandydaci z tych wiązek konkurują dalej obrażeniami właściwego celu.
-  if (objective === "damage" && !quickEffort && !task) {
+  if (objective === "damage" && !quickEffort && !task && !secondSearch) {
     for (const [index] of altGoals.entries()) {
       phase = index;
       const around = await runPhase("Searching around other spells", 0.62, 0.66);
@@ -2708,6 +2642,7 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
       if (minEhp > 0) take("ehp", weights.ehp, Math.ceil((DAMAGE_BEAM.polishPool * repairing) / 2));
       if (cycleCfg.ids.length > 0) take("mana", weights.mana, Math.ceil((DAMAGE_BEAM.polishPool * repairing) / 2));
       if (needSustain) topBy(bySlot[slotId], sustainProxy, Math.ceil(DAMAGE_BEAM.polishPool / 2)).forEach((item) => pool.add(item));
+      if (spdNear(candidate.metrics)) topBy(bySlot[slotId], (item) => item.ids.spd || 0, Math.ceil(DAMAGE_BEAM.polishPool / 2)).forEach((item) => pool.add(item));
       if (candidate.picks[slotId]) pool.add(candidate.picks[slotId]);
       pools[slotId] = [...pool];
     });
@@ -2785,6 +2720,7 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
       if (minEhp > 0) take((item) => proxyScore(item, weights.ehp), Math.ceil(DAMAGE_BEAM.pairPool / 2));
       if (cycleCfg.ids.length > 0) take((item) => proxyScore(item, weights.mana), Math.ceil(DAMAGE_BEAM.pairPool / 2));
       if (needSustain) take(sustainProxy, Math.ceil(DAMAGE_BEAM.pairPool / 2));
+      if (spdNear(start.metrics)) take((item) => item.ids.spd || 0, Math.ceil(DAMAGE_BEAM.pairPool / 2));
       pools[slotId] = [...pool];
     });
     let best = start;
@@ -2823,6 +2759,17 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
     (minEhp <= 0 || metrics.ehp >= minEhp) &&
     sustainOk(metrics) &&
     manaOk(metrics, cycleCfg) &&
+    spdOk(metrics) &&
+    (!budget || metrics.cost <= budget);
+  // tylko dolne granice (skill pointy, EHP, dren many, minimum życia i Walk Speed, budżet) - optymistyczna ocena z wolnymi
+  // punktami sprawdza je, a górne granice sprawdza ocena bez nich (upperOk)
+  const lowerOk = (metrics) =>
+    metrics.spOver === 0 &&
+    (minEhp <= 0 || metrics.ehp >= minEhp) &&
+    (!requireSustain || metrics.sustain > 0) &&
+    (!lifeLimits || lifeLimits.min === null || metrics.sustain >= lifeLimits.min - 1e-9) &&
+    (cycleCfg.ids.length === 0 || (metrics.cycleOk && (manaFloor === null || metrics.manaNet >= manaFloor - 1e-9))) &&
+    (spdFloor === null || metrics.walkSpeed >= spdFloor - 1e-9) &&
     (!budget || metrics.cost <= budget);
   const exactRank = (metrics) => (exactOk(metrics) ? 1e15 + metrics.damage : -shortfall(metrics));
   // bar: obecnie najlepszy wynik; wolne punkty rozdzielamy tylko kandydatom, którzy mają szansę go pobić
@@ -2868,7 +2815,9 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
         const free = ctx.available - entry.sp.total;
         const totals = Object.fromEntries(SKILLS.map((skill) => [skill, (entry.sp.totals[skill] || 0) + Math.max(0, Math.min(free, MAX_ASSIGNED_PER_SKILL - (entry.sp.assigned[skill] || 0)))]));
         const best = evaluateGoal(ctx, entry.all, weapon, totals, goal, cycleCfg);
-        entry.optimistic = { damage: best.damage, ok: exactOk({ ...best, spOver: 0, cost: entry.cost }) };
+        // górne granice zakresów rosną razem ze skill pointami (INT tanieje czary = większa nadwyżka many), więc dla
+        // nich granicą jest ocena bez wolnych punktów: gdy już ona je przekracza, żaden rozdział tego nie naprawi
+        entry.optimistic = { damage: best.damage, ok: lowerOk({ ...best, spOver: 0, cost: entry.cost }) && upperOk(plain) };
       }
       if (!entry.optimistic.ok || entry.optimistic.damage < bar) return plain;
     }
@@ -2935,7 +2884,8 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
       sp.capOverflow === 0 &&
       (minEhp <= 0 || metrics.ehp >= minEhp) &&
       manaOk(metrics, cycleCfg) &&
-      sustainOk(metrics)
+      sustainOk(metrics) &&
+      spdOk(metrics)
     );
   };
   // względny zysk celu z jednego wolnego punktu (pierwsze 5 punktów najlepszej umiejętności zestawu startowego)
@@ -2987,12 +2937,20 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
       }
       const top = (list, score, count) => [...list].sort((a, b) => score(b) - score(a)).slice(0, count).map((entry) => entry.candidate);
       // nic nie przechodzi progów: pary mają najpierw je spełnić, więc krótkie listy przedmiotów "naprawczych"
+      // zakresy: przedmioty, które przybliżają zestaw do zakresu Walk Speed / many / życia z tej strony, gdzie go brakuje
+      const rangeLists = [
+        ...(spdNear(start.metrics) ? top(scored, (entry) => entry.metrics.walkSpeed, PAIR_LIST / 2) : []),
+        ...(spdLimits && spdLimits.max !== null && start.metrics.walkSpeed > spdLimits.max ? top(scored, (entry) => -entry.metrics.walkSpeed, PAIR_LIST / 2) : []),
+        ...(manaCeil !== null && start.metrics.manaNet > manaCeil ? top(scored, (entry) => -entry.metrics.manaNet, PAIR_LIST / 2) : []),
+        ...(lifeLimits && lifeLimits.max !== null && start.metrics.sustain > lifeLimits.max ? top(scored, (entry) => -entry.metrics.sustain, PAIR_LIST / 2) : []),
+      ];
       const chosen = repairing
         ? [
             ...top(scored, (entry) => entry.metrics.damage, 4),
             ...top(scored, (entry) => entry.metrics.ehp, PAIR_LIST / 2),
             ...top(scored, (entry) => -entry.metrics.sp.total, PAIR_LIST / 2),
             ...(cycleCfg.ids.length > 0 ? top(scored, (entry) => entry.metrics.manaNet, PAIR_LIST / 2) : []),
+            ...rangeLists,
           ]
         : [
             ...top(scored, (entry) => entry.metrics.damage, PAIR_LIST),
@@ -3000,6 +2958,7 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
             ...top(scored, (entry) => -entry.metrics.sp.total, PAIR_LIST / 2),
             ...(cycleCfg.ids.length > 0 ? top(scored, (entry) => entry.metrics.manaNet, PAIR_LIST / 2) : []),
             ...top(scored.filter((entry) => !feasible(entry.metrics)), (entry) => entry.metrics.damage, PAIR_LIST / 2),
+            ...rangeLists,
           ];
       const seen = new Set();
       lists[slotId] = chosen.filter((candidate) => {
@@ -3177,6 +3136,9 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
     const metrics = packed.metrics || evaluate(items2, weapon);
     return { picks, items: items2, weapon, metrics, ok: packed.metrics ? exactOk(metrics) : feasible(metrics), guide: packed.guide || undefined };
   };
+  // zadania w innych wątkach liczą się z ustawieniami tego szukania (pierwsze szukanie bez górnych granic zakresów
+  // różni się od parametrów całego zlecenia)
+  const taskOverride = { cycle, lifeRange: lifeLimits, spdRange: spdLimits, minSustain, requireSustain };
   // Tryb zadania (wątek pomocniczy): bez wiązki, tylko jedno zadanie od podanego startu.
   if (task) {
     const start = unpackCandidate(task.start);
@@ -3261,7 +3223,7 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
     if (remote.length > 0) {
       passes.parallel += remote.length;
       remoteDone = Promise.resolve()
-        .then(() => parallel(remote.map(({ job }) => ({ start: packCandidate(job.candidate, false), refine: job.refine }))))
+        .then(() => parallel(remote.map(({ job }) => ({ start: packCandidate(job.candidate, false), refine: job.refine, override: taskOverride }))))
         .catch(() => null);
     }
     for (const [index, job] of jobs.entries()) {
@@ -3331,7 +3293,8 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
     spValid &&
     (minEhp <= 0 || finalMetrics.ehp >= minEhp) &&
     manaOk(finalMetrics, cycleCfg) &&
-    sustainOk(finalMetrics);
+    sustainOk(finalMetrics) &&
+    spdOk(finalMetrics);
   const warnings = [];
   if (!spValid) warnings.push(`This set needs ${exactSp.total} skill points, but level ${level} gives ${ctx.available}.`);
   if (minEhp > 0 && finalMetrics.ehp < minEhp)
@@ -3341,14 +3304,42 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
   if (requireSustain && finalMetrics.sustain <= 0)
     warnings.push(`Nothing with these settings keeps life sustain above zero; the closest build loses ${Math.abs(finalMetrics.sustain).toFixed(1)} health per second. Turn off the life sustain filter or lower the other thresholds.`);
   else if (lifeFloor > 0 && finalMetrics.sustain < lifeFloor)
-    warnings.push(`Nothing with these settings reaches ${formatNumber(lifeFloor)} HP/s life recovery; the closest build has ${finalMetrics.sustain.toFixed(1)} HP/s. Lower the Life recovery slider or the other thresholds.`);
+    warnings.push(`Nothing with these settings reaches ${formatNumber(lifeFloor)} HP/s life recovery; the closest build has ${finalMetrics.sustain.toFixed(1)} HP/s. Lower the Life recovery minimum or the other thresholds.`);
+  else if (lifeLimits && lifeLimits.max !== null && finalMetrics.sustain > lifeLimits.max + 1e-9)
+    warnings.push(`Nothing with these settings stays under ${formatNumber(lifeLimits.max)} HP/s life recovery; the closest build has ${finalMetrics.sustain.toFixed(1)} HP/s. Raise the Life recovery maximum or set it to Any.`);
+  if (spdLimits && !spdOk(finalMetrics)) {
+    const low = spdLimits.min !== null && finalMetrics.walkSpeed < spdLimits.min;
+    const bound = low ? spdLimits.min : spdLimits.max;
+    warnings.push(
+      `Nothing with these settings ${low ? "reaches" : "stays under"} ${bound > 0 ? "+" : bound < 0 ? "−" : ""}${Math.abs(bound)}% walk speed; the closest build has ${finalMetrics.walkSpeed > 0 ? "+" : finalMetrics.walkSpeed < 0 ? "−" : ""}${Math.abs(Math.round(finalMetrics.walkSpeed))}%. ${low ? "Lower the Walk Speed minimum" : "Raise the Walk Speed maximum"} or the other thresholds.`
+    );
+  }
   const pinnedNames = Object.values(normalized.locked || {});
   if (!passed && pinnedNames.length > 0) warnings.push(`Pinned item${pinnedNames.length === 1 ? "" : "s"} (${pinnedNames.join(", ")}) stay in the build even when they keep it from passing the filters; unpin to compare.`);
   if (cycleCfg.ids.length > 0 && !finalMetrics.cycleOk) warnings.push("Some spells in the cycle aren't unlocked in your ability tree, so their mana cost is unknown.");
+  else if (cycleCfg.ids.length > 0 && manaCeil !== null && finalMetrics.manaNet > manaCeil + 1e-9)
+    warnings.push(
+      `Nothing with these settings keeps the cycle's mana surplus at ${manaCeil > 0 ? "+" : ""}${manaCeil} mana/s or less; the closest build has +${finalMetrics.manaNet.toFixed(1)} mana/s. Raise the mana maximum or set it to Any.`
+    );
   else if (cycleCfg.ids.length > 0 && !manaOk(finalMetrics, cycleCfg))
     warnings.push(
-      `Nothing with these settings sustains that cycle; the closest build is ${Math.abs(finalMetrics.manaNet).toFixed(1)} mana/s short. Lower the clicks per second, drop a spell from the cycle or ask for less effective HP.`
+      manaFloor !== null && manaFloor > 0
+        ? `Nothing with these settings keeps a surplus of ${manaFloor} mana/s; the closest build has ${finalMetrics.manaNet >= 0 ? "+" : ""}${finalMetrics.manaNet.toFixed(1)} mana/s. Lower the mana minimum or the other thresholds.`
+        : `Nothing with these settings sustains that cycle; the closest build is ${Math.abs(finalMetrics.manaNet - Math.min(0, manaFloor || 0)).toFixed(1)} mana/s short. Lower the clicks per second, drop a spell from the cycle or ask for less effective HP.`
     );
+  // kilka zakresów naraz bez rozwiązania: który jest najdalej
+  {
+    const misses = [
+      ["effective HP", minEhp > 0 && finalMetrics.ehp < minEhp ? 1 - finalMetrics.ehp / minEhp : 0],
+      ["mana", cycleCfg.ids.length > 0 ? rangeMiss(finalMetrics.manaNet, manaLimits, RANGE_SCALE.mana) : 0],
+      ["life recovery", rangeMiss(finalMetrics.sustain, lifeLimits, Math.max(RANGE_SCALE.life, lifeFloor))],
+      ["walk speed", rangeMiss(finalMetrics.walkSpeed, spdLimits, RANGE_SCALE.spd)],
+    ].filter(([, miss]) => miss > 1e-9);
+    if (misses.length >= 2) {
+      const worst = misses.reduce((top, entry) => (entry[1] > top[1] ? entry : top));
+      warnings.push(`${misses.length} ranges can't all be met together here; the furthest off is ${worst[0]}.`);
+    }
+  }
   const slotScore = (slotId) => {
     const without = allItems.filter((item) => item !== picks[slotId]);
     const sp = computeSkillPoints(without);
@@ -3382,6 +3373,9 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
       sustain: finalMetrics.sustain,
       requireSustain,
       minSustain: lifeFloor,
+      lifeRange: lifeLimits,
+      spdRange: spdLimits,
+      walkSpeed: finalMetrics.walkSpeed,
       excludeEvents,
       tradeableOnly,
       spendFreeSkillPoints,
@@ -3705,11 +3699,6 @@ function guideExtrasFor(playerClass, archetype, kind) {
   return [...list.filter((entry) => entry.archetype === archetype), ...list.filter((entry) => entry.archetype !== archetype)];
 }
 
-function timedBuild(level, playerClass, archetype, options, run) {
-  const started = performance.now();
-  const build = generateOptimizedBuild(level, playerClass, archetype, ITEM_DB, options);
-  return { build, run, ms: Math.max(1, Math.round(performance.now() - started)), at: new Date() };
-}
 
 // MOTYW JASNY/CIEMNY. Interfejs jest projektowany w ciemnym stylu gry; jasny motyw powstaje z niego:
 // - klasy mc-* i kolory Tailwinda mają własne jasne odpowiedniki w MC_STYLES (sekcja [data-theme=light]),
@@ -4041,6 +4030,17 @@ select.mc-input option{background:#000;color:#fff}
 .mc-range::-moz-range-progress{height:16px;background:var(--mc-accent,#7FE828);box-shadow:inset 0 3px 0 rgba(255,255,255,.45),inset 0 -3px 0 rgba(0,0,0,.4)}
 .mc-range::-moz-range-thumb{width:8px;height:16px;border-radius:0;background:#b0b0b0;border:2px solid #000;box-shadow:inset 2px 2px 0 #e6e6e6,inset -2px -2px 0 #5a5a5a}
 .mc-range:hover::-webkit-slider-thumb{background:#c8c8c8}
+.mc-range2{position:relative;height:20px}
+.mc-range2-track{position:absolute;left:0;right:0;top:2px;height:16px;border:2px solid #a0a0a0;background:#000}
+.mc-range2-fill{position:absolute;top:0;bottom:0;background:var(--mc-accent,#7FE828);box-shadow:inset 0 3px 0 rgba(255,255,255,.45),inset 0 -3px 0 rgba(0,0,0,.4)}
+.mc-range2 input{position:absolute;left:0;top:0;width:100%;height:20px;margin:0;-webkit-appearance:none;appearance:none;background:transparent;pointer-events:none}
+.mc-range2 input::-webkit-slider-runnable-track{height:16px;background:transparent;border:2px solid transparent}
+.mc-range2 input::-webkit-slider-thumb{pointer-events:auto;cursor:pointer;-webkit-appearance:none;width:12px;height:20px;margin-top:-4px;background:#b0b0b0;border:2px solid #000;box-shadow:inset 2px 2px 0 #e6e6e6,inset -2px -2px 0 #5a5a5a}
+.mc-range2 input::-moz-range-track{background:transparent;border:0}
+.mc-range2 input::-moz-range-thumb{pointer-events:auto;cursor:pointer;width:8px;height:16px;border-radius:0;background:#b0b0b0;border:2px solid #000;box-shadow:inset 2px 2px 0 #e6e6e6,inset -2px -2px 0 #5a5a5a}
+.mc-range2 input:focus-visible{outline:none}
+.mc-range2 input:focus-visible::-webkit-slider-thumb{outline:2px solid #fff;outline-offset:1px}
+.mc-range2 input:hover::-webkit-slider-thumb{background:#c8c8c8}
 .mc-tick{position:absolute;top:2px;z-index:0;width:2px;height:16px;background:#fff;opacity:.6;pointer-events:none;margin-left:-1px}
 .mc-bar{position:relative;height:12px;background:#000;border:2px solid #000;box-shadow:inset 0 0 0 1px #2e2b36;overflow:hidden}
 .mc-bar-fill{height:100%;box-shadow:inset 0 2px 0 rgba(255,255,255,.4),inset 0 -2px 0 rgba(0,0,0,.45)}
@@ -4220,6 +4220,9 @@ select.mc-input option{background:#000;color:#fff}
 .wbr-mc[data-theme=light] .mc-range::-webkit-slider-thumb{background:#C9C6D0;border-color:#3A3644;box-shadow:inset 2px 2px 0 #F4F3F7,inset -2px -2px 0 #8E899A}
 .wbr-mc[data-theme=light] .mc-range::-moz-range-thumb{background:#C9C6D0;border-color:#3A3644;box-shadow:inset 2px 2px 0 #F4F3F7,inset -2px -2px 0 #8E899A}
 .wbr-mc[data-theme=light] .mc-range:hover::-webkit-slider-thumb{background:#DAD7E0}
+.wbr-mc[data-theme=light] .mc-range2-track{background:#FFFFFF;border-color:#6E6A78}
+.wbr-mc[data-theme=light] .mc-range2 input::-webkit-slider-thumb{background:#C9C6D0;border-color:#3A3644;box-shadow:inset 2px 2px 0 #F4F3F7,inset -2px -2px 0 #8E899A}
+.wbr-mc[data-theme=light] .mc-range2 input::-moz-range-thumb{background:#C9C6D0;border-color:#3A3644;box-shadow:inset 2px 2px 0 #F4F3F7,inset -2px -2px 0 #8E899A}
 .wbr-mc[data-theme=light] .mc-tick{background:#14121A;opacity:.45}
 .wbr-mc[data-theme=light] .mc-bar{background:#FFFFFF;border-color:#3A3644;box-shadow:inset 0 0 0 1px #D6D2DE}
 .wbr-mc[data-theme=light] ::-webkit-scrollbar-track{background:#E4E1EA;border-color:#BDB8C8;box-shadow:none}
@@ -4550,7 +4553,7 @@ const ICON_THEME_COLORS = {
 };
 
 // Kolory tooltipa z gry: granatowe tło, ramka w kolorze rzadkości, jasny tekst; czcionka Pixelify Sans (najbliższa
-// czcionce tooltipów w grze spośród otwartych), reszta interfejsu zostaje w Tiny5.
+// czcionce tooltipów w grze spośród otwartych).
 const TOOLTIP = { text: "#F2EEFF", muted: "#A9AAC9", good: "#55FF55", bad: "#FF5555", ink: "#101228", bg: "#141A3C", bg2: "#0B0E22" };
 const CARD_FONT = PIXEL_FONT;
 
@@ -5709,20 +5712,29 @@ function damageAlternatives(build, slotId, limit, pool) {
     const sp = computeSkillPoints(items);
     const metrics = evaluateGoal(ctx, items, weaponNow, sp.totals, build.goal, cycle);
     const spOver = Math.max(0, sp.total - build.skillPoints.available) + sp.capOverflow;
-    return { metrics, spOver, sp };
+    // przedmiot z setu, którego nie da się nosić razem z innym przedmiotem buildu
+    const illegal = activeSets(items).find((set) => set.illegal);
+    return { metrics, spOver, sp, illegalSet: illegal ? illegal.name : null };
   };
   const base = measure(current);
   const list = pool
     .filter((item) => !(current && item.name === current.name) && !ringsClash(picks, slotId, item))
     .map((item) => (slotId === "weapon" ? powderForProfile(item, build.profile) : item))
     .map((item) => {
-      const { metrics, spOver } = measure(item);
-      const passes = spOver === 0 && (minEhp <= 0 || metrics.ehp >= minEhp) && manaOk(metrics, cycle) && sustainPasses({ ...metrics, requireSustain: build.metrics.requireSustain, minSustain: build.metrics.minSustain });
+      const { metrics, spOver, illegalSet } = measure(item);
+      const passes =
+        spOver === 0 &&
+        !illegalSet &&
+        (minEhp <= 0 || metrics.ehp >= minEhp) &&
+        manaOk(metrics, cycle) &&
+        sustainPasses({ ...metrics, requireSustain: build.metrics.requireSustain, minSustain: build.metrics.minSustain, lifeRange: build.metrics.lifeRange }) &&
+        speedPasses({ walkSpeed: metrics.walkSpeed, spdRange: build.metrics.spdRange });
       return {
         item,
         score: metrics.damage,
         contributions: [],
         overflow: spOver,
+        illegalSet,
         passes,
         deltas: [
           { id: "goal", label: build.goalName || "Damage", color: "#FFAA00", delta: Math.round(metrics.damage - base.metrics.damage) },
@@ -6020,9 +6032,16 @@ function slotForItem(item, locked = {}) {
   return item.type;
 }
 
+// Filtr "Fits my skill points" (Other picks / Browse items z buildem): zostają przedmioty, które da się włożyć zamiast
+// obecnego bez zmiany innych slotów - bez braku skill pointów, bez niedozwolonego setu i bez przekroczenia budżetu
+// (to samo, co zielony napis "✓ fits your skill points"). Stan pamiętany na czas sesji (do przeładowania strony).
+let FITS_ONLY_SESSION = false;
+const fitsSkillPoints = (entry) => entry.score !== null && entry.overflow === 0 && !entry.illegalSet && !entry.overBudget;
+
 // manual (Creator / Optimizer): bez ocen i propozycji; bez klasy widać bronie wszystkich klas (klasa wynika z broni),
 // a maksymalny poziom można podnieść ponad poziom postaci (taki przedmiot dostaje ostrzeżenie, nie blokadę).
-function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, onPick, onClose, pickLabel = "Use", manual = false, currentName = null }) {
+// onExclude (Browse items z lewego panelu): przycisk Exclude obok Pin w każdym wierszu.
+function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, onPick, onClose, pickLabel = "Use", manual = false, currentName = null, onExclude = null }) {
   const slot = slotId ? SLOTS.find((entry) => entry.id === slotId) : null;
   const weaponType = playerClass ? CLASSES[playerClass].weapon : null;
   const normalized = normalizeOptions(options);
@@ -6043,6 +6062,12 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
   // Wymagania: tylko przedmioty wymagające wyłącznie zaznaczonych umiejętności i / lub najwyżej N w każdej
   const [reqSkills, setReqSkills] = useState([]);
   const [reqMax, setReqMax] = useState("");
+  const [fitsOnlyState, setFitsOnlyState] = useState(FITS_ONLY_SESSION);
+  const fitsOnly = Boolean(build) && !manual && fitsOnlyState;
+  const toggleFits = () => {
+    FITS_ONLY_SESSION = !fitsOnlyState;
+    setFitsOnlyState(!fitsOnlyState);
+  };
   const changeAffixes = (next) => {
     if (next.length > 0 && affixFilters.length === 0 && !build) setSort("affix");
     if (next.length === 0 && sort === "affix") setSort(build ? "score" : slot && slot.type === "weapon" ? "dps" : "level");
@@ -6077,25 +6102,37 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
       if (!affixMatches(item, affixFilters, affixMode)) return false;
       return true;
     });
-    // Propozycje bez filtrów: ranking na slot jak w "Other picks".
+    // Propozycje bez filtrów: ranking na slot jak w "Other picks". Z filtrem "Fits my skill points" liczymy wszystkich
+    // kandydatów slotu i dopiero przefiltrowaną listę obcinamy do BROWSE_LIMIT (inaczej pasujące mogły nie trafić na ekran).
     if (build && slot && !filtering) {
-      const ranked = slotAlternatives(build, slotId, BROWSE_LIMIT);
-      return { rows: ranked.list, total: ranked.total, currentScore: ranked.currentScore, suggested: true };
+      const ranked = slotAlternatives(build, slotId, fitsOnly ? Infinity : BROWSE_LIMIT);
+      if (!fitsOnly) return { rows: ranked.list, total: ranked.total, currentScore: ranked.currentScore, suggested: true };
+      const fitting = ranked.list.filter(fitsSkillPoints);
+      return { rows: fitting.slice(0, BROWSE_LIMIT), total: ranked.total, fits: fitting.length, checked: ranked.list.length, currentScore: ranked.currentScore, suggested: true };
     }
     if (build && sort === "score") {
       // Wynik "w tym buildzie": slot z typu przedmiotu; kandydaci ograniczeni do BROWSE_SCORE_CAP po liniowym wyniku.
+      // Z filtrem "Fits" limit rośnie (x2), aż znajdzie BROWSE_LIMIT pasujących albo skończą się kandydaci.
       const bySlot = {};
       matches.forEach((item) => {
         const target = slot ? slotId : slotForItem(item, normalized.locked);
         (bySlot[target] || (bySlot[target] = [])).push(item);
       });
       let rows = [];
+      let checked = 0;
       Object.entries(bySlot).forEach(([target, items]) => {
-        const capped = items.length > BROWSE_SCORE_CAP ? items.map((item) => ({ item, linear: scoreItem(item, build.profile).score })).sort((a, b) => b.linear - a.linear).slice(0, BROWSE_SCORE_CAP).map((entry) => entry.item) : items;
-        rows = rows.concat(slotAlternatives(build, target, BROWSE_LIMIT, capped).list.map((entry) => ({ ...entry, slotId: target })));
+        const ordered = items.length > BROWSE_SCORE_CAP ? items.map((item) => ({ item, linear: scoreItem(item, build.profile).score })).sort((a, b) => b.linear - a.linear).map((entry) => entry.item) : items;
+        let cap = BROWSE_SCORE_CAP;
+        let list = slotAlternatives(build, target, fitsOnly ? Infinity : BROWSE_LIMIT, ordered.slice(0, cap)).list;
+        while (fitsOnly && list.filter(fitsSkillPoints).length < BROWSE_LIMIT && cap < ordered.length) {
+          cap *= 2;
+          list = slotAlternatives(build, target, Infinity, ordered.slice(0, cap)).list;
+        }
+        checked += Math.min(cap, ordered.length);
+        rows = rows.concat((fitsOnly ? list.filter(fitsSkillPoints) : list).map((entry) => ({ ...entry, slotId: target })));
       });
       rows.sort((a, b) => b.score - a.score);
-      return { rows: rows.slice(0, BROWSE_LIMIT), total: matches.length, currentScore: null, suggested: false };
+      return { rows: rows.slice(0, BROWSE_LIMIT), total: matches.length, fits: fitsOnly ? rows.length : null, checked, currentScore: null, suggested: false };
     }
     const key = {
       dps: (item) => item.dps || 0,
@@ -6115,6 +6152,20 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
       },
     }[sort === "score" || (sort === "affix" && affixFilters.length === 0) ? "level" : sort];
     const sorted = [...matches].sort((a, b) => (sort === "name" ? key(a).localeCompare(key(b)) : key(b) - key(a) || b.level - a.level));
+    if (build && fitsOnly) {
+      // wszystkie pasujące do filtrów ocenione w buildzie, zostają te, które się mieszczą - w kolejności sortowania
+      const bySlotAll = {};
+      sorted.forEach((item) => {
+        const target = slot ? slotId : slotForItem(item, normalized.locked);
+        (bySlotAll[target] || (bySlotAll[target] = [])).push(item);
+      });
+      const scoredAll = new Map();
+      Object.entries(bySlotAll).forEach(([target, items]) => {
+        slotAlternatives(build, target, Infinity, items).list.forEach((entry) => scoredAll.set(entry.item.name, { ...entry, slotId: target }));
+      });
+      const fitting = sorted.map((item) => scoredAll.get(item.name)).filter((entry) => entry && fitsSkillPoints(entry));
+      return { rows: fitting.slice(0, showAll ? 200 : BROWSE_LIMIT), total: matches.length, fits: fitting.length, checked: matches.length, currentScore: null, suggested: false };
+    }
     const shown = sorted.slice(0, showAll ? 200 : BROWSE_LIMIT);
     if (!build) return { rows: shown.map((item) => ({ item, score: null, contributions: [], deltas: [], overflow: 0 })), total: matches.length, currentScore: null, suggested: false };
     // Z buildem: te same wiersze w tej kolejności, ale z wynikiem "w tym buildzie" i zmianą w podsumowaniu.
@@ -6129,7 +6180,7 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
     });
     const rows = shown.map((item) => scored.get(item.name) || { item, score: null, contributions: [], deltas: [], overflow: 0, current: true });
     return { rows, total: matches.length, currentScore: null, suggested: false };
-  }, [build, slotId, slot, types, elements, tiers, speeds, levelMin, levelMax, minDps, needle, sort, level, weaponType, filtering, showAll, normalized.excluded, normalized.locked, affixFilters, affixMode, onlyListed, onlyRated, manual, reqSkills, reqMax]);
+  }, [build, slotId, slot, types, elements, tiers, speeds, levelMin, levelMax, minDps, needle, sort, level, weaponType, filtering, showAll, normalized.excluded, normalized.locked, affixFilters, affixMode, onlyListed, onlyRated, manual, reqSkills, reqMax, fitsOnly]);
 
   const current = slot && build ? build.slots.find((entry) => entry.id === slotId).item : currentName ? ITEM_BY_NAME.get(currentName) || null : null;
   const chip = (pressed, color, onClick, label, key) => (
@@ -6222,6 +6273,12 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
                 {chip(onlyRated, "#55FFFF", () => setOnlyRated(!onlyRated), "Rated items", "wynnpool")}
               </>
             )}
+            {build && !manual && (
+              <>
+                <span className="ml-2 text-xs text-zinc-500">Build</span>
+                {chip(fitsOnly, "#55FF55", toggleFits, "✓ Fits my skill points", "fits")}
+              </>
+            )}
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-xs text-zinc-500" title="Show only items whose skill point requirements are all among the checked skills (none checked = any), and at most this many points in each.">
@@ -6243,6 +6300,11 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
                 <input value={minDps} onChange={(event) => setMinDps(event.target.value)} placeholder="0" inputMode="numeric" className="mc-input w-20 text-right" aria-label="Minimum weapon DPS" />
               </label>
             </div>
+          )}
+          {fitsOnly && results.fits !== undefined && results.fits !== null && (
+            <p className="text-xs" style={ts({ color: "#55FF55" })}>
+              {results.fits} of {results.checked ?? results.total} fit your skill points{results.fits > results.rows.length ? ` · showing ${results.rows.length}` : ""} - each can replace the current item without changing the other slots.
+            </p>
           )}
           <p className="text-xs text-zinc-500">
             {results.suggested
@@ -6359,9 +6421,16 @@ function ItemBrowserDialog({ build, slotId = null, playerClass, level, options, 
                   {build && build.slots.some((buildSlot) => buildSlot.item && buildSlot.item.name === item.name && (!slot || buildSlot.id === slotId)) ? (
                     <span className="mc-slot px-2 py-1 text-xs text-zinc-400">In build</span>
                   ) : (
-                    <button type="button" onClick={() => onPick(item, entry.slotId || slotId || slotForItem(item, normalized.locked))} className="mc-btn mc-btn-sm mc-btn-primary">
-                      {pickLabel}
-                    </button>
+                    <span className="flex gap-1">
+                      <button type="button" onClick={() => onPick(item, entry.slotId || slotId || slotForItem(item, normalized.locked))} className="mc-btn mc-btn-sm mc-btn-primary">
+                        {pickLabel}
+                      </button>
+                      {onExclude && (
+                        <button type="button" onClick={() => onExclude(item)} className="mc-btn mc-btn-sm" aria-label={`Exclude ${item.name}`} title="Never use this item (applies on Generate Build)">
+                          Exclude
+                        </button>
+                      )}
+                    </span>
                   )}
                 </li>
               );
@@ -6520,12 +6589,38 @@ function RollsDialog({ item, rolls, onChange, onClose }) {
   );
 }
 
+// Rolle gracza: { klucz: { all?: %, [id]: % } }. Klucz to nazwa przedmiotu, a w slotach pierścieni slot + nazwa
+// ("ring2|Warsong"): dwa takie same pierścienie mają osobne rolle (feedback 0.37: zmiana rolli jednego zmieniała oba).
+// Odczyt: klucz slotu, potem sama nazwa (zapis sprzed 0.37, wspólny dla obu pierścieni).
+const RING_SLOT_IDS = new Set(["ring1", "ring2"]);
+function rollKey(slotId, name) {
+  return RING_SLOT_IDS.has(slotId) ? `${slotId}|${name}` : name;
+}
+function rollsOf(rolls, slotId, name) {
+  if (!rolls || !name) return null;
+  return rolls[rollKey(slotId, name)] || rolls[name] || null;
+}
+// Nowe rolle przedmiotu w slocie (next = null: usuń). Stary wspólny wpis pierścienia rozdzielamy najpierw na oba sloty,
+// żeby drugi pierścień zachował swoje rolle. slotNames: { slotId: nazwa } przedmiotów buildu.
+function withSlotRolls(rolls, slotId, name, next, slotNames = {}) {
+  const updated = { ...(rolls || {}) };
+  const key = rollKey(slotId, name);
+  if (key !== name && updated[name]) {
+    RING_SLOT_IDS.forEach((ringId) => {
+      if (slotNames[ringId] === name && !updated[rollKey(ringId, name)]) updated[rollKey(ringId, name)] = updated[name];
+    });
+    delete updated[name];
+  }
+  if (next) updated[key] = next;
+  else delete updated[key];
+  return updated;
+}
 // Buildy z rollami gracza: przedmioty o zmienionych rollach zastępują wersje 50% (wynik z wyszukiwania zostaje).
 function applyBuildRolls(build, rolls) {
   if (!rolls || Object.keys(rolls).length === 0) return build;
   let changed = false;
   const slots = build.slots.map((slot) => {
-    const spec = slot.item && rolls[slot.item.name];
+    const spec = slot.item && rollsOf(rolls, slot.id, slot.item.name);
     if (!spec) return slot;
     changed = true;
     return { ...slot, item: withRolls(slot.item, spec) };
@@ -8330,6 +8425,197 @@ function McRange({ value, min = 0, max = 100, accent = "#FFAA00", className = ""
   );
 }
 
+// Suwak zakresu z dwoma uchwytami (minimum i maksimum). Skrajne pozycje (krok przed lo i krok za hi) = "Any", czyli
+// bez granicy z tej strony. value: { min, max } z null = Any; onChange dostaje nową parę.
+function McRangePair({ id, lo, hi, step, value, onChange, accent = "#FFAA00", disabled = false, labels = ["Minimum", "Maximum"], format = (v) => String(v) }) {
+  const anyLo = lo - step;
+  const anyHi = hi + step;
+  const current = value || { min: null, max: null };
+  const a = current.min === null || current.min === undefined ? anyLo : Math.max(lo, Math.min(hi, current.min));
+  const b = current.max === null || current.max === undefined ? anyHi : Math.max(lo, Math.min(hi, current.max));
+  const span = anyHi - anyLo;
+  const pa = (a - anyLo) / span;
+  const pb = (b - anyLo) / span;
+  const snap = (v) => Number((Math.round(v / step) * step).toFixed(3));
+  const setMin = (raw) => {
+    const v = Number(raw);
+    if (v <= anyLo + step / 2) return onChange({ min: null, max: current.max ?? null });
+    const cap = b >= anyHi - step / 2 ? hi : b;
+    onChange({ min: snap(Math.min(v, cap)), max: current.max ?? null });
+  };
+  const setMax = (raw) => {
+    const v = Number(raw);
+    if (v >= anyHi - step / 2) return onChange({ min: current.min ?? null, max: null });
+    const floor = a <= anyLo + step / 2 ? lo : a;
+    onChange({ min: current.min ?? null, max: snap(Math.max(v, floor)) });
+  };
+  return (
+    <div className="mc-range2" style={ts({ "--mc-accent": accent, opacity: disabled ? 0.45 : undefined })}>
+      <div className="mc-range2-track" aria-hidden="true">
+        <div className="mc-range2-fill" style={{ left: `calc(4px + (100% - 12px) * ${pa})`, width: `calc((100% - 12px) * ${Math.max(0, pb - pa)})` }} />
+      </div>
+      <input
+        id={id}
+        type="range"
+        min={anyLo}
+        max={anyHi}
+        step={step}
+        value={a}
+        disabled={disabled}
+        onChange={(event) => setMin(event.target.value)}
+        aria-label={labels[0]}
+        aria-valuetext={a <= anyLo ? "any" : format(a)}
+        style={{ zIndex: pa > 0.5 ? 3 : 2 }}
+      />
+      <input
+        id={id ? `${id}-max` : undefined}
+        type="range"
+        min={anyLo}
+        max={anyHi}
+        step={step}
+        value={b}
+        disabled={disabled}
+        onChange={(event) => setMax(event.target.value)}
+        aria-label={labels[1]}
+        aria-valuetext={b >= anyHi ? "any" : format(b)}
+        style={{ zIndex: pa > 0.5 ? 2 : 3 }}
+      />
+    </div>
+  );
+}
+
+// Trzy suwaki zakresu (Generate i Optimize): skala, jednostka, kolor i presety (przyciski nad suwakiem).
+function rangeUi(kind, level) {
+  if (kind === "mana")
+    return {
+      label: "Mana balance",
+      unit: " mana/s",
+      lo: -20,
+      hi: 10,
+      step: 0.5,
+      digits: 1,
+      signed: true,
+      accent: "#55FFFF",
+      presets: [
+        ["Full sustain", { min: 0, max: 1 }, "The cycle pays for itself and wastes at most 1 mana/s"],
+        ["Raid buffs", { min: -3, max: 1 }, "May lose up to 3 mana/s - raid buffs or a support cover it"],
+        ["Burst", { min: -8, max: null }, "May lose up to 8 mana/s: the pool runs out in about 25 s"],
+        ["Any", { min: null, max: null }, "No mana condition"],
+      ],
+    };
+  if (kind === "life") {
+    const top = lifeRecoveryMax(level);
+    const light = Math.max(5, Math.round((top * 0.1) / 5) * 5);
+    const strong = Math.max(10, Math.round((top * 0.4) / 5) * 5);
+    return {
+      label: "Life recovery",
+      unit: " HP/s",
+      lo: 0,
+      hi: top,
+      step: 5,
+      digits: 0,
+      signed: false,
+      accent: "#FF5555",
+      presets: [
+        ["Any", { min: null, max: null }, "No life condition"],
+        ["Light", { min: light, max: null }, `At least ${light} HP/s`],
+        ["Strong sustain", { min: strong, max: null }, `At least ${strong} HP/s`],
+      ],
+    };
+  }
+  return {
+    label: "Walk Speed",
+    unit: "%",
+    lo: -100,
+    hi: 150,
+    step: 5,
+    digits: 0,
+    signed: true,
+    accent: "#FFFF55",
+    presets: [
+      ["Any", { min: null, max: null }, "No walk speed condition (like 0.35)"],
+      ["Default", { ...DEFAULT_SPD_RANGE }, "At least −20% walk speed"],
+      ["No slowdown", { min: 0, max: null }, "At least 0%"],
+      ["Mobile", { min: 20, max: null }, "At least +20%"],
+      ["Fast", { min: 40, max: null }, "At least +40%"],
+    ],
+  };
+}
+function rangeValueText(range, ui) {
+  const r = normalizeRange(range);
+  if (!r) return "any";
+  const text = (value) => `${ui.signed && value > 0 ? "+" : value < 0 ? "−" : ""}${ui.digits > 0 ? Math.abs(value).toFixed(ui.digits) : formatNumber(Math.abs(Math.round(value)))}`;
+  if (r.min !== null && r.max !== null) return `${text(r.min)} to ${text(r.max)}${ui.unit}`;
+  if (r.min !== null) return `≥ ${text(r.min)}${ui.unit}`;
+  return `≤ ${text(r.max)}${ui.unit}`;
+}
+function sameRange(a, b) {
+  const x = normalizeRange(a);
+  const y = normalizeRange(b);
+  if (!x || !y) return !x && !y;
+  return x.min === y.min && x.max === y.max;
+}
+// Suwak zakresu z etykietą, wartością, presetami i podpowiedzią (hint - tekst albo null).
+function RangeControl({ id, kind, level, value, onChange, hint = null, disabled = false, disabledHint = null, title = undefined, compact = false }) {
+  const ui = rangeUi(kind, level);
+  return (
+    <div className="flex flex-col gap-1" title={title}>
+      <div className={SLIDER_HEAD}>
+        <label htmlFor={id} className="text-zinc-300">
+          {ui.label}
+        </label>
+        <span className="tabular-nums text-zinc-100">{disabled ? "off" : rangeValueText(value, ui)}</span>
+      </div>
+      <div className={`flex flex-wrap gap-1 ${compact ? "" : "mb-0.5"}`} role="group" aria-label={`${ui.label} presets`}>
+        {ui.presets.map(([name, range, tip]) => (
+          <button key={name} type="button" disabled={disabled} className={`mc-btn mc-btn-sm ${!disabled && sameRange(value, range) ? "mc-btn-on" : ""}`} title={tip} onClick={() => onChange({ ...range })}>
+            {name}
+          </button>
+        ))}
+      </div>
+      <McRangePair
+        id={id}
+        lo={ui.lo}
+        hi={ui.hi}
+        step={ui.step}
+        value={value}
+        onChange={onChange}
+        accent={ui.accent}
+        disabled={disabled}
+        labels={[`${ui.label} minimum`, `${ui.label} maximum`]}
+        format={(v) => rangeValueText({ min: v, max: v }, ui).replace(/ to .*/, ui.unit)}
+      />
+      {(disabled ? disabledHint : hint) && <p className="text-xs text-zinc-500">{disabled ? disabledHint : hint}</p>}
+    </div>
+  );
+}
+// Podpowiedzi przy suwakach zakresu (liczone z buildu na ekranie, gdy jest).
+function manaRangeHint(range) {
+  const r = normalizeRange(range);
+  if (!r) return "Any: no mana condition (the cycle still counts for Mana Steal and the goal).";
+  const parts = [];
+  if (r.min !== null && r.min < 0) parts.push(`${r.min} mana/s = the full pool (200) lasts ${Math.round(200 / -r.min)} s of fighting`);
+  else if (r.min !== null) parts.push(r.min === 0 ? "the cycle pays for itself" : `at least +${r.min} mana/s to spare`);
+  if (r.max !== null) parts.push(`at most ${r.max > 0 ? "+" : ""}${r.max} mana/s wasted - stats beyond that go to damage or EHP`);
+  return `${parts.join("; ")}.`;
+}
+function lifeRangeHint(range, hp) {
+  const r = normalizeRange(range);
+  if (!r) return "Any: no life condition. Health Regen ÷ 4 s + Life Steal from the cycle's main attacks (M).";
+  const value = r.min !== null ? r.min : r.max;
+  return hp > 0 && value > 0 ? `${formatNumber(value)} HP/s = ${Math.round((value / hp) * 100)}% of your build's health per second.` : "Health Regen ÷ 4 s + Life Steal from the cycle's main attacks (M).";
+}
+function speedRangeHint(build) {
+  if (!build || !build.slots) return "The walk speed of the whole build: items, set bonuses and ability tree (the number in the summary).";
+  const slowest = build.slots
+    .filter((slot) => slot.item && (slot.item.ids.spd || 0) < 0)
+    .sort((a, b) => (a.item.ids.spd || 0) - (b.item.ids.spd || 0))
+    .slice(0, 2)
+    .map((slot) => `${slot.item.name} ${slot.item.ids.spd}%`);
+  const value = build.metrics && Number.isFinite(build.metrics.walkSpeed) ? build.metrics.walkSpeed : null;
+  return `${value !== null ? `This build: ${value > 0 ? "+" : ""}${Math.round(value)}%.` : ""}${slowest.length > 0 ? ` Slowed most by ${slowest.join(", ")}.` : ""}`.trim() || "The walk speed of the whole build (the number in the summary).";
+}
+
 // Suwaki "Build focus": wartość 0-100% dla main attacku, czarów i EHP. Kreska na suwaku i "meta" to domyślna
 // pozycja archetypu (z wag skalibrowanych na poradniku); nieruszony suwak jej używa.
 function FocusSliders({ options, onChange, archetype }) {
@@ -8412,8 +8698,15 @@ function FocusSliders({ options, onChange, archetype }) {
   );
 }
 
-// "Build around an item": wyszukiwarka nazw (broń klasy, pancerz, akcesoria do poziomu gracza); wybór przypina przedmiot
-// do jego slotu (pierścień: wolny palec) - to, co w praktyce robi 99% graczy: build wokół konkretnej broni.
+// Wykluczenie przedmiotu: na listę wykluczonych i zdjęty z przypiętych (lustro przypinania).
+function excludeItem(options, name) {
+  const locked = Object.fromEntries(Object.entries(options.locked || {}).filter(([, lockedName]) => lockedName !== name));
+  return { ...options, locked, excluded: [...new Set([...(options.excluded || []), name])] };
+}
+
+// "Pin or exclude an item": wyszukiwarka nazw (broń klasy, pancerz, akcesoria do poziomu gracza). Pin przypina przedmiot
+// do jego slotu (pierścień: wolny palec) - build wokół konkretnej broni; Exclude wyklucza go z każdego buildu (bez
+// potrzeby dostania go najpierw w buildzie). Zmiany nie uruchamiają generatora - build dostaje znacznik nieaktualnego.
 function PinItemSearch({ options, onChange, weaponType, level, onBrowse = null }) {
   const [query, setQuery] = useState("");
   const needle = query.trim().toLowerCase();
@@ -8431,10 +8724,12 @@ function PinItemSearch({ options, onChange, weaponType, level, onBrowse = null }
     onChange({ ...options, locked, excluded: (options.excluded || []).filter((name) => name !== item.name) });
     setQuery("");
   };
+  const excluded = new Set(options.excluded || []);
+  const exclude = (item) => onChange(excludeItem(options, item.name));
   return (
     <div className="flex flex-col gap-2">
       <label htmlFor="pin-search" className="text-xs text-zinc-300">
-        Build around an item
+        Pin or exclude an item
       </label>
       <div className="flex flex-wrap gap-2">
         <input
@@ -8458,23 +8753,39 @@ function PinItemSearch({ options, onChange, weaponType, level, onBrowse = null }
             <li className="px-2 py-1 text-xs text-zinc-500">No {weaponType || "weapon"}, armour or accessory up to level {level} matches.</li>
           ) : (
             matches.map((item) => (
-              <li key={item.name}>
-                <button type="button" onClick={() => pin(item)} className="flex w-full items-center justify-between gap-2 px-2 py-1 text-left text-sm hover:bg-zinc-800">
-                  <span style={ts({ color: RARITY_COLORS[item.tier] || RARITY_COLORS.Normal })}>{item.name}</span>
-                  <span className="whitespace-nowrap text-xs text-zinc-500">
+              <li key={item.name} className="flex items-center justify-between gap-2 px-2 py-1 text-sm">
+                <span className="flex min-w-0 flex-col">
+                  <span className="truncate" style={ts({ color: RARITY_COLORS[item.tier] || RARITY_COLORS.Normal })}>
+                    {item.name}
+                  </span>
+                  <span className="text-xs text-zinc-500">
                     {item.tier} {item.type} · Lv. {item.level}
                     {item.category === "weapon" ? ` · ${formatNumber(item.dps || 0)} DPS` : ""}
                     {hasLiveData() && marketStatus(item).state === "listed" ? " · " : ""}
                     {hasLiveData() && marketStatus(item).state === "listed" ? <MarketDot item={item} /> : null}
                   </span>
-                </button>
+                </span>
+                <span className="flex shrink-0 gap-1">
+                  <button type="button" onClick={() => pin(item)} className="mc-btn mc-btn-sm" aria-label={`Pin ${item.name}`}>
+                    Pin
+                  </button>
+                  {excluded.has(item.name) ? (
+                    <button type="button" disabled className="mc-btn mc-btn-sm" style={ts({ opacity: 0.55 })}>
+                      Excluded
+                    </button>
+                  ) : (
+                    <button type="button" onClick={() => exclude(item)} className="mc-btn mc-btn-sm" aria-label={`Exclude ${item.name}`}>
+                      Exclude
+                    </button>
+                  )}
+                </span>
               </li>
             ))
           )}
         </ul>
       )}
-      <p className="text-xs text-zinc-500" title="Type a name, or open Browse items… to filter by type, element, rarity, level, attack speed, DPS and identifications. Pinned items show below and always stay in the build.">
-        Pinned items always stay.
+      <p className="text-xs text-zinc-500" title="Type a name, or open Browse items… to filter by type, element, rarity, level, attack speed, DPS and identifications. Pinned and excluded items show below; they apply on Generate Build.">
+        Pinned items always stay. Excluded items are never used.
       </p>
     </div>
   );
@@ -8661,11 +8972,49 @@ function goalKey(goal) {
 }
 
 // poison: poison w celu obrażeń (domyślnie nie); rolls: "max" (100%, jak Wynnbuilder) albo "avg" (50%);
-// drain: dopuszczalny dren many w mana/s (0 = pełny sustain); lr: minimalne odnawianie życia w HP/s;
-// raidMana: mana/s z buffów w raidzie (Advanced, 0 = wyłączone)
-const DEFAULT_DAMAGE_FORM = { preset: "", goal: null, minEhp: null, cycle: "", cps: 3, steal: true, gain: true, sustain: false, noEvents: true, tradeable: false, freeSp: true, poison: false, rolls: "max", drain: 0, lr: 0, raidMana: 0 };
+// raidMana: mana/s z buffów w raidzie (Advanced, 0 = wyłączone).
+// Suwaki zakresu (0.37), { min, max } z null = Any: drain = bilans many cyklu w mana/s (ujemny = dren, dodatni =
+// nadwyżka; domyślnie od 0 do +1 = pełny sustain bez marnowania), lr = odnawianie życia w HP/s (domyślnie Any),
+// spd = Walk Speed w % (domyślnie co najmniej -20%). Przełącznik "Life sustain > 0" zastąpiło minimum 1 HP/s.
+const DEFAULT_MANA_RANGE = { min: 0, max: 1 };
+const DEFAULT_LIFE_RANGE = { min: null, max: null };
+const DEFAULT_SPD_RANGE = { min: -20, max: null };
+const DEFAULT_DAMAGE_FORM = { preset: "", goal: null, minEhp: null, cycle: "", cps: 3, steal: true, gain: true, noEvents: true, tradeable: false, freeSp: true, poison: false, rolls: "max", drain: DEFAULT_MANA_RANGE, lr: DEFAULT_LIFE_RANGE, spd: DEFAULT_SPD_RANGE, raidMana: 0 };
+// Para { min, max } z formularza; stare wartości liczbowe (0.35-0.36) przez fromNumber.
+function rangePair(value, fromNumber) {
+  if (value && typeof value === "object") {
+    const range = normalizeRange(value);
+    return range || { min: null, max: null };
+  }
+  if (value === null || value === undefined || value === "") return fromNumber(0);
+  return fromNumber(Number(value) || 0);
+}
+const formManaPair = (form) => rangePair(form.drain, (drain) => rangeFromDrain(drain));
+const formLifePair = (form) => {
+  const pair = rangePair(form.lr, (lr) => rangeFromMinimum(lr) || { min: null, max: null });
+  // stary przełącznik "Life sustain > 0" = minimum 1 HP/s
+  return form.sustain && (pair.min === null || pair.min < 1) ? { ...pair, min: 1 } : pair;
+};
+const formSpdPair = (form) => (form.spd === undefined ? { min: null, max: null } : rangePair(form.spd, () => ({ min: null, max: null })));
+// Zakresy do generatora (null = bez warunku).
+const formManaRange = (form) => normalizeRange(formManaPair(form));
+const formLifeRange = (form) => normalizeRange(formLifePair(form));
+const formSpdRange = (form) => normalizeRange(formSpdPair(form));
+// Dopuszczalny dren (do podpowiedzi o manie z przedmiotów): -min, 999 = bez dolnej granicy.
+function drainOfRange(range) {
+  return !range || range.min === null ? 999 : -range.min;
+}
+// Stary stan formularza (liczbowe drain / lr, sustain; bez spd) -> zakresy o tym samym działaniu co w 0.35.
+function migrateDamageForm(form) {
+  const out = { ...DEFAULT_DAMAGE_FORM, ...(form || {}) };
+  out.drain = form && form.drain !== undefined ? formManaPair(out) : { min: 0, max: null };
+  out.lr = form && (form.lr !== undefined || form.sustain) ? formLifePair(out) : { min: null, max: null };
+  out.spd = form && form.spd !== undefined ? formSpdPair(out) : { min: null, max: null };
+  delete out.sustain;
+  return out;
+}
 function formCycleOf(form) {
-  return { ids: parseCycle(form.cycle), cps: form.cps, steal: form.steal, gain: form.gain, poison: Boolean(form.poison), drain: Math.max(0, Number(form.drain) || 0), buff: Math.max(0, Number(form.raidMana) || 0) };
+  return { ids: parseCycle(form.cycle), cps: form.cps, steal: form.steal, gain: form.gain, poison: Boolean(form.poison), mana: formManaRange(form), buff: Math.max(0, Number(form.raidMana) || 0) };
 }
 
 // Suwak EHP chodzi co 5% tego, co da się osiągnąć na danym poziomie; domyślnie 25%.
@@ -8874,7 +9223,7 @@ function DamageForm({
             })}
           </div>
           <p className={hint} title="Every build is compared by this number, computed with your tree, powders and skill points.">
-            {goal ? (goal.kind === "melee" ? "Main attack damage per second." : goal.kind === "cycle" ? "Every spell of the cycle once per cast plus every main attack hit (M), per second of the cycle - within the mana drain you allow." : goal.kind === "multi" ? `Sum of one cast of ${goal.name}.` : `One hit of ${goal.name}.`) : ""} Tap several to maximise their sum.
+            {goal ? (goal.kind === "melee" ? "Main attack damage per second." : goal.kind === "cycle" ? "Every spell of the cycle once per cast plus every main attack hit (M), per second of the cycle - within the mana balance range you set." : goal.kind === "multi" ? `Sum of one cast of ${goal.name}.` : `One hit of ${goal.name}.`) : ""} Tap several to maximise their sum.
           </p>
         </div>
       )}
@@ -8894,7 +9243,24 @@ function DamageForm({
             <McRange id="new-ehp" min={0} max={ehpMax} step={step} value={minEhp} accent="#55FF55" onChange={(event) => set({ minEhp: Number(event.target.value) })} className="w-full" />
             {sweep && <p className="text-xs text-zinc-500">Builds for every EHP step: List of builds, at the bottom of this panel.</p>}
           </div>
-          <CheckRow id="new-sustain" checked={Boolean(form.sustain)} onChange={() => set({ sustain: !form.sustain })} label="Life sustain > 0" hint="regen + steal" title="Health Regen (per 4 s) plus Life Steal (from main attack hits) must add up to more than zero per second. Builds that drain your health are thrown away." />
+          <RangeControl
+            id="new-lr"
+            kind="life"
+            level={level}
+            value={formLifePair(form)}
+            onChange={(range) => set({ lr: range, sustain: undefined })}
+            hint={lifeRangeHint(formLifePair(form), shownBuild && shownBuild.metrics ? shownBuild.metrics.hp : 0)}
+            title="Life recovery per second: Health Regen ÷ 4 s + Life Steal from the cycle's main attacks (M; without a cycle, constant main attacks). The maximum stops the search from wasting stats on more life than you need."
+          />
+          <RangeControl
+            id="new-spd"
+            kind="spd"
+            level={level}
+            value={formSpdPair(form)}
+            onChange={(range) => set({ spd: range })}
+            hint={speedRangeHint(shownBuild)}
+            title="Walk Speed of the whole build (items, sets, ability tree) - the number in the summary. The default minimum (−20%) keeps the search from slow builds; Any = no condition."
+          />
         </fieldset>
       )}
 
@@ -8937,29 +9303,22 @@ function DamageForm({
           </div>
           <CheckRow checked={form.steal} onChange={() => set({ steal: !form.steal })} label="Mana Steal" hint="from M hits" title="Mana Steal works on main attack hits: add M to the cycle for every main attack between the spells. Mana per hit = Mana Steal ÷ 3 ÷ hits per second of the weapon (like Wynnbuilder)." />
           <CheckRow checked={form.gain} onChange={() => set({ gain: !form.gain })} label="Mana from abilities" title="Mana that abilities give back (e.g. from their hits) counts as income" />
-          <div className="flex flex-col gap-1" title="How much mana per second the cycle may lose. 0 = it must sustain itself; more = you accept draining your mana pool (e.g. for a burst). Raid buffs: Advanced, at the bottom of this panel.">
-            <div className={SLIDER_HEAD}>
-              <label htmlFor="new-drain" className="text-zinc-300">
-                Allowed drain
-              </label>
-              <span className="tabular-nums text-zinc-100">{(Number(form.drain) || 0) === 0 ? "none" : `${Number(form.drain).toFixed(1)} mana/s`}</span>
-            </div>
-            <McRange id="new-drain" min={0} max={20} step={0.5} value={Number(form.drain) || 0} accent="#55FFFF" onChange={(event) => set({ drain: Number(event.target.value) })} className="w-full" aria-label="Allowed mana drain per second" />
-          </div>
-          <div className="flex flex-col gap-1" title="Minimum life recovery per second: Health Regen ÷ 4 s + Life Steal from the cycle's main attacks (M; without a cycle, constant main attacks). 0 = no minimum. Builds below it are thrown away.">
-            <div className={SLIDER_HEAD}>
-              <label htmlFor="new-lr" className="text-zinc-300">
-                Life recovery
-              </label>
-              <span className="tabular-nums text-zinc-100">{(Number(form.lr) || 0) === 0 ? "any" : `≥ ${formatNumber(Number(form.lr))} HP/s`}</span>
-            </div>
-            <McRange id="new-lr" min={0} max={lifeRecoveryMax(level)} step={5} value={Math.min(lifeRecoveryMax(level), Number(form.lr) || 0)} accent="#FF5555" onChange={(event) => set({ lr: Number(event.target.value) })} className="w-full" aria-label="Minimum life recovery per second" />
-          </div>
+          <RangeControl
+            id="new-drain"
+            kind="mana"
+            level={level}
+            value={formManaPair(form)}
+            onChange={(range) => set({ drain: range })}
+            disabled={cycleCasts === 0}
+            disabledHint="Type a spell cycle above: without one there is no mana condition."
+            hint={manaRangeHint(formManaPair(form))}
+            title="The cycle's mana balance per second: negative = drain you accept (e.g. for a burst), positive = surplus. The maximum keeps the search from wasting stats on mana you never use. Raid buffs: Advanced, at the bottom of this panel."
+          />
           {onTradeoff && <TradeoffSuggest tradeoff={tradeoff} hasCycle={cycleCasts > 0} running={running} form={form} onRun={onTradeoff} onUse={onTradeoffUse} onPick={onTradeoffPick} shownBuild={shownBuild} />}
           {cycleIds.length > 0 && <CycleSteps cycle={cycleText(cycleIds)} playerClass={playerClass} spells={goals.filter((entry) => entry.kind === "spell" && typeof entry.id === "number" && entry.id <= 4)} compact />}
           <p className={hint}>
             {cycleIds.length > 0
-              ? `${cycleCasts} spell${cycleCasts === 1 ? "" : "s"}${cycleMelee > 0 ? ` + ${cycleMelee} main attack${cycleMelee === 1 ? "" : "s"}` : ""} every ≈${((3 * cycleCasts) / Math.max(0.5, form.cps) + cycleMelee / Math.max(0.5, form.cps)).toFixed(1)} s must pay for themselves${(Number(form.drain) || 0) > 0 ? `, minus ${Number(form.drain).toFixed(1)} mana/s (100 mana last ≈${Math.round(100 / Number(form.drain))} s)` : ""}.${cycleMelee === 0 && form.steal ? " No M = no Mana Steal." : ""}${Number(form.raidMana) > 0 ? ` Raid buff +${Number(form.raidMana)} mana/s counted (Advanced).` : ""}`
+              ? `${cycleCasts} spell${cycleCasts === 1 ? "" : "s"}${cycleMelee > 0 ? ` + ${cycleMelee} main attack${cycleMelee === 1 ? "" : "s"}` : ""} every ≈${((3 * cycleCasts) / Math.max(0.5, form.cps) + cycleMelee / Math.max(0.5, form.cps)).toFixed(1)} s, mana balance ${rangeValueText(formManaPair(form), rangeUi("mana", level))}.${cycleMelee === 0 && form.steal ? " No M = no Mana Steal." : ""}${Number(form.raidMana) > 0 ? ` Raid buff +${Number(form.raidMana)} mana/s counted (Advanced).` : ""}`
               : "Empty = no mana filter. 1-4 = spells, M = main attack (Mana Steal only works on hits)."}
           </p>
         </fieldset>
@@ -9279,11 +9638,11 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
   const otherCyclePresets = classConfig.archetypes
     .filter((arch) => arch !== preset && ARCHETYPE_COMBOS[arch])
     .flatMap((arch) => ARCHETYPE_COMBOS[arch].combos.filter((entry) => /[1-4]/.test(entry.cycle)).map((entry) => ({ ...entry, source: arch })));
-  const customMana = customCycle ? cycleMana(spells, parseCycle(customCycle), form.cps, form.gain, form.drain) : null;
+  const customMana = customCycle ? cycleMana(spells, parseCycle(customCycle), form.cps, form.gain, drainOfRange(formManaRange(form))) : null;
   const customSelected = cycleDigits.length > 0 && cycleDigits.join("") === customCycle && ![...cyclePresets, ...otherCyclePresets].some((entry) => cycleOf(entry.cycle) === customCycle);
   const renderCyclePreset = (entry) => {
     const digits = parseCycle(entry.cycle);
-    const mana = cycleMana(spells, digits, form.cps, form.gain, form.drain);
+    const mana = cycleMana(spells, digits, form.cps, form.gain, drainOfRange(formManaRange(form)));
     return (
       <WizardTile
         key={`${entry.source || ""}:${entry.name}`}
@@ -9323,8 +9682,8 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
     tree: treeIds.length > 0 ? preset || "own tree" : null,
     goal: goal ? goal.name : null,
     ehp: treeIds.length > 0 ? `${Math.round((minEhp / Math.max(1, ehpMax)) * 100)}%` : null,
-    mana: treeIds.length > 0 ? `${cycleDigits.length ? `${cycleDigits.join("")} · ${form.cps} cps${Number(form.drain) > 0 ? ` · −${form.drain}/s` : ""}` : "off"}${Number(form.lr) > 0 ? ` · life ≥ ${form.lr}` : ""}` : null,
-    extras: treeIds.length > 0 ? [form.sustain ? "sustain" : null, form.noEvents !== false ? "no events" : null, form.tradeable ? "tradeable" : null, normalized.avoidNegativeDefences ? "no -def" : null, form.rolls === "avg" ? "50% rolls" : null, form.poison ? "poison" : null].filter(Boolean).join(", ") || "none" : null,
+    mana: treeIds.length > 0 ? `${cycleDigits.length ? `${cycleDigits.join("")} · ${form.cps} cps · ${rangeValueText(formManaPair(form), rangeUi("mana", level))}` : "off"}${formLifeRange(form) ? ` · life ${rangeValueText(formLifePair(form), rangeUi("life", level))}` : ""}` : null,
+    extras: treeIds.length > 0 ? [formSpdRange(form) ? `walk ${rangeValueText(formSpdPair(form), rangeUi("spd", level))}` : "any walk speed", form.noEvents !== false ? "no events" : null, form.tradeable ? "tradeable" : null, normalized.avoidNegativeDefences ? "no -def" : null, form.rolls === "avg" ? "50% rolls" : null, form.poison ? "poison" : null].filter(Boolean).join(", ") || "none" : null,
     generate: null,
   };
   const heading = {
@@ -9333,7 +9692,7 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
     tree: ["Ability tree", `Pick an archetype - its suggested tree for ${apCap} AP is shown below, where you can compare archetypes and click abilities to change it. "Use this tree" or Next goes on.`],
     goal: ["What to maximise", "One spell (one cast, crits included), the main attack (damage per second) - or click several to maximise their sum. Numbers: with the best weapon for your level alone."],
     ehp: ["How tanky", `Minimum effective HP in 5% steps of the most your level can reach (${formatNumber(ehpMax)}). Builds below it are thrown away.`],
-    mana: ["Mana: spell cycle", "The spells (1-4) and main attacks (M) you do in a loop must pay for themselves (Mana Regen, Mana Steal from M hits, ability mana), or lose at most the drain you allow. Type your own cycle or pick a preset."],
+    mana: ["Mana: spell cycle", "The spells (1-4) and main attacks (M) you do in a loop must pay for themselves (Mana Regen, Mana Steal from M hits, ability mana), within the mana balance range: the minimum is the drain you accept, the maximum stops the search from wasting stats on mana. Type your own cycle or pick a preset."],
     extras: ["Extras", "Optional filters - click to toggle."],
     generate: ["Ready", "The search runs until a pass finds nothing better: usually 5-30 s, up to ~1.5 min at level 100+ with a high EHP threshold and a mana cycle. You can change anything later in the panel on the left."],
   }[active] || ["", ""];
@@ -9629,22 +9988,10 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
               <CheckRow checked={form.steal} onChange={() => set({ steal: !form.steal })} label="Mana Steal" hint="from M hits" title="Mana Steal only works on main attack hits - add M to the cycle" />
               <CheckRow checked={form.gain} onChange={() => set({ gain: !form.gain })} label="Mana from abilities" />
             </div>
-            <span className="text-sm text-zinc-300">Allowed mana drain</span>
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-              {WIZARD_DRAIN.map(([value, name]) => (
-                <WizardTile key={value} selected={(Number(form.drain) || 0) === value} onClick={() => set({ drain: value })} className="p-2" title={value === 0 ? "The cycle must pay for itself" : `The cycle may lose ${value} mana/s: 100 mana last about ${Math.round(100 / value)} s`}>
-                  <span className="text-base font-bold text-zinc-100">{name}</span>
-                  <span className="text-xs text-zinc-500">{value === 0 ? "0 mana/s" : `${value}/s · 100 mana ≈ ${Math.round(100 / value)} s`}</span>
-                </WizardTile>
-              ))}
-            </div>
-            <label htmlFor="wiz-lr" className="text-sm text-zinc-300" title="Minimum life recovery per second: Health Regen ÷ 4 s + Life Steal from the cycle's main attacks (M). 0 = no minimum.">
-              Life recovery
-            </label>
-            <div className="grid grid-cols-[minmax(0,1fr)_7rem] items-center gap-3">
-              <McRange id="wiz-lr" min={0} max={lifeRecoveryMax(level)} step={5} value={Math.min(lifeRecoveryMax(level), Number(form.lr) || 0)} accent="#FF5555" onChange={(event) => set({ lr: Number(event.target.value) })} className="w-full min-w-0" aria-label="Minimum life recovery per second" />
-              <span className="text-right text-xs tabular-nums">{(Number(form.lr) || 0) === 0 ? "any" : `≥ ${formatNumber(Number(form.lr))} HP/s`}</span>
-            </div>
+            <span className="text-sm text-zinc-300">Mana balance</span>
+            <RangeControl id="wiz-drain" kind="mana" level={level} value={formManaPair(form)} onChange={(range) => set({ drain: range })} hint={manaRangeHint(formManaPair(form))} title="The cycle's mana balance per second: negative = drain you accept, positive = surplus. The maximum keeps the search from wasting stats on mana." />
+            <span className="text-sm text-zinc-300">Life recovery</span>
+            <RangeControl id="wiz-lr" kind="life" level={level} value={formLifePair(form)} onChange={(range) => set({ lr: range, sustain: undefined })} hint={lifeRangeHint(formLifePair(form), 0)} title="Health Regen ÷ 4 s + Life Steal from the cycle's main attacks (M). Any = no condition." />
           </div>
           {goals.some((entry) => entry.kind === "cycle") && (
             <CheckRow
@@ -9754,9 +10101,8 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
           {[
             [
               "Filters",
-              "grid grid-cols-2 gap-3 sm:grid-cols-4",
+              "grid grid-cols-1 gap-3 sm:grid-cols-3",
               [
-                ["Life sustain > 0", "Health Regen + Life Steal must beat zero", Boolean(form.sustain), () => set({ sustain: !form.sustain })],
                 ["No event items", "Skip limited-time festival items", form.noEvents !== false, () => set({ noEvents: !(form.noEvents !== false) })],
                 ["Tradeable only", "Only items you can buy on the Trade Market", Boolean(form.tradeable), () => set({ tradeable: !form.tradeable })],
                 ["Avoid negative defences", "No item with a negative elemental defence", normalized.avoidNegativeDefences, () => onOptions({ ...options, avoidNegativeDefences: !normalized.avoidNegativeDefences })],
@@ -9787,6 +10133,10 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
               </div>
             </div>
           ))}
+          <div className="flex flex-col gap-1.5">
+            <span className="text-sm text-zinc-300">Walk speed</span>
+            <RangeControl id="wiz-spd" kind="spd" level={level} value={formSpdPair(form)} onChange={(range) => set({ spd: range })} hint="Walk Speed of the whole build (items, sets, ability tree). The default minimum (−20%) keeps the search from slow builds; Any = no condition." />
+          </div>
           <div className="flex flex-col gap-1.5">
             <span className="text-sm text-zinc-300">Weapon attack speed (none = any)</span>
             <div className="flex flex-wrap justify-center gap-2">
@@ -9880,7 +10230,8 @@ function cycleMana(spells, digits, cps, withGain, drain = 0) {
   const seconds = Math.max(0.01, timing.seconds);
   const used = casts.reduce((sum, spell) => sum + (spell.cost || 0), 0) / seconds;
   const gained = withGain ? casts.reduce((sum, spell) => sum + (spell.manaGained || 0), 0) / seconds : 0;
-  const fromItems = Math.max(0, used - gained - BASE_MANA_REGEN / 5 - Math.max(0, Number(drain) || 0));
+  // drain: dopuszczalny dren z dolnej granicy zakresu many (ujemny = wymagana nadwyżka, 999 = bez granicy)
+  const fromItems = Math.max(0, used - gained - BASE_MANA_REGEN / 5 - (Number(drain) || 0));
   // Mana Steal potrzebny, żeby trafienia M w cyklu pokryły resztę: steal/s = trafienia/s × (MS ÷ 3 ÷ hps)
   const steal = timing.hitsPerSecond > 0 ? (fromItems * 3 * hps) / timing.hitsPerSecond : null;
   return { seconds, used, gained, fromItems, regen: fromItems * 5, steal, melee: timing.melee };
@@ -9912,7 +10263,7 @@ function ClassOverview({ playerClass, level, levelKnown, apCap, preset, treeIds,
   const names = CLASS_SPELL_NAMES[playerClass];
   const spells = preview ? preview.stats.spells : [];
   const typed = parseCycle(form.cycle);
-  const typedMana = typed.length > 0 ? cycleMana(spells, typed, form.cps, form.gain, form.drain) : null;
+  const typedMana = typed.length > 0 ? cycleMana(spells, typed, form.cps, form.gain, drainOfRange(formManaRange(form))) : null;
   const need = (mana) =>
     mana.fromItems <= 0 ? (
       <span style={ts({ color: "#55FF55" })}>free: base regen covers it</span>
@@ -9993,7 +10344,7 @@ function ClassOverview({ playerClass, level, levelKnown, apCap, preset, treeIds,
             {(combo ? combo.combos : []).map((entry) => {
               const digits = parseCycle(entry.cycle);
               const hasSpell = digits.some((id) => id !== 0);
-              const mana = hasSpell ? cycleMana(spells, digits, form.cps, form.gain, form.drain) : null;
+              const mana = hasSpell ? cycleMana(spells, digits, form.cps, form.gain, drainOfRange(formManaRange(form))) : null;
               const current = cycleText(typed) === cycleText(digits) && arch === preset;
               return (
                 <li key={entry.name} className="flex flex-col gap-1">
@@ -10074,17 +10425,24 @@ function DamageSummary({ build }) {
       )}
       {cycle.ids.length > 0 &&
         chip(
-          `Cycle ${cycleText(cycle.ids)} @ ${cycle.cps}/s${cycle.drain ? `, drain ${drainLabel(cycle.drain)}` : ""}`,
+          `Cycle ${cycleText(cycle.ids)} @ ${cycle.cps}/s${manaRangeOf(cycle) ? ` (${rangeValueText(manaRangeOf(cycle), rangeUi("mana", build.level))})` : ""}`,
           `${metrics.manaNet >= 0 ? "+" : ""}${metrics.manaNet.toFixed(1)} mana/s`,
-          manaOk(metrics, cycle),
-          `${metrics.manaUsed.toFixed(1)} mana/s used, ${(metrics.manaIncome + metrics.manaGain).toFixed(1)} from regen${cycle.steal && metrics.manaSteal ? " + steal from main attacks" : ""}${metrics.manaBuff ? ` + raid buff ${metrics.manaBuff}` : ""}${cycle.gain ? " + abilities" : ""}${cycle.drain ? `; up to ${cycle.drain} mana/s drain allowed` : ""}`
+          manaRangeOf(cycle) || !metrics.cycleOk ? manaOk(metrics, cycle) : null,
+          `${metrics.manaUsed.toFixed(1)} mana/s used, ${(metrics.manaIncome + metrics.manaGain).toFixed(1)} from regen${cycle.steal && metrics.manaSteal ? " + steal from main attacks" : ""}${metrics.manaBuff ? ` + raid buff ${metrics.manaBuff}` : ""}${cycle.gain ? " + abilities" : ""}; the mana range asks for ${rangeValueText(manaRangeOf(cycle), rangeUi("mana", build.level))}`
         )}
       {metrics.sustain !== undefined &&
         chip(
           "Life",
           `${metrics.sustain >= 0 ? "+" : ""}${metrics.sustain.toFixed(1)} HP/s`,
-          metrics.requireSustain || metrics.minSustain > 0 ? sustainPasses(metrics) : null,
-          `Life recovery: Health Regen ${formatNumber(Math.round(metrics.hpr))}/4s + Life Steal ${formatNumber(Math.round(metrics.lifeSteal))}${cycle.ids.length ? " from the cycle's main attacks" : "/3s"}${metrics.minSustain > 0 ? ` - the filter asks for at least ${formatNumber(metrics.minSustain)} HP/s` : metrics.requireSustain ? " - the filter asks for more than 0" : ""}`
+          metrics.requireSustain || lifeRangeOf(metrics) ? sustainPasses(metrics) : null,
+          `Life recovery: Health Regen ${formatNumber(Math.round(metrics.hpr))}/4s + Life Steal ${formatNumber(Math.round(metrics.lifeSteal))}${cycle.ids.length ? " from the cycle's main attacks" : "/3s"}${lifeRangeOf(metrics) ? ` - the range asks for ${rangeValueText(lifeRangeOf(metrics), rangeUi("life", build.level))}` : metrics.requireSustain ? " - the filter asks for more than 0" : ""}`
+        )}
+      {Number.isFinite(metrics.walkSpeed) &&
+        chip(
+          "Walk",
+          `${metrics.walkSpeed > 0 ? "+" : ""}${Math.round(metrics.walkSpeed)}%`,
+          metrics.spdRange ? speedPasses(metrics) : null,
+          `Walk Speed of the build${metrics.spdRange ? ` - the range asks for ${rangeValueText(metrics.spdRange, rangeUi("spd", build.level))}` : " (no walk speed condition)"}`
         )}
       {chip(
         "Skill points",
@@ -10602,177 +10960,6 @@ const SCORE_GROUPS = [
 
 function formatWeight(value) {
   return Number.isFinite(value) ? (Math.round(value * 100) / 100).toString() : "0";
-}
-
-function ScoreWeightsPanel({ archetype, playerClass, level, options, onChange, outdated, onGenerate }) {
-  const scoring = normalizeScoring(options.scoring);
-  const profile = applyRawBoost(getArchetypeProfile(archetype, options), playerClass, level);
-  const baseline = applyRawBoost(getArchetypeProfile(archetype, { ...options, scoring: { weights: {}, tuning: scoring.tuning } }), playerClass, level);
-  const [showDerived, setShowDerived] = useState(false);
-  const [query, setQuery] = useState("");
-  const covered = new Set(SCORE_GROUPS.flatMap((group) => group.keys));
-  const groups = [...SCORE_GROUPS, { id: "other", label: "Other", keys: Object.keys(STAT_META).filter((key) => !covered.has(key)) }].filter((group) => group.keys.length > 0);
-  const overrideCount = Object.keys(scoring.weights).length + Object.keys(scoring.tuning).length;
-  const setWeight = (key, raw) => {
-    const weights = { ...scoring.weights };
-    const number = Number(raw);
-    if (raw === "" || !Number.isFinite(number)) delete weights[key];
-    else weights[key] = number;
-    onChange({ ...options, scoring: { ...scoring, weights } });
-  };
-  const setTuning = (id, raw) => {
-    const tuning = { ...scoring.tuning };
-    const number = Number(raw);
-    if (raw === "" || !Number.isFinite(number)) delete tuning[id];
-    else tuning[id] = number;
-    onChange({ ...options, scoring: { ...scoring, tuning } });
-  };
-  const matches = (key) => {
-    if (!query.trim()) return true;
-    const needle = query.trim().toLowerCase();
-    return STAT_META[key].label.toLowerCase().includes(needle) || key.toLowerCase().includes(needle);
-  };
-  const tuningCurrent = (spec) => (spec.id === "weaponWeight" ? profile.baseWeaponWeight : profile.tuning[spec.id]);
-  const tuningDefault = (spec) => (spec.id === "weaponWeight" ? ARCHETYPES[archetype].weaponWeight ?? DEFAULT_WEAPON_WEIGHT : scoreTuning(null)[spec.id]);
-  return (
-    <section className="mc-panel flex flex-col gap-4 p-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="flex flex-col gap-1">
-          <h2 className="mc-title text-lg">Score calculation · {archetype}</h2>
-          <p className="max-w-3xl text-sm text-zinc-300">
-            These are the exact numbers the generator scores items with right now for a level {level} {playerClass} {archetype} with your
-            Custom stats (focus sliders, damage focus, priorities). Item points = <span className="mc-gold">value ÷ unit × weight × 10</span>.
-            Type a weight to override it; leave a field empty to use the computed one. Overrides are saved in this browser and also shape
-            "Other picks" and the Build Solver's archetype fit.
-          </p>
-        </div>
-        <div className="flex flex-col items-end gap-2">
-          {overrideCount > 0 && (
-            <button type="button" onClick={() => onChange({ ...options, scoring: { weights: {}, tuning: {} } })} className="mc-btn mc-btn-sm">
-              Reset all ({overrideCount})
-            </button>
-          )}
-          {outdated && (
-            <button type="button" onClick={onGenerate} className="mc-btn mc-btn-sm mc-btn-primary">
-              Generate Build with these weights
-            </button>
-          )}
-        </div>
-      </div>
-
-      <div className="mc-slot flex flex-col gap-2 p-3">
-        <h3 className="mc-title text-xs uppercase">Build-level terms</h3>
-        <ul className="grid gap-x-6 gap-y-2 md:grid-cols-2">
-          {SCORE_TUNING.map((spec) => {
-            const current = tuningCurrent(spec);
-            const fallback = tuningDefault(spec);
-            const overridden = scoring.tuning[spec.id] !== undefined;
-            return (
-              <li key={spec.id} className="flex items-center justify-between gap-3 text-sm">
-                <label htmlFor={`tuning-${spec.id}`} className="flex min-w-0 flex-col" title={spec.hint}>
-                  <span className="text-zinc-100">{spec.label}</span>
-                  <span className="text-xs text-zinc-500">
-                    {spec.id === "weaponWeight" ? `× focus factor ${profile.weaponFactor.toFixed(2)} = ${formatWeight(profile.weaponWeight)} · ` : ""}
-                    default {formatWeight(fallback)}
-                  </span>
-                </label>
-                <span className="flex flex-shrink-0 items-center gap-1">
-                  <input
-                    id={`tuning-${spec.id}`}
-                    type="number"
-                    step={spec.step}
-                    min={spec.min}
-                    max={spec.max}
-                    value={overridden ? scoring.tuning[spec.id] : ""}
-                    placeholder={formatWeight(current)}
-                    onChange={(event) => setTuning(spec.id, event.target.value)}
-                    className="mc-input w-24 text-right"
-                    style={ts(overridden ? { color: "#FFAA00" } : undefined)}
-                  />
-                  {overridden && (
-                    <button type="button" onClick={() => setTuning(spec.id, "")} className="mc-link text-xs" title="Back to the computed value">
-                      ↺
-                    </button>
-                  )}
-                </span>
-              </li>
-            );
-          })}
-        </ul>
-      </div>
-
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <label className="flex items-center gap-2 text-xs text-zinc-300">
-          Find a stat
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="e.g. mana, water, spell" className="mc-input w-48" />
-        </label>
-        <span className="text-xs text-zinc-500">
-          Unit column = how much of the stat gives weight × 10 points. Weights of 0 mean the stat is ignored. IDs not listed here (XP bonus, thorns…) never count.
-          {profile.rawBoost > 1 ? ` Raw damage weights are ×${profile.rawBoost.toFixed(2)} at level ${level}: weapons here deal ${Math.round(100 / profile.rawBoost)}% of endgame damage, so flat raw damage is worth that much more than % (an override replaces the boosted value).` : ""}
-        </span>
-      </div>
-
-      {groups.map((group) => {
-        const keys = group.keys.filter((key) => STAT_META[key] && matches(key));
-        if (keys.length === 0) return null;
-        const hidden = group.collapsed && !showDerived && !query.trim();
-        return (
-          <div key={group.id} className="mc-slot flex flex-col gap-2 p-3">
-            <div className="flex items-center justify-between gap-2">
-              <h3 className="mc-title text-xs uppercase">{group.label}</h3>
-              {group.collapsed && !query.trim() && (
-                <button type="button" onClick={() => setShowDerived(!showDerived)} className="mc-link text-xs">
-                  {showDerived ? "Hide" : `Show ${keys.length} stats`}
-                </button>
-              )}
-            </div>
-            {!hidden && (
-              <ul className="grid gap-x-6 gap-y-1 md:grid-cols-2 xl:grid-cols-3">
-                {keys.map((key) => {
-                  const meta = STAT_META[key];
-                  const current = profile.weights[key] || 0;
-                  const computed = baseline.weights[key] || 0;
-                  const overridden = scoring.weights[key] !== undefined;
-                  return (
-                    <li key={key} className="flex items-center justify-between gap-2 text-sm">
-                      <label htmlFor={`weight-${key}`} className="flex min-w-0 flex-col">
-                        <span className="truncate text-zinc-100" title={key}>
-                          {meta.label}
-                          {meta.unit === "%" ? " %" : /Raw$/.test(key) ? " (raw)" : ""}
-                        </span>
-                        <span className="text-xs text-zinc-500">
-                          per {formatNumber(meta.scale)}
-                          {meta.unit || ""} = {formatNumber(Math.round(Math.abs(current) * SCORE_SCALE * 10) / 10)} pts
-                          {overridden ? ` · computed ${formatWeight(computed)}` : ""}
-                        </span>
-                      </label>
-                      <span className="flex flex-shrink-0 items-center gap-1">
-                        <input
-                          id={`weight-${key}`}
-                          type="number"
-                          step={0.1}
-                          value={overridden ? scoring.weights[key] : ""}
-                          placeholder={formatWeight(computed)}
-                          onChange={(event) => setWeight(key, event.target.value)}
-                          className="mc-input w-20 text-right"
-                          style={ts(overridden ? { color: "#FFAA00" } : undefined)}
-                        />
-                        {overridden && (
-                          <button type="button" onClick={() => setWeight(key, "")} className="mc-link text-xs" title="Back to the computed weight">
-                            ↺
-                          </button>
-                        )}
-                      </span>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </div>
-        );
-      })}
-    </section>
-  );
 }
 
 // ZAKŁADKA "BUILD INFO": kombinacje kliknięć czarów klasy, typowa rotacja i kluczowe umiejętności archetypu,
@@ -11502,14 +11689,26 @@ function loadSavedTheme() {
 // Popup pokazuje się tylko przy pierwszej wizycie: potwierdzenie zapisujemy w localStorage. Przycisk "I confirm"
 // odblokowuje się dopiero po 5 s i po przewinięciu treści do końca (jeśli treść w ogóle się przewija).
 // Gdy localStorage nie działa (prywatne okno, zablokowane dane strony), popup po prostu pojawi się przy kolejnej wizycie.
-const WELCOME_KEY = "wbr-welcome-confirmed-v1";
+// v2 (0.37): nowe powitanie opisuje trzy tryby - dotychczasowi użytkownicy zobaczą je raz
+const WELCOME_KEY = "wbr-welcome-confirmed-v2";
 const WELCOME_WAIT_MS = 5000;
 const ULTIMATE_BUILD_GUIDE_URL = "https://forums.wynncraft.com/threads/the-ultimate-build-guide.320092/";
+// Źródła (powitanie). Zasada: każde nowe źródło danych albo portowany kod trafia tutaj w tym samym commicie, w którym
+// zaczyna być używane.
 const SITE_SOURCES = [
-  ["Wynnbuilder", "https://wynnbuilder.github.io/", "item and ability tree data, damage formulas, the 16×16 item sprites and ability tree textures (GPL-3.0)"],
+  [
+    "Wynnbuilder",
+    "https://wynnbuilder.github.io/",
+    "item and ability tree data, damage formulas, the 16×16 item sprites and ability tree textures (GPL-3.0); tomes and aspects data (2.2.4.0), powder and damage calculations, the build link format for import and export",
+  ],
   ["Build Solver (rawfish69)", "https://rawfish69.github.io/build-solver/", "the model for the Build Solver tab"],
-  ["Wynncraft Wiki", "https://wynncraft.wiki.gg/", "weapon DPS, identification rolls, ability trees, powders, class portraits and festival item lists"],
-  ["Wynncraft forums", "https://forums.wynncraft.com/", "Stats and Identifications Guide, The Ultimate Build Guide, How Damage Is Calculated – Rekindled Edition"],
+  ["Wynncraft Wiki", "https://wynncraft.wiki.gg/", "weapon DPS, identification rolls, ability trees, powders, class portraits and festival item lists; skill points, tomes, aspects, raid and dungeon levels, version history"],
+  [
+    "Wynncraft forums",
+    "https://forums.wynncraft.com/",
+    "Stats and Identifications Guide, The Ultimate Build Guide, How Damage Is Calculated – Rekindled Edition; threads on spell costs and Mana Steal in 2.0 and on Attack Speed and spell damage",
+  ],
+  ["The Ultimate Build Guide", ULTIMATE_BUILD_GUIDE_URL, "guide builds, their ability trees, tomes and aspects (used as starting points and presets)"],
   ["Wynnguides (afeenah)", "https://afeenah.github.io/wynnguides/", "class and build guides"],
   ["WynnVentory", "https://wynnventory.com", "Trade Market prices and today's listings"],
   ["Wynnpool", "https://www.wynnpool.com", "community item weights (MIT)"],
@@ -11608,10 +11807,10 @@ function InfoDialog({ onClose }) {
               <li>{hl("Maximise.")} One spell (one cast), the main attack (damage per second), several spells at once (their sum), or the whole cycle (its damage per second).</li>
               <li>{hl("Effective HP.")} The minimum EHP, in 5% steps of the most your level can reach. Builds below it are thrown away.</li>
               <li>
-                {hl("Mana.")} Type your spell cycle (1-4 = spells, M = main attack) and clicks per second, how much mana per second it may lose (Allowed drain) and the minimum
-                Life recovery. In raids you can add your team's mana buff under Advanced, at the bottom of the left panel.
+                {hl("Mana.")} Type your spell cycle (1-4 = spells, M = main attack) and clicks per second, and the range of its mana balance (the minimum = the drain you accept,
+                the maximum = how much surplus is fine). Life recovery has a range too. In raids you can add your team's mana buff under Advanced, at the bottom of the left panel.
               </li>
-              <li>{hl("Extras.")} Event items, tradeable only, negative defences, life sustain, max or realistic rolls, poison, free skill points, weapon attack speed.</li>
+              <li>{hl("Extras.")} Event items, tradeable only, negative defences, max or realistic rolls, poison, free skill points, the walk speed range (default: at least −20%), weapon attack speed.</li>
               <li>{hl("Generate.")} The left panel comes back: change anything and generate again. "Settings changed: regenerate" means the build shown is for older settings.</li>
               <li>
                 {hl("Read the result.")} Item cards (other picks, rolls, pin or exclude an item), Why this build? (every number and what each item adds), Open in Wynnbuilder,
@@ -11633,7 +11832,7 @@ function InfoDialog({ onClose }) {
               <li className="wbr-welcome-source">{hl("Effective HP")}: health reduced by Defence and Agility, class and ability tree resistances (Wynnbuilder's EHP; elemental defences are shown but not in it).</li>
               <li className="wbr-welcome-source">
                 {hl("Mana")}: (Mana Regen + 25) ÷ 5 per second, Mana Steal only from M hits (Mana Steal ÷ 3 ÷ attacks per second each), mana from abilities and the raid buff you
-                entered, minus the spells' costs (a spell = 3 clicks, M = one attack). The balance must not fall below minus the allowed drain.
+                entered, minus the spells' costs (a spell = 3 clicks, M = one attack). The balance must stay in the mana range (default 0 to +1 mana/s).
               </li>
               <li className="wbr-welcome-source">{hl("Life")}: Health Regen ÷ 4 per second plus Life Steal from main attack hits; effective health gain = that × EHP ÷ HP.</li>
               <li className="wbr-welcome-source">
@@ -11768,17 +11967,28 @@ function WelcomeDialog() {
           }}
           className="wbr-welcome-body flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-5 py-4 text-base"
         >
+          <p>Builder Wynncraft has three modes. Pick one in the bar at the top:</p>
+          <ul className="flex flex-col gap-2">
+            <li className="wbr-welcome-source">
+              <b className="wbr-welcome-hl">Build Recommender</b> - answer a few questions (class, rank, level, ability tree, goal) and get a full build generated from scratch.
+              Best for levelling from lvl ~30 to ~100 and for trying ideas fast.
+            </li>
+            <li className="wbr-welcome-source">
+              <b className="wbr-welcome-hl">Build Optimizer</b> - choose the items and abilities you already want. Optimize fills the empty slots, spare ability points, tomes and
+              aspects, and suggests better swaps. Nothing changes until you accept the changes.
+            </li>
+            <li className="wbr-welcome-source">
+              <b className="wbr-welcome-hl">Build Creator</b> - build everything yourself from the full item database, like in Wynnbuilder. Import and export Wynnbuilder links.
+            </li>
+          </ul>
           <p>
-            This site is designed to generate build suggestions for levelling from <b className="wbr-welcome-hl">lvl ~30</b> to <b className="wbr-welcome-hl">lvl ~100</b>.
-          </p>
-          <p>
-            To find out what the best endgame (Fruma+) builds are, I highly recommend visiting this guide:{" "}
+            For the best endgame (Fruma+) builds, see{" "}
             <a href={ULTIMATE_BUILD_GUIDE_URL} target="_blank" rel="noopener noreferrer" className="wbr-welcome-link">
               The Ultimate Build Guide
-            </a>{" "}
-            <span className="wbr-welcome-url">({ULTIMATE_BUILD_GUIDE_URL})</span>
+            </a>
+            .
           </p>
-          <p>I recommend using the optional settings and generating build suggestions multiple times with different options to maximize your results.</p>
+          <p>Numbers use game version 2.2.4 data. Results are suggestions, not guarantees - always check a build before you buy items for it.</p>
           <div className="flex flex-col gap-2">
             <h3 className="wbr-welcome-sub">Sources used</h3>
             <ul className="flex flex-col gap-2 text-sm">
@@ -11828,7 +12038,8 @@ const SWEEP_COLUMNS = { display: "grid", gridTemplateColumns: "3.4em 4.4em minma
 
 // Suwak "Life recovery": do ile HP/s (Health Regen ÷ 4 + Life Steal z trafień) - skala rośnie z poziomem.
 function lifeRecoveryMax(level) {
-  return Math.max(50, Math.round(((level || 120) * 3) / 10) * 10);
+  // do ok. 1000 HP/s na 120 (budowy pod sustain mają kilkaset HP/s z regenu i Life Steal)
+  return Math.max(50, Math.round(((level || 120) * 25) / 3 / 50) * 50);
 }
 function drainLabel(drain) {
   return drain === null || drain === undefined || drain >= 999 ? "any" : drain === 0 ? "none" : `≤ ${drain}`;
@@ -11844,7 +12055,7 @@ function lifeCell(metrics) {
 
 // Limity drenu many, dla których liczymy podpowiedź (szybkie szukanie przy obecnym progu EHP); null = bez limitu.
 const TRADEOFF_DRAINS = [0, 1, 3, 6, null];
-// Podpowiedź przy suwakach Allowed drain i Life recovery: najmocniejszy build przy obecnym progu EHP dla kilku
+// Podpowiedź przy suwakach Mana balance i Life recovery: najmocniejszy build przy obecnym progu EHP dla kilku
 // limitów drenu. Proponujemy najmniejszy dren, który trzyma >= 97% najlepszych obrażeń, i odnawianie życia, które
 // ten build ma sam z siebie - ustawione na suwakach nie zabiera obrażeń (ten build nadal przechodzi).
 const TRADEOFF_KEEP = 0.97;
@@ -11863,14 +12074,18 @@ function tradeoffSuggestion(rows) {
   const lr = Math.max(0, Math.floor(m.sustain / 5) * 5);
   const cap = limited.length > 0 ? Math.max(...limited.map((row) => row.limit)) : null;
   const unlimited = all.find((row) => row.limit === null) || null;
-  return { index: rows.indexOf(pick), drain, lr, damage: m.damage, best: best.build.metrics.damage, bestIndex: rows.indexOf(best), cap, unlimited: unlimited && unlimited.build.metrics.manaNet < 0 && unlimited.build.metrics.damage > best.build.metrics.damage * 1.001 ? { damage: unlimited.build.metrics.damage, manaNet: unlimited.build.metrics.manaNet } : null };
+  // zakresy do suwaków: minimum jak dotąd, maksimum = wartość buildu + 20% (co najmniej krok nad minimum)
+  const plus = (value) => value + Math.abs(value) * 0.2;
+  const manaRange = hasCycle ? { min: -drain, max: Math.max(-drain + 0.5, Math.ceil(plus(m.manaNet) * 2) / 2) } : { min: -drain, max: null };
+  const lifeRange = { min: lr > 0 ? lr : null, max: Math.max(lr + 5, Math.ceil(plus(m.sustain) / 5) * 5) };
+  return { index: rows.indexOf(pick), drain, lr, manaRange, lifeRange, damage: m.damage, best: best.build.metrics.damage, bestIndex: rows.indexOf(best), cap, unlimited: unlimited && unlimited.build.metrics.manaNet < 0 && unlimited.build.metrics.damage > best.build.metrics.damage * 1.001 ? { damage: unlimited.build.metrics.damage, manaNet: unlimited.build.metrics.manaNet } : null };
 }
 
 function TradeoffSuggest({ tradeoff, hasCycle, running, form, onRun, onUse, onPick, shownBuild }) {
   const ts = useTs();
   const rows = tradeoff ? tradeoff.rows : [];
   const suggestion = tradeoff && !tradeoff.running ? tradeoff.suggestion : null;
-  const applied = suggestion && (Number(form.drain) || 0) === suggestion.drain && (Number(form.lr) || 0) === suggestion.lr;
+  const applied = suggestion && sameRange(formManaPair(form), suggestion.manaRange) && sameRange(formLifePair(form), suggestion.lifeRange);
   if (!tradeoff) {
     return (
       <button
@@ -11926,8 +12141,8 @@ function TradeoffSuggest({ tradeoff, hasCycle, running, form, onRun, onUse, onPi
       ) : suggestion ? (
         <div className="flex flex-col gap-1 pt-1">
           <p className="text-zinc-300">
-            Suggested: <b style={ts({ color: "#55FFFF" })}>{hasCycle ? (suggestion.drain > 0 ? `drain ${suggestion.drain} mana/s` : "no drain") : "no cycle"}</b> ·{" "}
-            <b style={ts({ color: "#FF5555" })}>life recovery ≥ {formatNumber(suggestion.lr)} HP/s</b>
+            Suggested: <b style={ts({ color: "#55FFFF" })}>{hasCycle ? `mana ${rangeValueText(suggestion.manaRange, rangeUi("mana", 120))}` : "no cycle"}</b> ·{" "}
+            <b style={ts({ color: "#FF5555" })}>life {rangeValueText(suggestion.lifeRange, rangeUi("life", 120))}</b>
             <span className="text-zinc-500">
               {" "}
               ({suggestion.damage >= suggestion.best ? `the strongest build${suggestion.cap !== null ? ` up to ${suggestion.cap} mana/s of drain` : ""}` : `${((suggestion.damage / suggestion.best) * 100).toFixed(1)}% of the strongest${suggestion.cap !== null ? ` up to ${suggestion.cap} mana/s` : ""}`}; with these limits it still passes, so the damage stays)
@@ -12117,7 +12332,8 @@ function explainBuild(build) {
     if (spOver > 0) fails.push(`needs ${spOver} skill point${spOver === 1 ? "" : "s"} more than level ${build.level} gives`);
     if (minEhp > 0 && metrics.ehp < minEhp) fails.push(`EHP ${formatNumber(Math.round(metrics.ehp))} < ${formatNumber(Math.round(minEhp))}`);
     if (!manaOk(metrics, cycle)) fails.push(`mana ${metrics.manaNet.toFixed(1)}/s for the cycle`);
-    if (!sustainPasses({ ...metrics, requireSustain: build.metrics.requireSustain, minSustain: build.metrics.minSustain })) fails.push(`life recovery ${metrics.sustain.toFixed(1)} HP/s`);
+    if (!sustainPasses({ ...metrics, requireSustain: build.metrics.requireSustain, minSustain: build.metrics.minSustain, lifeRange: build.metrics.lifeRange })) fails.push(`life recovery ${metrics.sustain.toFixed(1)} HP/s`);
+    if (!speedPasses({ walkSpeed: metrics.walkSpeed, spdRange: build.metrics.spdRange })) fails.push(`walk speed ${Math.round(metrics.walkSpeed)}%`);
     return { metrics, fails };
   };
   const base = measure(picks);
@@ -12181,18 +12397,113 @@ function WhyRow({ label, value, good = null, hint = null }) {
 // Przycisk "Open in Wynnbuilder": ten sam build (przedmioty, powdery broni, skill pointy razem z wolnymi, poziom,
 // drzewko) jako link Wynnbuildera; opcjonalnie z tomami i aspektami poleconymi w zakładkach Tomes / Aspects.
 // fixedExtras (Creator / Optimizer): tomy i aspekty gracza - bez przełącznika "recommended".
-function WynnbuilderExport({ build, treeSettings, fixedExtras = null }) {
+// Link Wynnbuildera buildu (liczony raz na zmianę buildu): nagłówek buildu, blok pod kartami i adres strony (#b=).
+// withExtras: z polecanymi tomami i aspektami (checkbox pod kartami, stan w komponencie głównym).
+function wynnbuilderLinkFor(build, treeSettings, withExtras, fixedExtras = null) {
+  if (!build) return null;
   const canExtras = !extrasLocked(build.level) && !fixedExtras;
-  const [withExtras, setWithExtras] = useState(false);
+  const extras = fixedExtras || (withExtras && canExtras ? wynnbuilderExtras(build, extrasEnvFor(build, treeSettings, null, null)) : null);
+  const result = wynnbuilderLink(build, (treeSettings && treeSettings.selected) || [], extras);
+  const tomes = extras ? Object.values(extras.tomes).flat().filter(Boolean).length : 0;
+  const aspects = extras ? extras.aspects.filter(Boolean).length : 0;
+  return { ...result, tomes, aspects, canExtras };
+}
+function useWynnbuilderLink(build, treeSettings, withExtras, fixedExtras = null) {
+  return useMemo(() => wynnbuilderLinkFor(build, treeSettings, withExtras, fixedExtras), [build, treeSettings, withExtras, fixedExtras]);
+}
+
+// Skopiuj tekst do schowka; bez dostępu do schowka (piaskownica) - pole z tekstem do skopiowania ręcznie.
+async function copyToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+// Przyciski w nagłówku buildu: Wynnbuilder ↗, Copy link (link Wynnbuildera), Share link (adres tej strony z #b=&s=)
+// i Save (lista zapisanych buildów w lewym panelu). Na telefonie przechodzą do wiersza pod tytułem.
+function BuildLinkBar({ wbUrl, shareUrl = null, onSave = null, saveName = "" }) {
+  const [message, setMessage] = useState("");
+  const [fallback, setFallback] = useState(null);
+  const [naming, setNaming] = useState(false);
+  const [name, setName] = useState(saveName);
+  useEffect(() => {
+    setMessage("");
+    setFallback(null);
+  }, [wbUrl, shareUrl]);
+  const copy = async (text, what) => {
+    if (await copyToClipboard(text)) {
+      setMessage(`${what} copied.`);
+      setFallback(null);
+    } else {
+      setFallback(text);
+      setMessage("Clipboard is blocked here - copy the link from the box below.");
+    }
+  };
+  return (
+    <div className="flex w-full flex-col gap-1.5 sm:w-auto sm:items-end">
+      <div className="flex flex-wrap gap-1.5">
+        <a href={wbUrl} target="_blank" rel="noreferrer" className="mc-btn mc-btn-sm" title="Open this build in wynnbuilder.github.io/builder in a new tab">
+          Wynnbuilder ↗
+        </a>
+        <button type="button" className="mc-btn mc-btn-sm" onClick={() => copy(wbUrl, "Wynnbuilder link")} title="Copy the Wynnbuilder link of this build">
+          Copy link
+        </button>
+        {shareUrl && (
+          <button type="button" className="mc-btn mc-btn-sm" onClick={() => copy(shareUrl, "Share link")} title="Copy this page's address: it opens this build (and your settings) again, e.g. in another tab to compare">
+            Share link
+          </button>
+        )}
+        {onSave && (
+          <button
+            type="button"
+            className="mc-btn mc-btn-sm"
+            onClick={() => {
+              setName(saveName);
+              setNaming((open) => !open);
+            }}
+            aria-expanded={naming}
+            title="Save this build in your browser (Saved builds, at the bottom of the left panel)"
+          >
+            Save
+          </button>
+        )}
+      </div>
+      {naming && (
+        <div className="flex w-full flex-wrap items-center gap-1.5 sm:justify-end">
+          <input value={name} onChange={(event) => setName(event.target.value.slice(0, 80))} className="mc-input min-w-0 flex-1 basis-48 text-sm" aria-label="Name of the saved build" autoFocus />
+          <button
+            type="button"
+            className="mc-btn mc-btn-sm mc-btn-primary"
+            onClick={() => {
+              setMessage(onSave(name.trim() || saveName));
+              setNaming(false);
+            }}
+          >
+            Save build
+          </button>
+          <button type="button" className="mc-btn mc-btn-sm" onClick={() => setNaming(false)}>
+            Cancel
+          </button>
+        </div>
+      )}
+      {message && <p className="text-xs text-emerald-300">{message}</p>}
+      {fallback && <input readOnly value={fallback} onFocus={(event) => event.target.select()} className="mc-input w-full text-xs" aria-label="Link to copy" />}
+    </div>
+  );
+}
+
+function WynnbuilderExport({ build, treeSettings, fixedExtras = null, link: sharedLink = null, withExtras: extrasProp = undefined, onWithExtras = null }) {
+  const canExtras = !extrasLocked(build.level) && !fixedExtras;
+  const [ownExtras, setOwnExtras] = useState(false);
+  const withExtras = extrasProp !== undefined ? extrasProp : ownExtras;
+  const setWithExtras = onWithExtras || setOwnExtras;
   const [message, setMessage] = useState("");
   const [showLink, setShowLink] = useState(false);
-  const link = useMemo(() => {
-    const extras = fixedExtras || (withExtras && canExtras ? wynnbuilderExtras(build, extrasEnvFor(build, treeSettings, null, null)) : null);
-    const result = wynnbuilderLink(build, (treeSettings && treeSettings.selected) || [], extras);
-    const tomes = extras ? Object.values(extras.tomes).flat().filter(Boolean).length : 0;
-    const aspects = extras ? extras.aspects.filter(Boolean).length : 0;
-    return { ...result, tomes, aspects };
-  }, [build, treeSettings, withExtras, canExtras, fixedExtras]);
+  const ownLink = useWynnbuilderLink(sharedLink ? null : build, treeSettings, withExtras, fixedExtras);
+  const link = sharedLink || ownLink;
   useEffect(() => {
     setMessage("");
   }, [link.url]);
@@ -12233,6 +12544,161 @@ function WynnbuilderExport({ build, treeSettings, fixedExtras = null }) {
       {message && <p className="text-xs text-emerald-300">{message}</p>}
       {showLink && <input readOnly value={link.url} onFocus={(event) => event.target.select()} className="mc-input w-full text-xs" aria-label="Wynnbuilder link" />}
     </div>
+  );
+}
+
+// ZAPISANE BUILDY (lewy panel Recommendera): linki buildów w przeglądarce gracza, bez serwera.
+// localStorage "wbr-saved-builds-v1": [{ name, url, savedAt, metrics: { damage, ehp, mana } }], najwyżej 50.
+const SAVED_LINKS_KEY = "wbr-saved-builds-v1";
+const SAVED_LINKS_MAX = 50;
+function loadSavedLinks() {
+  try {
+    const list = JSON.parse(window.localStorage.getItem(SAVED_LINKS_KEY) || "[]");
+    return { ok: true, list: Array.isArray(list) ? list.filter((entry) => entry && typeof entry.url === "string" && typeof entry.name === "string") : [] };
+  } catch (error) {
+    return { ok: false, list: [] };
+  }
+}
+function storeSavedLinks(list) {
+  try {
+    window.localStorage.setItem(SAVED_LINKS_KEY, JSON.stringify(list));
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+function SavedBuildsPanel({ saved, storageOk, onOpen, onDelete, onImport, importMessage }) {
+  const [text, setText] = useState("");
+  const [message, setMessage] = useState("");
+  const [fallback, setFallback] = useState(null);
+  const exportAll = async () => {
+    const lines = saved.map((entry) => entry.url).join("\n");
+    if (await copyToClipboard(lines)) {
+      setMessage(`${saved.length} link${saved.length === 1 ? "" : "s"} copied, one per line.`);
+      setFallback(null);
+    } else {
+      setFallback(lines);
+      setMessage("Clipboard is blocked here - copy the links from the box below.");
+    }
+  };
+  return (
+    <section className="mc-panel flex flex-col gap-3 p-4" aria-label="Saved builds">
+      <h2 className="mc-title text-xs uppercase">Saved builds</h2>
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor="saved-import" className="text-xs text-zinc-300">
+          Import a link
+        </label>
+        <div className="flex gap-1.5">
+          <input
+            id="saved-import"
+            value={text}
+            onChange={(event) => setText(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && text.trim()) {
+                onImport(text.trim());
+                setText("");
+              }
+            }}
+            placeholder="This site's link or a Wynnbuilder link"
+            className="mc-input min-w-0 flex-1 text-sm"
+            aria-label="Build link to open"
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <button
+            type="button"
+            className="mc-btn mc-btn-sm"
+            disabled={!text.trim()}
+            onClick={() => {
+              onImport(text.trim());
+              setText("");
+            }}
+          >
+            Open
+          </button>
+        </div>
+        {importMessage && <p className={`text-xs ${importMessage.error ? "text-red-400" : "text-emerald-300"}`}>{importMessage.text}</p>}
+      </div>
+      {!storageOk && <p className="text-xs text-amber-300">This browser doesn't allow saving here, so the list can't be kept. Share link and Copy link still work.</p>}
+      {saved.length === 0 ? (
+        <p className="text-xs text-zinc-500">Save a build with Save in its header. Builds stay in this browser only; Export copies the links to move them.</p>
+      ) : (
+        <ul className="mc-divide flex flex-col">
+          {saved.map((entry, index) => (
+            <li key={`${entry.savedAt}-${index}`} className="flex items-start gap-2 py-1.5">
+              <button type="button" className="min-w-0 flex-1 text-left hover:bg-white/5" onClick={() => onOpen(entry)} title="Open this build">
+                <span className="block truncate text-sm text-zinc-100">{entry.name}</span>
+                <span className="block text-xs tabular-nums text-zinc-500">
+                  {entry.savedAt ? new Date(entry.savedAt).toLocaleDateString("en-GB") : ""}
+                  {entry.metrics && Number.isFinite(entry.metrics.damage) ? ` · ${formatNumber(Math.round(entry.metrics.damage))} dmg` : ""}
+                  {entry.metrics && Number.isFinite(entry.metrics.ehp) ? ` · ${formatNumber(Math.round(entry.metrics.ehp))} EHP` : ""}
+                  {entry.metrics && Number.isFinite(entry.metrics.mana) ? ` · ${entry.metrics.mana >= 0 ? "+" : ""}${entry.metrics.mana.toFixed(1)} mana/s` : ""}
+                </span>
+              </button>
+              <a href={entry.url} target="_blank" rel="noreferrer" className="mc-link whitespace-nowrap text-xs" title="Open in a new tab (middle click works too)">
+                Open in new tab
+              </a>
+              <button type="button" className="px-1 text-xs text-zinc-400 hover:text-white" aria-label={`Delete ${entry.name}`} onClick={() => onDelete(index)}>
+                ✕
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {saved.length > 0 && (
+        <div className="flex flex-col gap-1">
+          <button type="button" className="mc-btn mc-btn-sm self-start" onClick={exportAll} title="Copy every saved link, one per line - paste them into Import on another computer">
+            Export
+          </button>
+          {message && <p className="text-xs text-emerald-300">{message}</p>}
+          {fallback && <textarea readOnly value={fallback} onFocus={(event) => event.target.select()} className="mc-input h-20 w-full text-xs" aria-label="Saved links" />}
+        </div>
+      )}
+    </section>
+  );
+}
+
+// Zakładki Tomes / Aspects przy buildzie z linku: tomy i aspekty z linku zamiast rekomendacji.
+function SharedExtrasPanel({ build, what }) {
+  if (what === "tomes") {
+    const tomes = build.tomes || [];
+    return (
+      <section className="mc-panel flex flex-col gap-2 p-4">
+        <h2 className="mc-title text-sm uppercase">Tomes from the link</h2>
+        {tomes.length === 0 ? (
+          <p className="text-sm text-zinc-400">The link has no tomes.</p>
+        ) : (
+          <ul className="flex flex-col gap-1 text-sm">
+            {tomes.map((tome, index) => (
+              <li key={`${tome.name}-${index}`}>
+                <span className="text-zinc-100">{tome.name}</span>
+                <span className="text-zinc-500">{tome.tomeSlot ? ` · ${tome.tomeSlot}` : ""}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+        <p className="text-xs text-zinc-500">Regenerate with these settings to get recommended tomes for a new build.</p>
+      </section>
+    );
+  }
+  const aspects = build.aspects || [];
+  return (
+    <section className="mc-panel flex flex-col gap-2 p-4">
+      <h2 className="mc-title text-sm uppercase">Aspects from the link</h2>
+      {aspects.length === 0 ? (
+        <p className="text-sm text-zinc-400">The link has no aspects.</p>
+      ) : (
+        <ul className="flex flex-col gap-1 text-sm">
+          {aspects.map(([aspect, tier], index) => (
+            <li key={`${aspect.name}-${index}`}>
+              <span className="text-zinc-100">{aspect.name}</span>
+              <span className="text-zinc-500"> · tier {["I", "II", "III", "IV"][tier - 1] || tier}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 
@@ -12320,8 +12786,9 @@ function WhyBuildDialog({ build, onClose }) {
             </p>
             <div className="flex flex-col gap-1">
               <WhyRow label="Effective HP" value={m.minEhp > 0 ? `at least ${formatNumber(Math.round(m.minEhp))}` : "no minimum"} />
-              <WhyRow label="Mana: spell cycle" value={m.cycle.ids.length ? `${cycleText(m.cycle.ids)} at ${m.cycle.cps} clicks/s${m.cycle.steal ? ", Mana Steal from main attacks (M)" : ""}${m.cycle.gain ? ", ability mana counted" : ""}${m.cycle.drain ? (m.cycle.drain >= 999 ? ", any drain" : `, drain up to ${m.cycle.drain} mana/s`) : ", full sustain"}` : "no cycle"} />
-              <WhyRow label="Life recovery" value={m.minSustain > 0 ? `at least ${formatNumber(m.minSustain)} HP/s` : m.requireSustain ? "more than 0 HP/s" : "no minimum"} />
+              <WhyRow label="Mana: spell cycle" value={m.cycle.ids.length ? `${cycleText(m.cycle.ids)} at ${m.cycle.cps} clicks/s${m.cycle.steal ? ", Mana Steal from main attacks (M)" : ""}${m.cycle.gain ? ", ability mana counted" : ""}, balance ${rangeValueText(manaRangeOf(m.cycle), rangeUi("mana", build.level))}` : "no cycle"} />
+              <WhyRow label="Life recovery" value={lifeRangeOf(m) ? rangeValueText(lifeRangeOf(m), rangeUi("life", build.level)) : m.requireSustain ? "more than 0 HP/s" : "any"} />
+              <WhyRow label="Walk Speed" value={m.spdRange ? rangeValueText(m.spdRange, rangeUi("spd", build.level)) : "any"} />
               <WhyRow
                 label="Items"
                 value={[m.excludeEvents ? "no limited-time event items" : null, m.tradeableOnly ? "tradeable only" : null, options.attackSpeeds.length ? `weapon speed ${options.attackSpeeds.map((speed) => ATTACK_SPEED_LABELS[speed]).join("/")}` : null, options.avoidNegativeDefences ? "no negative defences" : null, (options.excludedTiers || []).length ? `no ${options.excludedTiers.join("/")}` : null].filter(Boolean).join(" · ") || "every item up to your level"}
@@ -12385,13 +12852,13 @@ function WhyBuildDialog({ build, onClose }) {
                     value={`(Mana Regen ${formatNumber(Math.round(stat("mr")))} + 25) ÷ 5${m.cycle.steal && m.manaSteal ? ` + Mana Steal ${formatNumber(Math.round(stat("ms")))} from main attacks ${m.manaSteal.toFixed(1)}` : m.cycle.steal && stat("ms") > 0 ? " (no M in the cycle, so no Mana Steal)" : ""}${m.manaBuff > 0 ? ` + raid buff ${m.manaBuff.toFixed(1)}` : ""}${m.manaGain > 0 ? ` + abilities ${m.manaGain.toFixed(1)}` : ""} = ${(m.manaIncome + m.manaGain).toFixed(1)}/s`}
                   />
                   <WhyRow label="Mana out" value={`cycle ${cycleText(m.cycle.ids)}: ${m.manaUsed.toFixed(1)}/s (3 clicks per spell ÷ ${m.cycle.cps} clicks/s${m.cycle.ids.includes(0) ? ", M = one main attack at the weapon's attack speed" : ""})`} />
-                  <WhyRow label="Balance" value={`${m.manaNet >= 0 ? "+" : ""}${m.manaNet.toFixed(1)} mana/s${m.cycle && m.cycle.drain ? (m.cycle.drain >= 999 ? " (any drain allowed)" : ` (drain up to ${m.cycle.drain} allowed)`) : ""}`} good={manaOk(m, m.cycle)} />
+                  <WhyRow label="Balance" value={`${m.manaNet >= 0 ? "+" : ""}${m.manaNet.toFixed(1)} mana/s (range ${rangeValueText(manaRangeOf(m.cycle), rangeUi("mana", build.level))})`} good={manaOk(m, m.cycle)} />
                 </>
               )}
               <WhyRow
-                label="Life sustain"
+                label="Life recovery"
                 value={`Health Regen ${formatNumber(Math.round(m.hpr))}/4 s + Life Steal ${formatNumber(Math.round(m.lifeSteal))}${m.cycle && m.cycle.ids && m.cycle.ids.length ? (m.cycle.ids.includes(0) ? " from the cycle's main attacks" : " (no M in the cycle, so 0)") : "/3 s"} = ${m.sustain >= 0 ? "+" : ""}${m.sustain.toFixed(1)} HP/s`}
-                good={m.requireSustain || m.minSustain > 0 ? sustainPasses(m) : null}
+                good={m.requireSustain || lifeRangeOf(m) ? sustainPasses(m) : null}
               />
               <WhyRow
                 label="Effective health gain"
@@ -13530,7 +13997,7 @@ function AbilityTree({ playerClass, level, rank, selected, fullPoints = 0, onCha
 
 const ITEM_BY_NAME = new Map(ITEM_DB.map((item) => [item.name, item]));
 
-// Buduje obiekt w tym samym kształcie co generateOptimizedBuild() z buildu z poradnika (poziom 120, domyślne opcje).
+// Buduje obiekt w kształcie buildu (sloty, skill pointy, wynik wagami archetypu) z buildu z poradnika (poziom 120, domyślne opcje).
 function guideBuildResult(guide, powders = "auto") {
   const profile = getArchetypeProfile(guide.archetype, { ...DEFAULT_OPTIONS, powders });
   const slots = SLOTS.map((slot) => {
@@ -14593,9 +15060,11 @@ export function startEngineWorker(scope) {
     }
     if (message.type === "task") {
       let result = null;
-      if (taskCaches.job !== message.job) taskCaches = { job: message.job, caches: { evalCache: new Map(), exactCache: new Map() } };
+      // pamięć ocen per zlecenie i per ustawienia zakresów (przydział wolnych punktów zależy od zakresów)
+      const cacheKey = `${message.job}|${JSON.stringify((message.task && message.task.override) || null)}`;
+      if (taskCaches.job !== cacheKey) taskCaches = { job: cacheKey, caches: { evalCache: new Map(), exactCache: new Map() } };
       try {
-        result = (await generateDamageBuild({ ...message.params, task: message.task, caches: taskCaches.caches })).task;
+        result = (await generateDamageBuild({ ...message.params, ...((message.task && message.task.override) || {}), task: message.task, caches: taskCaches.caches })).task;
       } catch (error) {
         result = null;
       }
@@ -14951,7 +15420,8 @@ function workspaceItem(ws, slotId) {
   if (!name) return null;
   const base = ITEM_BY_NAME.get(name);
   if (!base) return null;
-  const rolled = ws.rolls && ws.rolls[name] ? withRolls(base, ws.rolls[name]) : base;
+  const own = rollsOf(ws.rolls, slotId, name);
+  const rolled = own ? withRolls(base, own) : base;
   return applyPowderList(slotId, rolled, powderListFromText(ws.powders && ws.powders[slotId], rolled));
 }
 function workspaceTomes(ws) {
@@ -15116,8 +15586,8 @@ function workspaceFromBuild(build, { rank = "", treeIds = null, rolls = {}, extr
     if (!slot.item) return;
     ws.items[slot.id] = slot.item.name;
     if (slot.item.powders && slot.item.powders.list && (slot.id === "weapon" || ARMOUR_SLOT_IDS.includes(slot.id))) ws.powders[slot.id] = powderText(slot.item.powders.list);
-    const spec = rolls[slot.item.name] || slot.item.rolls;
-    if (spec) ws.rolls[slot.item.name] = spec;
+    const spec = rollsOf(rolls, slot.id, slot.item.name) || slot.item.rolls;
+    if (spec) ws.rolls[rollKey(slot.id, slot.item.name)] = spec;
   });
   if (build.skillPoints && build.skillPoints.free) SKILLS.forEach((skill) => {
     if (build.skillPoints.free[skill] > 0) ws.freeSp[skill] = build.skillPoints.free[skill];
@@ -15186,43 +15656,86 @@ function wbDecodePowders(r) {
   }
 }
 const WB_ITEM_BY_ID = new Map(Object.entries((WB_IDS && WB_IDS.items) || {}).map(([name, id]) => [id, name]));
-// Link (albo sam kod po "#") -> workspace. Zwraca { ws, notes } albo rzuca błąd z opisem dla gracza.
-function workspaceFromWynnbuilderLink(text) {
+// Dekoder kodu Wynnbuildera (to, co stoi po "#" w linku buildera; binarny format 12, ENCODING.md) - odwrotność
+// wynnbuilderLink(). Używają go import w Creatorze, link buildu w adresie strony (#b=) i testy. Zwraca surowe pola:
+// { legacy, version, items: 9 nazw albo null, kinds: rodzaj każdego slotu ("normal" / "crafted" / "custom"),
+// unknown: [{ slot, id }] (numer spoza tej bazy), powders: listy numerów powderów dla hełmu, klaty, spodni, butów i broni,
+// tomes: numery albo null, sp: sumy skill pointów albo null, level (MAX = poziom maksymalny gry), aspects: { id, tier }
+// albo null, treeBits }. Rzuca błąd z opisem dla gracza (stary format, obcięty kod).
+function decodeWynnbuilderHash(hash) {
   const enc = WB_IDS.encoding;
-  const raw = String(text || "").trim();
-  const hash = raw.includes("#") ? raw.slice(raw.indexOf("#") + 1) : raw;
-  if (!hash) throw new Error("Paste a Wynnbuilder builder link (https://wynnbuilder.github.io/builder/#...).");
-  if (/[_]/.test(hash) || /^\d+_/.test(hash)) throw new Error("This is an old Wynnbuilder link format. Open it in Wynnbuilder once and copy the new link.");
-  const r = wbReader(hash);
+  const code = String(hash || "").trim();
+  if (!code) throw new Error("Paste a Wynnbuilder builder link (https://wynnbuilder.github.io/builder/#...).");
+  if (/[_]/.test(code) || /^\d+_/.test(code)) throw new Error("This is an old Wynnbuilder link format. Open it in Wynnbuilder once and copy the new link.");
+  const r = wbReader(code);
   const legacy = r.read(6);
   if (legacy !== 12) throw new Error(`This link uses Wynnbuilder's format ${legacy}; only the current binary format (12) can be read. Open it in Wynnbuilder and copy the link again.`);
-  r.read(10); // wersja danych Wynnbuildera
-  const notes = [];
-  const ws = emptyWorkspace();
-  const powderLists = {};
+  const version = r.read(10);
+  const items = [];
+  const kinds = [];
+  const unknown = [];
+  const powders = [];
   SLOTS.forEach((slot, index) => {
     const kind = r.read(enc.EQUIPMENT_KIND.BITLEN);
     if (kind === enc.EQUIPMENT_KIND.CRAFTED) {
       // przedmiot craftowany (decodeCraft w js/craft.js Wynnbuildera): flaga legacy, wersja, 6 składników, przepis,
       // 2 tiery materiałów, szybkość ataku (tylko broń) i dopełnienie do pełnych znaków base64 - pomijamy go
       if (r.read(1) === 1) throw new Error(`The ${slot.label.toLowerCase()} is a crafted item in an old format. Open the link in Wynnbuilder once and copy it again.`);
-      let length = 1 + WB_CRAFT_BITS.version + WB_CRAFT_BITS.ings * WB_CRAFT_BITS.ing + WB_CRAFT_BITS.recipe + WB_CRAFT_BITS.mats * WB_CRAFT_BITS.mat + (slot.id === "weapon" ? WB_CRAFT_BITS.speed : 0);
+      const length = 1 + WB_CRAFT_BITS.version + WB_CRAFT_BITS.ings * WB_CRAFT_BITS.ing + WB_CRAFT_BITS.recipe + WB_CRAFT_BITS.mats * WB_CRAFT_BITS.mat + (slot.id === "weapon" ? WB_CRAFT_BITS.speed : 0);
       r.skip(length - 1 + (6 - (length % 6)));
-      notes.push(`${slot.label}: a crafted item - crafted items aren't in the item database, so the slot is left empty.`);
+      items.push(null);
+      kinds.push("crafted");
     } else if (kind === enc.EQUIPMENT_KIND.CUSTOM) {
       r.skip(r.read(WB_CUSTOM_LENGTH_BITLEN) * 6);
-      notes.push(`${slot.label}: a custom item - left empty.`);
+      items.push(null);
+      kinds.push("custom");
     } else {
       const id = r.read(enc.ITEM_ID_BITLEN);
-      if (id > 0) {
-        const name = WB_ITEM_BY_ID.get(id - 1);
-        if (name && ITEM_BY_NAME.has(name)) ws.items[slot.id] = name;
-        else notes.push(`${slot.label}: item #${id - 1} isn't in this item database.`);
-      }
+      const name = id > 0 ? WB_ITEM_BY_ID.get(id - 1) || null : null;
+      if (id > 0 && !name) unknown.push({ slot: slot.id, id: id - 1 });
+      items.push(name);
+      kinds.push("normal");
     }
-    if (index <= 3 || slot.id === "weapon") {
-      if (r.read(1) === enc.EQUIPMENT_POWDERS_FLAG.HAS_POWDERS) powderLists[slot.id] = wbDecodePowders(r);
+    if (index <= 3 || slot.id === "weapon") powders.push(r.read(1) === enc.EQUIPMENT_POWDERS_FLAG.HAS_POWDERS ? wbDecodePowders(r) : []);
+  });
+  const tomes = [];
+  if (r.read(1) === enc.TOMES_FLAG.HAS_TOMES) for (let i = 0; i < enc.TOME_NUM; i += 1) tomes.push(r.read(1) === enc.TOME_SLOT_FLAG.USED ? r.read(enc.TOME_ID_BITLEN) : null);
+  let sp = null;
+  if (r.read(1) === enc.SP_FLAG.ASSIGNED) {
+    sp = [];
+    for (let i = 0; i < enc.SP_TYPES; i += 1) {
+      if (r.read(1) === enc.SP_ELEMENT_FLAG.ELEMENT_ASSIGNED) {
+        const shift = 32 - enc.MAX_SP_BITLEN;
+        sp.push((r.read(enc.MAX_SP_BITLEN) << shift) >> shift);
+      } else sp.push(null);
     }
+  }
+  const level = r.read(1) === enc.LEVEL_FLAG.MAX ? enc.MAX_LEVEL : r.read(enc.LEVEL_BITLEN);
+  const aspects = [];
+  if (r.read(1) === enc.ASPECTS_FLAG.HAS_ASPECTS)
+    for (let i = 0; i < enc.NUM_ASPECTS; i += 1) aspects.push(r.read(1) === enc.ASPECT_SLOT_FLAG.USED ? { id: r.read(enc.ASPECT_ID_BITLEN), tier: r.read(enc.ASPECT_TIER_BITLEN) + 1 } : null);
+  return { legacy, version, items, kinds, unknown, powders, tomes, sp, level, aspects, treeBits: r.rest() };
+}
+// Link (albo sam kod po "#") -> workspace. Zwraca { ws, notes } albo rzuca błąd z opisem dla gracza.
+function workspaceFromWynnbuilderLink(text) {
+  const enc = WB_IDS.encoding;
+  const raw = String(text || "").trim();
+  const hash = raw.includes("#") ? raw.slice(raw.indexOf("#") + 1) : raw;
+  const d = decodeWynnbuilderHash(hash);
+  const notes = [];
+  const ws = emptyWorkspace();
+  const powderLists = {};
+  SLOTS.forEach((slot, index) => {
+    if (d.kinds[index] === "crafted") notes.push(`${slot.label}: a crafted item - crafted items aren't in the item database, so the slot is left empty.`);
+    else if (d.kinds[index] === "custom") notes.push(`${slot.label}: a custom item - left empty.`);
+    const name = d.items[index];
+    if (name && ITEM_BY_NAME.has(name)) ws.items[slot.id] = name;
+    else if (name) notes.push(`${slot.label}: ${name} isn't in this item database version.`);
+  });
+  d.unknown.forEach(({ slot, id }) => notes.push(`${SLOTS.find((entry) => entry.id === slot).label}: item #${id} isn't in this item database.`));
+  const powderSlots = SLOTS.filter((slot, index) => index <= 3 || slot.id === "weapon");
+  powderSlots.forEach((slot, index) => {
+    if (d.powders[index] && d.powders[index].length > 0) powderLists[slot.id] = d.powders[index];
   });
   Object.entries(powderLists).forEach(([slotId, ids]) => {
     const list = ids.map((pid) => ({ element: ELEMENTS[Math.floor(pid / enc.POWDER_TIERS)], tier: (pid % enc.POWDER_TIERS) + 1 })).filter((powder) => powder.element);
@@ -15234,42 +15747,25 @@ function workspaceFromWynnbuilderLink(text) {
     if (fitted.length < list.length) notes.push(`${item.name}: ${list.length} powders in the link, but it has ${item.slots} powder slot${item.slots === 1 ? "" : "s"} in item data ${WYNNBUILDER_DATA.version}.`);
   });
   // tomy w kolejności Wynnbuildera
-  if (r.read(1) === enc.TOMES_FLAG.HAS_TOMES) {
-    const order = WB_TOME_ORDER.flatMap(([slotId, count]) => Array.from({ length: count }, () => slotId));
-    for (let i = 0; i < enc.TOME_NUM; i += 1) {
-      if (r.read(1) !== enc.TOME_SLOT_FLAG.USED) continue;
-      const tome = TOME_BY_ID.get(r.read(enc.TOME_ID_BITLEN));
-      const slotId = order[i];
-      if (!tome || !slotId) {
-        notes.push("A tome in the link isn't in this data version.");
-        continue;
-      }
-      (ws.tomes[slotId] || (ws.tomes[slotId] = [])).push(tome.name);
+  const order = WB_TOME_ORDER.flatMap(([slotId, count]) => Array.from({ length: count }, () => slotId));
+  d.tomes.forEach((tomeId, i) => {
+    if (tomeId === null) return;
+    const tome = TOME_BY_ID.get(tomeId);
+    const slotId = order[i];
+    if (!tome || !slotId) {
+      notes.push("A tome in the link isn't in this data version.");
+      return;
     }
-  }
-  let spTotals = null;
-  if (r.read(1) === enc.SP_FLAG.ASSIGNED) {
-    spTotals = {};
-    SKILLS.forEach((skill) => {
-      if (r.read(1) === enc.SP_ELEMENT_FLAG.ELEMENT_ASSIGNED) {
-        const shift = 32 - enc.MAX_SP_BITLEN;
-        spTotals[skill] = (r.read(enc.MAX_SP_BITLEN) << shift) >> shift;
-      }
-    });
-  }
+    (ws.tomes[slotId] || (ws.tomes[slotId] = [])).push(tome.name);
+  });
+  const spTotals = d.sp ? Object.fromEntries(SKILLS.map((skill, i) => [skill, d.sp[i]]).filter(([, value]) => value !== null && value !== undefined)) : null;
   // "MAX" Wynnbuildera (poziom maksymalny gry) = najwyższy poziom tej strony
-  const linkLevel = r.read(1) === enc.LEVEL_FLAG.MAX ? null : r.read(enc.LEVEL_BITLEN);
-  ws.level = linkLevel === null ? clampLevel(enc.MAX_LEVEL) : clampLevel(linkLevel);
-  if (linkLevel !== null && linkLevel > ws.level) notes.push(`The link is for level ${linkLevel}; this site goes up to ${ws.level}.`);
+  ws.level = clampLevel(d.level);
+  if (d.level > ws.level) notes.push(`The link is for level ${d.level}; this site goes up to ${ws.level}.`);
   const weaponName = ws.items.weapon;
   const weapon = weaponName ? ITEM_BY_NAME.get(weaponName) : null;
   ws.playerClass = weapon ? WEAPON_CLASS[weapon.type] || "" : "";
-  const aspectIds = [];
-  if (r.read(1) === enc.ASPECTS_FLAG.HAS_ASPECTS) {
-    for (let i = 0; i < enc.NUM_ASPECTS; i += 1) {
-      if (r.read(1) === enc.ASPECT_SLOT_FLAG.USED) aspectIds.push({ id: r.read(enc.ASPECT_ID_BITLEN), tier: r.read(enc.ASPECT_TIER_BITLEN) + 1 });
-    }
-  }
+  const aspectIds = d.aspects.filter(Boolean);
   if (ws.playerClass) {
     const pool = ASPECT_DB[ws.playerClass] || [];
     aspectIds.forEach(({ id, tier }) => {
@@ -15277,11 +15773,10 @@ function workspaceFromWynnbuilderLink(text) {
       if (aspect) ws.aspects.push({ name: aspect.name, tier });
       else notes.push(`Aspect #${id} isn't in this data version.`);
     });
-    const treeBits = r.rest();
     let code = "";
-    for (let i = 0; i < treeBits.length; i += 6) {
+    for (let i = 0; i < d.treeBits.length; i += 6) {
       let value = 0;
-      for (let j = 0; j < 6; j += 1) value |= (treeBits[i + j] || 0) << j;
+      for (let j = 0; j < 6; j += 1) value |= (d.treeBits[i + j] || 0) << j;
       code += WB_B64[value];
     }
     const ids = code ? decodeTreeHash(ws.playerClass, code) : null;
@@ -15299,6 +15794,144 @@ function workspaceFromWynnbuilderLink(text) {
     }
   }
   return { ws, notes };
+}
+
+// ---------- Link buildu w adresie strony: #b=<kod Wynnbuildera>&s=<ustawienia> (0.37) ----------
+// b: ten sam kod co "Open in Wynnbuilder" (9 przedmiotów z powderami, skill pointy, poziom, tomy, aspekty, drzewko), więc
+// link Wynnbuildera też da się otworzyć tutaj. s: ustawienia formularza (JSON z krótkimi kluczami -> base64url; wersja
+// formatu v, przypięte i wykluczone przedmioty jako numery Wynnbuildera). Klasa wynika z broni, archetyp z drzewka.
+const SHARE_VERSION = 1;
+const SITE_URL = "https://szvm3k.github.io/builderwynncraft/";
+// Adres strony do "Share link": własny adres na GitHub Pages / lokalnie, w innym miejscu (np. artifact) - SITE_URL.
+function siteBaseUrl() {
+  try {
+    const loc = window.location;
+    if (/^https?:$/.test(loc.protocol) && (/\.github\.io$/.test(loc.hostname) || /^(localhost|127\.0\.0\.1)$/.test(loc.hostname))) return `${loc.origin}${loc.pathname}`;
+  } catch (error) {
+    // brak window (testy)
+  }
+  return SITE_URL;
+}
+function b64urlEncode(text) {
+  const bytes = new TextEncoder().encode(text);
+  let binary = "";
+  bytes.forEach((byte) => (binary += String.fromCharCode(byte)));
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function b64urlDecode(code) {
+  const b64 = String(code).replace(/-/g, "+").replace(/_/g, "/");
+  const binary = atob(b64 + "===".slice((b64.length + 3) % 4));
+  return new TextDecoder().decode(Uint8Array.from(binary, (char) => char.charCodeAt(0)));
+}
+const rangeToPair = (range) => {
+  const value = normalizeRange(range);
+  return value ? [value.min, value.max] : null;
+};
+const pairToRange = (pair) => (Array.isArray(pair) ? { min: pair[0] ?? null, max: pair[1] ?? null } : { min: null, max: null });
+// Ustawienia generatora (formularz, opcje przedmiotów, ranga) -> s.
+function encodeShareSettings({ form, options, rank }) {
+  const f = migrateDamageForm(form);
+  const o = normalizeOptions(options || DEFAULT_OPTIONS);
+  const id = (name) => (WB_IDS.items[name] !== undefined ? WB_IDS.items[name] : name);
+  const data = {
+    v: SHARE_VERSION,
+    r: rank || "",
+    g: f.goal,
+    c: f.cycle || "",
+    p: f.cps,
+    e: f.minEhp,
+    m: rangeToPair(f.drain),
+    l: rangeToPair(f.lr),
+    w: rangeToPair(f.spd),
+    a: Number(f.raidMana) || 0,
+    t: [f.rolls === "avg", Boolean(f.poison), f.noEvents !== false, Boolean(f.tradeable), f.freeSp !== false, f.steal !== false, f.gain !== false].map((flag) => (flag ? 1 : 0)),
+    k: Object.entries(o.locked).map(([slotId, name]) => [slotId, id(name)]),
+    x: o.excluded.map(id),
+    o: [o.excludedTiers, o.attackSpeeds, o.avoidNegativeDefences ? 1 : 0, o.onlyListed ? 1 : 0, o.budget || 0, o.budgetUnit, o.powders],
+    pr: f.preset || "",
+    tp: f.treePreset || null,
+  };
+  return b64urlEncode(JSON.stringify(data));
+}
+// s -> { form, options, rank }. Rzuca błąd przy nieznanej wersji formatu albo uszkodzonym kodzie.
+function decodeShareSettings(code) {
+  let data;
+  try {
+    data = JSON.parse(b64urlDecode(code));
+  } catch (error) {
+    throw new Error("The settings part of this link (s=) is damaged - copy the whole address again.");
+  }
+  if (!data || typeof data !== "object") throw new Error("The settings part of this link (s=) is damaged.");
+  if (!(Number(data.v) >= 1)) throw new Error("The settings part of this link (s=) has no format version.");
+  if (Number(data.v) > SHARE_VERSION) throw new Error(`This link was made by a newer version of the site (settings format ${data.v}); reload the page to get the new version.`);
+  const name = (value) => (typeof value === "number" ? WB_ITEM_BY_ID.get(value) || null : typeof value === "string" ? value : null);
+  const flags = Array.isArray(data.t) ? data.t : [];
+  const flag = (index, fallback) => (flags[index] === undefined ? fallback : Boolean(flags[index]));
+  const form = migrateDamageForm({
+    preset: typeof data.pr === "string" ? data.pr : "",
+    treePreset: data.tp || null,
+    goal: data.g === undefined ? null : data.g,
+    cycle: typeof data.c === "string" ? data.c.toUpperCase().replace(/[^1-4M]/g, "").slice(0, 16) : "",
+    cps: Number(data.p) >= 0.5 && Number(data.p) <= 12 ? Number(data.p) : 3,
+    minEhp: data.e === null || data.e === undefined ? null : Math.max(0, Number(data.e) || 0),
+    drain: pairToRange(data.m),
+    lr: pairToRange(data.l),
+    spd: pairToRange(data.w),
+    raidMana: Math.max(0, Math.min(30, Number(data.a) || 0)),
+    rolls: flag(0, false) ? "avg" : "max",
+    poison: flag(1, false),
+    noEvents: flag(2, true),
+    tradeable: flag(3, false),
+    freeSp: flag(4, true),
+    steal: flag(5, true),
+    gain: flag(6, true),
+  });
+  const locked = {};
+  (Array.isArray(data.k) ? data.k : []).forEach((entry) => {
+    const itemName = Array.isArray(entry) ? name(entry[1]) : null;
+    if (itemName && SLOTS.some((slot) => slot.id === entry[0])) locked[entry[0]] = itemName;
+  });
+  const extra = Array.isArray(data.o) ? data.o : [];
+  const options = normalizeOptions({
+    ...DEFAULT_OPTIONS,
+    locked,
+    excluded: (Array.isArray(data.x) ? data.x : []).map(name).filter(Boolean),
+    excludedTiers: extra[0] || [],
+    attackSpeeds: extra[1] || [],
+    avoidNegativeDefences: extra[2] === 1,
+    onlyListed: extra[3] === 1,
+    budget: extra[4] || null,
+    budgetUnit: extra[5] || "le",
+    powders: extra[6] || "auto",
+  });
+  return { form, options, rank: typeof data.r === "string" ? data.r : "" };
+}
+// "#b=...&s=..." (albo sam link Wynnbuildera / sam kod) -> { b, s }; null, gdy to nie jest link buildu.
+// Bez URLSearchParams: kod Wynnbuildera ma znak "+", który tamto zamieniłoby na spację.
+function parseBuildHash(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+  const hash = raw.includes("#") ? raw.slice(raw.indexOf("#") + 1) : raw;
+  if (/^b=/.test(hash) || /&b=/.test(hash)) {
+    const parts = {};
+    hash.split("&").forEach((part) => {
+      const at = part.indexOf("=");
+      if (at > 0) parts[part.slice(0, at)] = part.slice(at + 1);
+    });
+    return parts.b ? { b: parts.b, s: parts.s || null } : null;
+  }
+  // link Wynnbuildera (builder/#...) albo sam jego kod
+  if (/wynnbuilder/i.test(raw) || /^[0-9A-Za-z+-]{8,}$/.test(hash)) return { b: hash, s: null };
+  return null;
+}
+// Build z linku: workspace (przedmioty, powdery, tomy, aspekty, drzewko, skill pointy) i ustawienia generatora.
+function buildFromShare({ b, s }) {
+  const { ws, notes } = workspaceFromWynnbuilderLink(b);
+  if (!ws.playerClass) throw new Error("The link has no weapon, so its class is unknown - it can't be shown here. Open it in the Build Creator instead.");
+  const settings = s ? decodeShareSettings(s) : null;
+  if (settings && settings.rank) ws.rank = settings.rank;
+  ws.archetype = workspaceArchetype(ws);
+  return { ws, notes, settings, build: manualBuild(ws) };
 }
 
 // Odcisk wejść (Optimize z kłódką): ten sam build i te same parametry = ten sam odcisk.
@@ -15365,15 +15998,16 @@ function optItem(entry) {
 }
 
 // Ustawienia Optimizera z workspace'u i panelu parametrów -> dane dla silnika (tylko proste wartości, żeby dało się
-// je wysłać do wątku). params: { goal, elements, blend (0-100), cycle, cps, drain, sustain, negDef, listed,
-// speeds, freeSp, tradeable, noEvents, scope: { slots, tree, tomes, aspects, sp, powders, swaps } }
+// je wysłać do wątku). params: { goal, elements, blend (0-100), cycle, cps, mana {min,max}, life {min,max},
+// spd {min,max}, negDef, listed, speeds, freeSp, tradeable, noEvents, scope: { slots, tree, tomes, aspects, sp, powders,
+// swaps } } (stare parametry 0.36: drain = dopuszczalny dren, sustain = życie > 0)
 function optimizerSpec(ws, params, extra = {}) {
   const level = ws.level || 120;
   const rank = workspaceRank(ws);
   const cap = abilityPointCap(level, rank.loan);
   const treeIds = workspaceTreeIds(ws);
   const scope = { slots: true, tree: true, tomes: true, aspects: true, sp: true, powders: true, swaps: true, ...(params.scope || {}) };
-  const fixed = SLOTS.filter((slot) => ws.items && ws.items[slot.id]).map((slot) => ({ slotId: slot.id, name: ws.items[slot.id], powders: (ws.powders && ws.powders[slot.id]) || "", rolls: (ws.rolls && ws.rolls[ws.items[slot.id]]) || null }));
+  const fixed = SLOTS.filter((slot) => ws.items && ws.items[slot.id]).map((slot) => ({ slotId: slot.id, name: ws.items[slot.id], powders: (ws.powders && ws.powders[slot.id]) || "", rolls: rollsOf(ws.rolls, slot.id, ws.items[slot.id]) }));
   const cycleIds = parseCycle(params.cycle || "");
   return {
     playerClass: ws.playerClass,
@@ -15387,8 +16021,10 @@ function optimizerSpec(ws, params, extra = {}) {
     fixed,
     playerFree: Object.fromEntries(SKILLS.map((skill) => [skill, Math.max(0, Math.round(Number(ws.freeSp && ws.freeSp[skill]) || 0))])),
     goal: Array.isArray(params.goal) ? (params.goal.length === 1 ? params.goal[0] : params.goal) : params.goal,
-    cycle: { ids: cycleIds, cps: Math.max(1, Number(params.cps) || 3), steal: true, gain: true, drain: Math.max(0, Number(params.drain) || 0), blend: Math.max(0, Math.min(100, Number(params.blend) || 0)) / 100 },
-    requireSustain: Boolean(params.sustain),
+    cycle: { ids: cycleIds, cps: Math.max(1, Number(params.cps) || 3), steal: true, gain: true, mana: params.mana !== undefined ? normalizeRange(params.mana) : rangeFromDrain(params.drain), blend: Math.max(0, Math.min(100, Number(params.blend) || 0)) / 100 },
+    requireSustain: params.life === undefined && Boolean(params.sustain),
+    lifeRange: params.life !== undefined ? normalizeRange(params.life) : null,
+    spdRange: params.spd !== undefined ? normalizeRange(params.spd) : null,
     filters: {
       avoidNegativeDefences: Boolean(params.negDef),
       attackSpeeds: params.speeds || [],
@@ -15488,7 +16124,7 @@ function optEvaluate(opt, items, weapon, bar = null, exact = false) {
   if (sp.total > available) return null;
   if (SKILLS.some((skill) => (sp.assigned[skill] || 0) > MAX_ASSIGNED_PER_SKILL)) return null;
   if (activeSets(items).some((set) => set.illegal)) return null;
-  const ok = (metrics) => (!opt.cycleActive || manaOk(metrics, cycle)) && (!spec.requireSustain || metrics.sustain > 0);
+  const ok = (metrics) => rangesOk(metrics, opt.cycleActive ? cycle : null, spec.lifeRange, spec.spdRange, spec.requireSustain);
   let metrics = evaluateGoal(opt.ctx, items, weapon, sp.totals, spec.goal, cycle);
   delete metrics.stats;
   let extra = Object.fromEntries(SKILLS.map((skill) => [skill, 0]));
@@ -15500,7 +16136,7 @@ function optEvaluate(opt, items, weapon, bar = null, exact = false) {
       const top = evaluateGoal(opt.ctx, items, weapon, optimistic, spec.goal, cycle);
       if (top.damage <= bar + OPT_GAIN_EPS) return { below: true };
     }
-    const rank = (m) => (ok(m) ? 1e15 + m.damage : -((m.manaNet < 0 ? -m.manaNet : 0) + (m.sustain > 0 ? 0 : 1)));
+    const rank = (m) => (ok(m) ? 1e15 + m.damage : -rangesMiss(m, opt.cycleActive ? cycle : null, spec.lifeRange, spec.spdRange, spec.requireSustain));
     const allocated = allocateFreeSkillPoints(opt.ctx, items, weapon, sp, spec.goal, cycle, rank);
     metrics = allocated.metrics;
     delete metrics.stats;
@@ -15519,18 +16155,25 @@ function optDirections(opt, keys, reference) {
   keys.forEach((key) => {
     if (OPT_DAMAGE_KEY.test(key)) return dirs.set(key, { dir: 1, objective: true });
     if (SKILLS.includes(key)) return dirs.set(key, { dir: 1, objective: true });
-    if (OPT_LOWER_BETTER.test(key)) return dirs.set(key, { dir: -1, objective: false, constraint: opt.cycleActive });
+    if (OPT_LOWER_BETTER.test(key)) return dirs.set(key, { dir: -1, objective: false, constraint: opt.cycleActive, twoSided: Boolean(opt.cycleActive && opt.cycle.mana && opt.cycle.mana.max !== null) });
     const step = PROBE_STEPS[key] || 10;
     const ghost = { name: "__probe", category: "accessory", type: "ring", level: 0, tier: "Normal", ids: { [key]: step }, base: key === "hp" ? { hp: step } : {}, stats: {}, reqs: {}, elements: [], slots: 0, majorIds: [], baseIds: {}, staticIds: [] };
     const probe = evaluateGoal(opt.ctx, [...reference.items, ghost], reference.weapon, reference.totals, spec.goal, cycle);
     const dObjective = probe.damage - base.damage;
     const dMana = probe.manaNet - base.manaNet;
     const dLife = probe.sustain - base.sustain;
+    const dSpeed = probe.walkSpeed - base.walkSpeed;
     const objective = Math.abs(dObjective) > 1e-9 * Math.max(1, Math.abs(base.damage));
-    const constraint = (opt.cycleActive && (OPT_MANA_KEYS.has(key) || Math.abs(dMana) > 1e-9)) || (spec.requireSustain && (OPT_SUSTAIN_KEYS.has(key) || Math.abs(dLife) > 1e-9));
+    const manaUsed = opt.cycleActive && (OPT_MANA_KEYS.has(key) || Math.abs(dMana) > 1e-9);
+    const lifeUsed = Boolean(spec.requireSustain || spec.lifeRange) && (OPT_SUSTAIN_KEYS.has(key) || Math.abs(dLife) > 1e-9);
+    const speedUsed = Boolean(spec.spdRange) && (key === "spd" || Math.abs(dSpeed) > 1e-9);
+    const constraint = manaUsed || lifeUsed || speedUsed;
     if (!objective && !constraint) return dirs.set(key, { dir: 0 });
-    const sign = OPT_ALWAYS_UP.has(key) ? 1 : objective ? Math.sign(dObjective) : Math.sign(dMana || dLife) || 1;
-    dirs.set(key, { dir: sign, objective, constraint });
+    // górna granica zakresu (nadwyżka many, życie, Walk Speed): więcej tej statystyki nie zawsze jest lepiej, więc
+    // przedmiot dominuje inny tylko przy tej samej wartości (porównanie w obie strony)
+    const twoSided = (manaUsed && opt.cycle.mana && opt.cycle.mana.max !== null) || (lifeUsed && spec.lifeRange && spec.lifeRange.max !== null) || (speedUsed && spec.spdRange.max !== null);
+    const sign = OPT_ALWAYS_UP.has(key) ? 1 : objective ? Math.sign(dObjective) : Math.sign(dMana || dLife || dSpeed) || 1;
+    dirs.set(key, { dir: sign, objective, constraint, twoSided: Boolean(twoSided) });
   });
   return dirs;
 }
@@ -15542,11 +16185,15 @@ function optRanges(weapon) {
 }
 // Wektor porównania przedmiotu: każda używana statystyka w kierunku "więcej = lepiej", bonusy SP, minus wymagania,
 // HP, zakresy obrażeń broni. a dominuje b, gdy a >= b na każdej pozycji (i żadne nie jest w secie / z major ID).
-function optVector(item, keys, hpMatters) {
+function optVector(item, keys, hpMatters, twoSidedSkills = null) {
   const values = [];
-  keys.forEach(([key, dir]) => values.push((item.ids[key] || 0) * dir));
+  keys.forEach(([key, dir, twoSided]) => {
+    values.push((item.ids[key] || 0) * dir);
+    if (twoSided) values.push(-(item.ids[key] || 0) * dir);
+  });
   SKILLS.forEach((skill) => {
     values.push(item.stats[skill] || 0);
+    if (twoSidedSkills && twoSidedSkills.has(skill)) values.push(-(item.stats[skill] || 0));
     values.push(-(item.reqs[skill] || 0));
   });
   if (hpMatters) values.push((item.base && item.base.hp) || 0);
@@ -15563,9 +16210,9 @@ function optDominates(a, b, va, vb) {
 
 // Odrzucanie zdominowanych w puli slotu. Pierścienie: przedmiot wypada dopiero, gdy ma dwóch "lepszych" (albo jeden
 // lepszy, który można nosić podwójnie), bo para potrzebuje dwóch pierścieni.
-function optPrune(pool, dirs, hpMatters, rings = false) {
-  const keys = [...dirs].filter(([key, entry]) => entry.dir && !SKILLS.includes(key)).map(([key, entry]) => [key, entry.dir]);
-  const vectors = pool.map((item) => optVector(item, keys, hpMatters));
+function optPrune(pool, dirs, hpMatters, rings = false, twoSidedSkills = null) {
+  const keys = [...dirs].filter(([key, entry]) => entry.dir && !SKILLS.includes(key)).map(([key, entry]) => [key, entry.dir, Boolean(entry.twoSided)]);
+  const vectors = pool.map((item) => optVector(item, keys, hpMatters, twoSidedSkills));
   const keep = [];
   pool.forEach((item, index) => {
     let dominators = 0;
@@ -15690,7 +16337,9 @@ function optContext(spec, treeIds, emptySlots, fixedPicks = {}) {
   emptySlots.forEach((slotId) => {
     rawSizes[slotId] = rawPools[slotId].length;
     const rings = slotId === "ring1" || slotId === "ring2";
-    const pruned = optPrune(rawPools[slotId], dirs, hpMatters, rings);
+    // górna granica many: więcej INT (tańsze czary) może ją przekroczyć, więc bonus INT porównujemy w obie strony
+    const twoSidedSkills = opt.cycleActive && cycle.mana && cycle.mana.max !== null ? new Set(["int"]) : null;
+    const pruned = optPrune(rawPools[slotId], dirs, hpMatters, rings, twoSidedSkills);
     pools[slotId] = pruned.map((item) => ({ item, proxy: slotId === "weapon" ? 0 : proxy(item) })).sort((a, b) => b.proxy - a.proxy).map((entry) => entry.item);
   });
   if (pools.weapon) {
@@ -16464,6 +17113,8 @@ async function optTaskQuick({ spec, treeIds, emptySlots }) {
       goal: spec.goal,
       cycle: spec.cycle,
       requireSustain: spec.requireSustain,
+      lifeRange: spec.lifeRange || null,
+      spdRange: spec.spdRange || null,
       options: { ...DEFAULT_OPTIONS, locked, attackSpeeds: spec.filters.attackSpeeds, avoidNegativeDefences: spec.filters.avoidNegativeDefences },
       items: spec.filters.allowedNames ? pool.filter((item) => own.has(item.name) || spec.filters.allowedNames.includes(item.name)) : pool,
       powders,
@@ -16555,8 +17206,8 @@ function optTaskFinish({ spec, treeIds, emptySlots, picks, searchMode = "full", 
     let metrics = evaluateGoal(ctx, all, state.weapon, sp.totals, spec.goal, cycle);
     let extra = null;
     if (allocate && ctx.available - sp.total > 0 && sp.capOverflow === 0) {
-      const ok = (m) => (cycle.ids.length === 0 || manaOk(m, cycle)) && (!spec.requireSustain || m.sustain > 0);
-      const rank = (m) => (ok(m) ? 1e15 + m.damage : -((m.manaNet < 0 ? -m.manaNet : 0) + (m.sustain > 0 ? 0 : 1)));
+      const ok = (m) => rangesOk(m, cycle, spec.lifeRange, spec.spdRange, spec.requireSustain);
+      const rank = (m) => (ok(m) ? 1e15 + m.damage : -rangesMiss(m, cycle, spec.lifeRange, spec.spdRange, spec.requireSustain));
       const allocated = allocateFreeSkillPoints(ctx, all, state.weapon, sp, spec.goal, cycle, rank);
       metrics = allocated.metrics;
       extra = allocated.extra;
@@ -16620,7 +17271,7 @@ function optTaskFinish({ spec, treeIds, emptySlots, picks, searchMode = "full", 
     const sp = optWithPlayerFree(computeSkillPoints(state.items, true), spec.playerFree);
     return { level, playerClass: spec.playerClass, slots: state.items.map((item) => ({ id: item.__slot, item })), skillPoints: { totals: sp.totals } };
   };
-  const env = (tree, aspects) => ({ treeSettings: optTreeSettings(spec, tree, aspects), goal: spec.goal, cycle: spec.cycle, minEhp: 0, requireSustain: spec.requireSustain, minSustain: 0 });
+  const env = (tree, aspects) => ({ treeSettings: optTreeSettings(spec, tree, aspects), goal: spec.goal, cycle: spec.cycle, minEhp: 0, requireSustain: spec.requireSustain, minSustain: spec.lifeRange && spec.lifeRange.min > 0 ? spec.lifeRange.min : 0 });
   if (spec.scope.tomes && !extrasLocked(level) && state.weapon) {
     report("tomes");
     const picked = pickTomes(buildLike(state.tree), env(state.tree, state.aspects), spec.tomes || {});
@@ -17772,8 +18423,10 @@ const DEFAULT_OPT_PARAMS = {
   blend: 0,
   cycle: "",
   cps: 3,
-  drain: 0,
-  sustain: false,
+  // suwaki zakresu (0.37), jak w Generate: bilans many cyklu, odnawianie życia, Walk Speed
+  mana: DEFAULT_MANA_RANGE,
+  life: DEFAULT_LIFE_RANGE,
+  spd: DEFAULT_SPD_RANGE,
   negDef: false,
   listed: false,
   speeds: [],
@@ -17786,10 +18439,21 @@ function loadOptParams() {
   try {
     const raw = JSON.parse(window.localStorage.getItem(OPT_PARAMS_KEY) || "null");
     if (!raw || typeof raw !== "object") return DEFAULT_OPT_PARAMS;
-    return { ...DEFAULT_OPT_PARAMS, ...raw, scope: { ...DEFAULT_OPT_PARAMS.scope, ...(raw.scope || {}) } };
+    return migrateOptParams(raw);
   } catch (error) {
     return DEFAULT_OPT_PARAMS;
   }
+}
+// Parametry Optimize zapisane w 0.36 (dren liczbą, "Life sustain" przełącznikiem, bez Walk Speed) -> zakresy o tym
+// samym działaniu.
+function migrateOptParams(raw) {
+  const out = { ...DEFAULT_OPT_PARAMS, ...raw, scope: { ...DEFAULT_OPT_PARAMS.scope, ...(raw.scope || {}) } };
+  if (raw.mana === undefined) out.mana = rangeFromDrain(raw.drain);
+  if (raw.life === undefined) out.life = raw.sustain ? { min: 1, max: null } : { min: null, max: null };
+  if (raw.spd === undefined) out.spd = { min: null, max: null };
+  delete out.drain;
+  delete out.sustain;
+  return out;
 }
 function saveOptParams(params) {
   try {
@@ -17836,7 +18500,7 @@ function optSummary(ws, params) {
   const tomes = (build.tomes || []).filter((tome) => SKILLS.every((skill) => !(tome.ids && tome.ids[skill])));
   const ctx = damageGoalContext(build.playerClass, build.level, build.treeSettings);
   const goal = params.goal.length === 1 ? params.goal[0] : params.goal;
-  const cycle = normalizeCycle({ ids: parseCycle(params.cycle || ""), cps: Math.max(1, Number(params.cps) || 3), drain: Math.max(0, Number(params.drain) || 0) });
+  const cycle = normalizeCycle({ ids: parseCycle(params.cycle || ""), cps: Math.max(1, Number(params.cps) || 3), mana: params.mana !== undefined ? params.mana : rangeFromDrain(params.drain) });
   if (!weapon) return { damage: 0, ehp: 0, manaNet: null, sustain: 0, valid: build.skillPoints.valid };
   const metrics = evaluateGoal(ctx, [...items, ...tomes], weapon, build.skillPoints.totals, goal, cycle);
   return { damage: metrics.damage, name: metrics.goalName, ehp: metrics.ehp, manaNet: cycle.ids.length > 0 ? metrics.manaNet : null, sustain: metrics.sustain, valid: build.skillPoints.valid };
@@ -18019,7 +18683,7 @@ function OptimizeDialog({ ws, gaps, params, onParams, onStart, onClose, run, onS
               </span>
               <input type="range" min={0} max={100} step={5} value={params.blend} onChange={(event) => set({ blend: Number(event.target.value) })} className="mc-range w-full" aria-label="Damage to EHP balance" style={{ "--mc-fill": `${params.blend}%` }} />
             </label>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <label className="flex flex-col gap-1 text-xs text-zinc-300">
                 Spell cycle (1-4, M)
                 <input value={params.cycle} onChange={(event) => set({ cycle: event.target.value.toUpperCase().replace(/[^1-4M]/g, "").slice(0, 16) })} placeholder="e.g. 1M2M" className="mc-input" aria-label="Spell cycle" />
@@ -18028,12 +18692,23 @@ function OptimizeDialog({ ws, gaps, params, onParams, onStart, onClose, run, onS
                 Clicks per second
                 <input value={params.cps} onChange={(event) => set({ cps: event.target.value.replace(/[^0-9.]/g, "").slice(0, 4) })} inputMode="decimal" className="mc-input" aria-label="Clicks per second" disabled={cycleIds.length === 0} />
               </label>
-              <label className="flex flex-col gap-1 text-xs text-zinc-300">
-                Allowed mana drain (/s)
-                <input value={params.drain} onChange={(event) => set({ drain: event.target.value.replace(/[^0-9.]/g, "").slice(0, 5) })} inputMode="decimal" className="mc-input" aria-label="Allowed mana drain" disabled={cycleIds.length === 0} />
-              </label>
             </div>
-            <p className="-mt-2 text-xs text-zinc-500">Mana steal counts only from M hits in the cycle. No cycle = no mana filter.</p>
+            <p className="-mt-2 text-xs text-zinc-500">Mana steal counts only from M hits in the cycle. No cycle = no mana condition.</p>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+              <RangeControl
+                id="opt-mana"
+                kind="mana"
+                level={ws.level || 120}
+                value={params.mana !== undefined ? params.mana : rangeFromDrain(params.drain)}
+                onChange={(range) => set({ mana: range })}
+                disabled={cycleIds.filter((id) => id !== 0).length === 0}
+                disabledHint="Type a spell cycle: without one there is no mana condition."
+                hint={manaRangeHint(params.mana)}
+                compact
+              />
+              <RangeControl id="opt-life" kind="life" level={ws.level || 120} value={params.life || { min: null, max: null }} onChange={(range) => set({ life: range })} hint={lifeRangeHint(params.life, 0)} compact />
+              <RangeControl id="opt-spd" kind="spd" level={ws.level || 120} value={params.spd || { min: null, max: null }} onChange={(range) => set({ spd: range })} hint="Walk Speed of the whole build; the default −20% minimum keeps the search from slow builds." compact />
+            </div>
             {weaponEmpty && (
               <div className="flex flex-col gap-2">
                 <span className="text-xs text-zinc-300">Weapon attack speed (your weapon slot is empty)</span>
@@ -18047,7 +18722,6 @@ function OptimizeDialog({ ws, gaps, params, onParams, onStart, onClose, run, onS
               </div>
             )}
             <div className="grid grid-cols-1 gap-x-4 gap-y-1 sm:grid-cols-2">
-              <CheckRow checked={params.sustain} onChange={() => set({ sustain: !params.sustain })} label="Life sustain" hint="Life Steal + Health Regen > 0" />
               <CheckRow checked={params.negDef} onChange={() => set({ negDef: !params.negDef })} label="Avoid negative defences" />
               {hasLiveData() && <CheckRow checked={params.listed} onChange={() => set({ listed: !params.listed })} label="Trade Market: listed today" />}
               <CheckRow checked={params.freeSp} onChange={() => set({ freeSp: !params.freeSp })} label="Spend free skill points" />
@@ -18264,7 +18938,7 @@ function ManualWorkspace({ mode, ws, onWs, tab, onTab, onSendToOptimizer = null,
 
   const chooseSlot = chooseFor ? SLOTS.find((slot) => slot.id === chooseFor) : null;
   const powderSlot = powdersFor ? SLOTS.find((slot) => slot.id === powdersFor) : null;
-  const powderBase = powdersFor && ws.items[powdersFor] ? (ws.rolls[ws.items[powdersFor]] ? withRolls(ITEM_BY_NAME.get(ws.items[powdersFor]), ws.rolls[ws.items[powdersFor]]) : ITEM_BY_NAME.get(ws.items[powdersFor])) : null;
+  const powderBase = powdersFor && ws.items[powdersFor] ? (rollsOf(ws.rolls, powdersFor, ws.items[powdersFor]) ? withRolls(ITEM_BY_NAME.get(ws.items[powdersFor]), rollsOf(ws.rolls, powdersFor, ws.items[powdersFor])) : ITEM_BY_NAME.get(ws.items[powdersFor])) : null;
   const rollsItem = rollsFor && build ? (build.slots.find((slot) => slot.id === rollsFor) || {}).item : null;
 
   return (
@@ -18569,15 +19243,8 @@ function ManualWorkspace({ mode, ws, onWs, tab, onTab, onSendToOptimizer = null,
       {rollsItem && (
         <RollsDialog
           item={rollsItem}
-          rolls={ws.rolls[rollsItem.name] || null}
-          onChange={(next) =>
-            onWs((current) => {
-              const rolls = { ...current.rolls };
-              if (next) rolls[rollsItem.name] = next;
-              else delete rolls[rollsItem.name];
-              return { ...current, rolls };
-            })
-          }
+          rolls={rollsOf(ws.rolls, rollsFor, rollsItem.name)}
+          onChange={(next) => onWs((current) => ({ ...current, rolls: withSlotRolls(current.rolls, rollsFor, rollsItem.name, next, current.items || {}) }))}
           onClose={() => setRollsFor(null)}
         />
       )}
@@ -18736,6 +19403,8 @@ export default function BuildRecommender() {
   const sweepSource = useRef(null);
   const [whyOpen, setWhyOpen] = useState(false);
   const [damageProgress, setDamageProgress] = useState(null);
+  // akcja z karty (Exclude, Other picks...) liczy się w tle: poprzedni build zostaje z etykietą "Recalculating…"
+  const [recalc, setRecalc] = useState(null);
   const stopRef = useRef(false);
   // wątki wczytują się w tle od wyboru klasy, żeby pierwsze szukanie nie czekało na start
   useEffect(() => {
@@ -18758,17 +19427,35 @@ export default function BuildRecommender() {
   useEffect(() => {
     saveScoring(options.scoring);
   }, [options.scoring]);
-  const [rolls, setRolls] = useState({}); // { nazwa przedmiotu: { all?: %, [id]: % } }
+  const [rolls, setRolls] = useState({}); // { nazwa przedmiotu albo "ring1|nazwa": { all?: %, [id]: % } } (rollKey)
   const [rollsFor, setRollsFor] = useState(null);
   const [solver, setSolver] = useState({ ...DEFAULT_SOLVER, playerClass: "Mage", archetype: "Riftwalker" });
   const [solverResult, setSolverResult] = useState(null);
   const [solverRunning, setSolverRunning] = useState(false);
   const [solverView, setSolverView] = useState(null); // kandydat solvera pokazany w siatce
+  // build z linku (#b=...&s=... albo link Wynnbuildera): { b, s, ws, notes, build }
+  const [sharedView, setSharedView] = useState(null);
+  const [shareNotice, setShareNotice] = useState(null); // { text, error } nad formularzem / przy imporcie
+  // checkbox "With the recommended tomes and aspects": wspólny dla nagłówka buildu, bloku pod kartami i adresu strony
+  const [withExtras, setWithExtras] = useState(false);
+  const [savedLinks, setSavedLinks] = useState(() => (typeof window === "undefined" ? { ok: true, list: [] } : loadSavedLinks()));
+  // na telefonie lewy panel stoi nad buildem: po nowym buildzie (Generate, Exclude, link) przewijamy do jego nagłówka,
+  // żeby przyciski Wynnbuilder / Copy link / Share link były widoczne bez przewijania
+  const buildHeaderRef = useRef(null);
+  const resultRun = result ? result.run : 0;
+  useEffect(() => {
+    if ((!resultRun && !sharedView) || typeof window === "undefined" || !window.matchMedia || !window.matchMedia("(max-width: 1023px)").matches) return undefined;
+    const timer = setTimeout(() => {
+      if (buildHeaderRef.current) buildHeaderRef.current.scrollIntoView({ block: "start", behavior: "smooth" });
+    }, 80);
+    return () => clearTimeout(timer);
+  }, [resultRun, sharedView]);
 
   const generated = result ? result.build : null;
   const guideResult = useMemo(() => (guideView ? guideBuildResult(guideView, options.powders) : null), [guideView, options.powders]);
   const solverBuild = useMemo(() => (solverView ? solverBuildResult(solverView.candidate, solverView.solved, solverView.archetype) : null), [solverView]);
-  const viewed = guideResult || solverBuild;
+  const sharedBuild = sharedView ? sharedView.build : null;
+  const viewed = guideResult || solverBuild || sharedBuild;
   const build = useMemo(() => (viewed || generated ? applyBuildRolls(viewed || generated, rolls) : null), [viewed, generated, rolls]);
   const buildClass = build ? build.playerClass : "";
   const buildTreeSettings = useMemo(
@@ -18823,7 +19510,7 @@ export default function BuildRecommender() {
   const damageGoal = resolveGoal(damageGoals, damageForm.goal);
   const damageMinEhp = damageForm.minEhp === null || damageForm.minEhp === undefined ? defaultMinEhp(ehpMax) : Math.min(damageForm.minEhp, ehpMax);
   // ustawienia generatora bez progu EHP: lista buildów pod suwakiem obowiązuje, dopóki się nie zmienią
-  const sweepKeyNow = JSON.stringify([
+  const sweepKeyOf = (opts) => JSON.stringify([
     playerClass,
     level,
     treeIds,
@@ -18834,15 +19521,16 @@ export default function BuildRecommender() {
     damageForm.gain,
     Boolean(damageForm.poison),
     damageForm.rolls || "max",
-    Number(damageForm.drain) || 0,
-    Number(damageForm.lr) || 0,
+    formManaRange(damageForm),
+    formLifeRange(damageForm),
+    formSpdRange(damageForm),
     Number(damageForm.raidMana) || 0,
-    Boolean(damageForm.sustain),
     damageForm.noEvents !== false,
     Boolean(damageForm.tradeable),
     damageForm.freeSp !== false,
-    itemFilterKey(normalizeOptions(options)),
+    itemFilterKey(normalizeOptions(opts)),
   ]);
+  const sweepKeyNow = sweepKeyOf(options);
   // podpowiedź zależy od tego samego, oprócz samych suwaków drenu i życia, plus od progu EHP
   const tradeoffKeyNow = JSON.stringify([
     playerClass,
@@ -18856,7 +19544,7 @@ export default function BuildRecommender() {
     Boolean(damageForm.poison),
     damageForm.rolls || "max",
     Number(damageForm.raidMana) || 0,
-    Boolean(damageForm.sustain),
+    formSpdRange(damageForm),
     damageForm.noEvents !== false,
     Boolean(damageForm.tradeable),
     damageForm.freeSp !== false,
@@ -18884,6 +19572,23 @@ export default function BuildRecommender() {
     () => formCycleOf(damageForm),
     [damageForm]
   );
+  // Link Wynnbuildera buildu na ekranie (generator albo Build Solver; build z poradnika ma swój link z forum, build
+  // z linku - swój kod b): liczony raz, używają go nagłówek, blok pod kartami i adres strony.
+  const linkBuild = build && !guideResult && !sharedBuild ? build : null;
+  const headerLink = useWynnbuilderLink(linkBuild, buildTreeSettings, withExtras);
+  // adres strony z buildem: #b=<kod>&s=<ustawienia z chwili generowania>
+  const pageHash = sharedView
+    ? `b=${sharedView.b}${sharedView.s ? `&s=${sharedView.s}` : ""}`
+    : generated && generated.mode === "damage" && headerLink && result && result.settings && !guideView && !solverView
+      ? `b=${headerLink.hash}&s=${encodeShareSettings(result.settings)}`
+      : null;
+  const shareUrl = sharedView
+    ? `${siteBaseUrl()}#${pageHash}`
+    : build && headerLink && generated && !guideView && !solverView && result && result.settings
+      ? `${siteBaseUrl()}#b=${headerLink.hash}&s=${encodeShareSettings(result.settings)}`
+      : solverView && headerLink
+        ? `${siteBaseUrl()}#b=${headerLink.hash}`
+        : null;
   const formGoalId = damageGoal && build && build.playerClass === playerClass ? damageGoal.id : null;
   const extrasEnv = useMemo(
     () => (build && extrasTabVisible && !extrasLocked(build.level) ? extrasEnvFor(build, buildTreeSettings, formGoalId, formCycle) : null),
@@ -18900,11 +19605,11 @@ export default function BuildRecommender() {
           cycleText(generated.metrics.cycle.ids) !== cycleText(parseCycle(damageForm.cycle)) ||
           generated.metrics.cycle.cps !== damageForm.cps ||
           Boolean(generated.metrics.cycle.poison) !== Boolean(damageForm.poison) ||
-          (generated.metrics.cycle.drain || 0) !== (Number(damageForm.drain) || 0) ||
+          !sameRange(manaRangeOf(generated.metrics.cycle), formManaRange(damageForm)) ||
           (generated.metrics.cycle.buff || 0) !== (Number(damageForm.raidMana) || 0) ||
           (generated.metrics.rollPercent || 100) !== (damageForm.rolls === "avg" ? 50 : 100) ||
-          Boolean(generated.metrics.requireSustain) !== Boolean(damageForm.sustain) ||
-          (generated.metrics.minSustain || 0) !== (Number(damageForm.lr) || 0) ||
+          !sameRange(lifeRangeOf(generated.metrics), formLifeRange(damageForm)) ||
+          !sameRange(generated.metrics.spdRange || null, formSpdRange(damageForm)) ||
           Boolean(generated.metrics.excludeEvents) !== (damageForm.noEvents !== false) ||
           Boolean(generated.metrics.tradeableOnly) !== Boolean(damageForm.tradeable) ||
           (generated.metrics.spendFreeSkillPoints !== false) !== (damageForm.freeSp !== false) ||
@@ -18957,8 +19662,9 @@ export default function BuildRecommender() {
     setDamageForm((current) => ({ ...current, cycle: digits }));
   }
 
-  // Ustawienia generatora z formularza (bez progu EHP i bez zestawów startowych).
-  function damageParams() {
+  // Ustawienia generatora z formularza (bez progu EHP i bez zestawów startowych). opts: opcje przedmiotów (przypięte,
+  // wykluczone...) - z argumentu, bo akcje z kart liczą od razu po setOptions(), zanim stan Reacta się zmieni.
+  function damageParams(opts = options) {
     return {
       playerClass,
       level,
@@ -18967,13 +19673,13 @@ export default function BuildRecommender() {
       goal: damageGoal.id,
       cycle: formCycleOf(damageForm),
       rollPercent: damageForm.rolls === "avg" ? 50 : 100,
-      requireSustain: Boolean(damageForm.sustain),
-      minSustain: Math.max(0, Number(damageForm.lr) || 0),
+      lifeRange: formLifeRange(damageForm),
+      spdRange: formSpdRange(damageForm),
       excludeEvents: damageForm.noEvents !== false,
       tradeableOnly: Boolean(damageForm.tradeable),
       spendFreeSkillPoints: damageForm.freeSp !== false,
-      options,
-      powders: options.powders,
+      options: opts,
+      powders: opts.powders,
     };
   }
 
@@ -18984,12 +19690,15 @@ export default function BuildRecommender() {
     const key = tradeoffKeyNow;
     const params = damageParams();
     const hasCycle = params.cycle.ids.some((id) => id !== 0);
-    const current = Math.max(0, Number(damageForm.drain) || 0);
+    const manaNow = formManaRange(damageForm);
+    const current = manaNow && manaNow.min !== null ? Math.max(0, -manaNow.min) : 0;
     const limits = hasCycle ? [...new Set([...TRADEOFF_DRAINS.filter((limit) => limit !== null), current])].sort((a, b) => a - b).concat([null]) : [null];
     const rows = limits.map((limit) => ({ limit, status: "pending", build: null }));
     const minEhp = damageMinEhp;
     // wygenerowany build z tymi samymi ustawieniami (bez minimum życia) to gotowy wiersz dla obecnego drenu
-    const shown = result && result.build && result.build.mode === "damage" && !outdated && !(result.build.metrics.minSustain > 0) ? result.build : null;
+    // wygenerowany build pasuje do wiersza tylko bez warunku życia i bez górnej granicy many (wiersze ich nie mają)
+    const shownMana = result && result.build ? manaRangeOf(result.build.metrics.cycle) : null;
+    const shown = result && result.build && result.build.mode === "damage" && !outdated && !lifeRangeOf(result.build.metrics) && !(shownMana && shownMana.max !== null) ? result.build : null;
     const publish = (running) => {
       if (tradeoffToken.current !== token) return;
       setTradeoff({ key, rows: rows.map((row) => ({ ...row })), running, minEhp, suggestion: running ? null : tradeoffSuggestion(rows) });
@@ -19021,7 +19730,7 @@ export default function BuildRecommender() {
         // bez minimum życia (widać, ile build ma sam z siebie); dren: limit wiersza, null = bez limitu; startujemy też
         // z buildów z poprzednich wierszy (szybkie szukanie bywa słabsze niż pełne)
         const seeds = rows.filter((entry) => entry.build).map((entry) => seedOf(entry.build));
-        const build = await runDamageGeneration({ ...params, seeds, minEhp, minSustain: 0, cycle: { ...params.cycle, drain: row.limit === null ? 999 : row.limit }, effort: "quick" });
+        const build = await runDamageGeneration({ ...params, seeds, minEhp, lifeRange: null, cycle: { ...params.cycle, mana: row.limit === null ? null : { min: -row.limit, max: null } }, effort: "quick" });
         if (tradeoffToken.current !== token) return;
         if (carried && (!build.passed || carried.metrics.damage > build.metrics.damage)) {
           row.build = carried;
@@ -19042,53 +19751,63 @@ export default function BuildRecommender() {
     publish(false);
   }
 
+  // podpowiedź ustawia oba końce zakresów: minimum jak w 0.35, maksimum = wartość buildu z podpowiedzi + 20%
   function applyTradeoff(suggestion) {
-    setDamageForm((current) => ({ ...current, drain: suggestion.drain, lr: suggestion.lr }));
+    setDamageForm((current) => ({ ...current, drain: suggestion.manaRange, lr: suggestion.lifeRange, sustain: undefined }));
   }
 
   function pickTradeoffRow(row) {
     if (!row.build) return;
-    setResult({ build: row.build, run: (result ? result.run : 0) + 1, ms: row.build.stats ? row.build.stats.ms : 0, at: new Date() });
+    setResult({ build: row.build, run: (result ? result.run : 0) + 1, ms: row.build.stats ? row.build.stats.ms : 0, at: new Date(), settings: { form: damageForm, options, rank } });
     setGuideView(null);
     setSolverView(null);
+    setSharedView(null);
     setTab("build");
   }
 
-  function handleGenerateDamage() {
+  // optionsOverride: opcje z akcji na karcie (Exclude, Unpin, Other picks, Pin z przeglądarki) - ten sam generator co
+  // Generate, z tymi samymi ustawieniami plus zmiana z karty; recalcLabel: etykieta nad buildem na czas liczenia.
+  function handleGenerateDamage(optionsOverride = null, recalcLabel = null) {
+    const opts = optionsOverride && Array.isArray(optionsOverride.excluded) ? optionsOverride : options;
     if (!playerClass || !level || treeIds.length === 0 || !damageGoal) {
       setBuildError(!playerClass ? "Choose a class first." : !level ? "Type your level (1-120) first." : treeIds.length === 0 ? "Pick an ability tree preset first." : "Pick what to maximise.");
       return;
     }
     setDamageRunning(true);
     setDamageProgress({ label: "Starting", fraction: 0 });
+    setRecalc(typeof recalcLabel === "string" ? recalcLabel : null);
     setBuildError(null);
     // Bez portfela sesji: te same ustawienia zawsze dają ten sam build (feedback "roulette builds"; opcja "Start from
     // my earlier builds" usunięta w 0.35.1 jako niepotrzebna).
     const historyKey = playerClass;
     const seeds = [];
     // te same ustawienia (bez progu EHP) liczy potem lista buildów pod suwakiem
-    const params = damageParams();
-    const key = sweepKeyNow;
+    const params = damageParams(opts);
+    const key = sweepKeyOf(opts);
+    // ustawienia z chwili generowania - do adresu strony (s=), niezależnie od późniejszych zmian w formularzu
+    const settingsSnapshot = { form: damageForm, options: opts, rank };
     setTimeout(async () => {
       try {
         const started = performance.now();
         stopRef.current = false;
         const build = await runDamageGeneration({ ...params, seeds, minEhp: damageMinEhp }, { onProgress: setDamageProgress, cancelRef: stopRef });
-        setResult({ build, run: (result ? result.run : 0) + 1, ms: Math.max(1, Math.round(performance.now() - started)), at: new Date() });
+        setResult({ build, run: (result ? result.run : 0) + 1, ms: Math.max(1, Math.round(performance.now() - started)), at: new Date(), settings: settingsSnapshot });
         sweepAfterGenerate(key, params, build);
         setGuideView(null);
         setSolverView(null);
+        setSharedView(null);
         setTab("build");
         const seed = { picks: Object.fromEntries(build.slots.filter((slot) => slot.item && slot.id !== "weapon").map((slot) => [slot.id, slot.item])), weapon: build.slots.find((slot) => slot.id === "weapon").item };
         const signature = (entry) => [entry.weapon && entry.weapon.name, ...Object.values(entry.picks).map((item) => item.name).sort()].join("|");
         const kept = [seed, ...seeds.filter((entry) => signature(entry) !== signature(seed))].slice(0, 24);
         damageHistory.current.set(historyKey, kept);
       } catch (error) {
-        // "Stop": zostaje poprzedni build, bez komunikatu o błędzie
+        // "Stop": zostaje poprzedni build, bez komunikatu o błędzie (wykluczenie / przypięcie zostaje w ustawieniach)
         if (!error.cancelled) setBuildError(error.message);
       }
       setDamageRunning(false);
       setDamageProgress(null);
+      setRecalc(null);
     }, 30);
   }
 
@@ -19212,10 +19931,11 @@ export default function BuildRecommender() {
 
   function pickSweepRow(row) {
     if (!row.build) return;
-    setResult({ build: row.build, run: (result ? result.run : 0) + 1, ms: row.build.stats ? row.build.stats.ms : 0, at: new Date() });
+    setResult({ build: row.build, run: (result ? result.run : 0) + 1, ms: row.build.stats ? row.build.stats.ms : 0, at: new Date(), settings: { form: { ...damageForm, minEhp: row.minEhp }, options, rank } });
     setDamageForm((current) => ({ ...current, minEhp: row.minEhp }));
     setGuideView(null);
     setSolverView(null);
+    setSharedView(null);
     setTab("build");
   }
 
@@ -19231,23 +19951,13 @@ export default function BuildRecommender() {
     });
   }
 
-  // Przypinanie / wykluczanie z kart od razu przelicza build z nowymi opcjami.
-  function regenerate(nextOptions) {
+  // Przypinanie / wykluczanie z kart od razu przelicza build tym samym generatorem co Generate (te same ustawienia
+  // plus zmiana z karty). Bez kompletu (klasa, poziom, drzewko, cel) zmiana tylko zapisuje się w opcjach, a pod
+  // formularzem jest ten sam komunikat co przy Generate; build na ekranie się nie zmienia.
+  function regenerate(nextOptions, label = null) {
     setOptions(nextOptions);
-    if (!ready) {
-      setBuildError("Pick your level, class and archetype first.");
-      return;
-    }
-    try {
-      setResult(timedBuild(level, playerClass, archetype, nextOptions, (result ? result.run : 0) + 1));
-      setGuideView(null);
-      setSolverView(null);
-      setTab("build");
-      setLevelInput(String(level));
-      setBuildError(null);
-    } catch (error) {
-      setBuildError(error.message);
-    }
+    if (damageRunning) return;
+    handleGenerateDamage(nextOptions, label);
   }
 
   const cardActions = viewed
@@ -19257,52 +19967,131 @@ export default function BuildRecommender() {
         onAlternatives: (slotId) => setAlternativesFor(slotId),
         onRolls: (slotId) => setRollsFor(slotId),
         onExclude: (name) =>
-          regenerate({
-            ...options,
-            excluded: [...options.excluded, name],
-            locked: Object.fromEntries(Object.entries(options.locked).filter(([, lockedName]) => lockedName !== name)),
-          }),
+          regenerate(
+            {
+              ...options,
+              excluded: [...options.excluded, name],
+              locked: Object.fromEntries(Object.entries(options.locked).filter(([, lockedName]) => lockedName !== name)),
+            },
+            `Recalculating without ${name}…`
+          ),
         onUnpin: (slotId) => {
           const locked = { ...options.locked };
+          const name = locked[slotId];
           delete locked[slotId];
-          regenerate({ ...options, locked });
+          regenerate({ ...options, locked }, `Recalculating with ${name || "the item"} unpinned…`);
         },
       };
 
   function applyAlternative(slotId, name) {
     setAlternativesFor(null);
-    regenerate({ ...options, locked: { ...options.locked, [slotId]: name }, excluded: options.excluded.filter((entry) => entry !== name) });
+    regenerate({ ...options, locked: { ...options.locked, [slotId]: name }, excluded: options.excluded.filter((entry) => entry !== name) }, `Recalculating with ${name} pinned…`);
   }
 
-  // Przypięcie z przeglądarki (Custom stats): bez kompletu poziom/klasa/archetyp tylko zapisuje wybór w opcjach.
+  // Przypięcie z przeglądarki (lewy panel): z buildem na ekranie przelicza od razu, bez buildu tylko zapisuje wybór.
   function pinFromBrowser(item, slotId) {
     setBrowseOpen(false);
     const next = { ...options, locked: { ...options.locked, [slotId]: item.name }, excluded: options.excluded.filter((entry) => entry !== item.name) };
-    if (ready) regenerate(next);
+    if (generated && !viewed) regenerate(next, `Recalculating with ${item.name} pinned…`);
     else setOptions(next);
   }
+  // Wykluczenie z przeglądarki (lewy panel): jak inne ustawienia formularza - build dostaje znacznik nieaktualnego.
+  function excludeFromBrowser(item) {
+    setOptions((current) => excludeItem(current, item.name));
+  }
 
-  // Zwykły onClick zamiast <form onSubmit>: piaskownica artifactów blokuje wysyłanie formularzy.
-  function handleGenerate() {
-    if (!ready) {
-      setBuildError(!level ? "Type your level (1-120) first." : !playerClass ? "Choose a class first." : "Choose an archetype first.");
+  // ---- link buildu w adresie strony (#b=...&s=...) ----
+  // Otwiera build z linku: widok "Shared build" (karty, podsumowanie, tomy i aspekty z linku), a ustawienia z s=
+  // trafiają do formularza (klasa i drzewko też). Uszkodzony link: komunikat, strona bez zmian.
+  function openShare(parsed, source = "link") {
+    if (!parsed) return false;
+    let opened;
+    try {
+      opened = buildFromShare(parsed);
+    } catch (error) {
+      setShareNotice({ text: `Couldn't open the ${source}: ${error.message}`, error: true });
+      return false;
+    }
+    const { ws, notes, settings, build: sharedBuildNow } = opened;
+    const nextClass = ws.playerClass;
+    setPlayerClass(nextClass);
+    setArchetype(ws.archetype || "");
+    setLevelInput(String(ws.level || 120));
+    setTreeSelections((current) => ({ ...current, [nextClass]: ws.tree || [] }));
+    if (settings) {
+      setDamageForm(settings.form);
+      setOptions((current) => ({ ...current, ...settings.options, scoring: current.scoring }));
+      if (settings.rank && RANKS.some((entry) => entry.id === settings.rank)) {
+        setRank(settings.rank);
+        setRankConfirmed(true);
+      }
+    } else {
+      // link Wynnbuildera: ustawienia generatora zostają, drzewko i klasa z linku
+      setDamageForm((current) => ({ ...current, preset: ws.archetype || current.preset, treePreset: null, goal: null }));
+    }
+    if (!rankConfirmed && !(settings && settings.rank)) setRankConfirmed(true);
+    setSharedView({ b: parsed.b, s: parsed.s || null, ws, notes, build: sharedBuildNow });
+    setGuideView(null);
+    setSolverView(null);
+    setTab("build");
+    setShareNotice(notes.length > 0 ? { text: notes.join(" "), error: false } : null);
+    if (appMode !== "recommender") switchMode("recommender");
+    return true;
+  }
+  function importLink(text) {
+    const parsed = parseBuildHash(text);
+    if (!parsed) {
+      setShareNotice({ text: "That doesn't look like a build link: paste this site's address with #b=… or a Wynnbuilder builder link.", error: true });
       return;
     }
-    try {
-      setResult(timedBuild(level, playerClass, archetype, options, (result ? result.run : 0) + 1));
-      setGuideView(null);
-      setSolverView(null);
-      setTab("build");
-      setLevelInput(String(level));
-      setBuildError(null);
-    } catch (error) {
-      setBuildError(error.message);
-    }
+    if (openShare(parsed, "link") && typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
   }
+  // Zapis w "Saved builds": nazwa, adres strony z buildem, data i liczby z chwili zapisu.
+  function saveCurrentBuild(name) {
+    if (!shareUrl) return "Nothing to save yet.";
+    const metrics = {
+      damage: build && build.metrics && Number.isFinite(build.metrics.damage) ? build.metrics.damage : null,
+      ehp: buildStats ? buildStats.ehp : null,
+      mana: build && build.metrics && build.metrics.cycle && build.metrics.cycle.ids && build.metrics.cycle.ids.length > 0 ? build.metrics.manaNet : null,
+    };
+    const list = [{ name, url: shareUrl, savedAt: new Date().toISOString(), metrics }, ...savedLinks.list].slice(0, SAVED_LINKS_MAX);
+    const ok = storeSavedLinks(list);
+    setSavedLinks({ ok, list });
+    return ok ? `Saved "${name}" (Saved builds, bottom of the left panel).` : "This browser doesn't allow saving here - use Share link instead.";
+  }
+  function deleteSavedLink(index) {
+    const list = savedLinks.list.filter((_, i) => i !== index);
+    setSavedLinks({ ok: storeSavedLinks(list), list });
+  }
+  const saveName = build ? `${build.archetype} lv ${build.level}${build.goalName ? ` · ${build.goalName}` : damageGoal ? ` · ${damageGoal.name}` : ""}` : "";
+  // adres strony podąża za buildem (history.replaceState, bez wpisu w historii); formularz bez buildu go nie zmienia
+  useEffect(() => {
+    if (appMode !== "recommender" || !pageHash) return;
+    try {
+      if (window.location.hash !== `#${pageHash}`) window.history.replaceState(null, "", `#${pageHash}`);
+    } catch (error) {
+      // piaskownica bez dostępu do adresu - linki nadal można kopiować
+    }
+  }, [appMode, pageHash]);
+  // link w adresie przy starcie strony i przy zmianie adresu (wklejony link, wstecz/dalej)
+  useEffect(() => {
+    const fromLocation = () => {
+      try {
+        const parsed = parseBuildHash(window.location.hash);
+        if (parsed && /^#?b=/.test(window.location.hash)) openShare(parsed, "link in the address");
+      } catch (error) {
+        // brak adresu (piaskownica)
+      }
+    };
+    fromLocation();
+    window.addEventListener("hashchange", fromLocation);
+    return () => window.removeEventListener("hashchange", fromLocation);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   function showGuideBuild(guide) {
     setGuideView(guide);
     setSolverView(null);
+    setSharedView(null);
     setTab("build");
     if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -19324,6 +20113,7 @@ export default function BuildRecommender() {
   function showSolverBuild(candidate) {
     setSolverView({ candidate, solved: solverResult, archetype: solverResult.archetype });
     setGuideView(null);
+    setSharedView(null);
     setTab("build");
     if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -19422,6 +20212,15 @@ export default function BuildRecommender() {
           />
         )}
 
+        {appMode === "recommender" && shareNotice && (
+          <div className={`mc-panel flex items-start justify-between gap-3 p-3 text-sm ${shareNotice.error ? "text-red-300" : "text-amber-200"}`} role="status">
+            <p>{shareNotice.text}</p>
+            <button type="button" className="mc-btn mc-btn-sm shrink-0" onClick={() => setShareNotice(null)} aria-label="Close the message">
+              ✕
+            </button>
+          </div>
+        )}
+
         {appMode === "recommender" && (
         <div className="flex flex-col gap-4 lg:grid lg:grid-cols-12 lg:items-start">
           {/* w kreatorze (wybór klasy i kolejne kroki, zanim powstanie build) lewy panel znika; wraca po wygenerowaniu */}
@@ -19474,6 +20273,8 @@ export default function BuildRecommender() {
               {buildError && <p className="text-xs text-red-400">{buildError}</p>}
             </section>
 
+            <SavedBuildsPanel saved={savedLinks.list} storageOk={savedLinks.ok} onOpen={(entry) => importLink(entry.url)} onDelete={deleteSavedLink} onImport={importLink} importMessage={null} />
+
             <p className="px-1 text-xs text-zinc-500" title={`${DB_COUNTS.armor.toLocaleString("en-US")} armour pieces, ${DB_COUNTS.accessory.toLocaleString("en-US")} accessories, ${DB_COUNTS.weapon.toLocaleString("en-US")} weapons; no crafted items`}>
               <span className="mc-title uppercase">Item database</span> · Wynnbuilder {WYNNBUILDER_DATA.version} · <span className="tabular-nums text-zinc-300">{ITEM_DB.length.toLocaleString("en-US")}</span> items
               {hasWynnpoolData() ? " · Wynnpool weights" : ""}
@@ -19484,7 +20285,7 @@ export default function BuildRecommender() {
           <main className={`flex flex-col gap-4 ${setupGuideOn ? "lg:col-span-12" : "lg:col-span-8 xl:col-span-9"} ${tab === "build" && !build ? "order-first lg:order-none" : ""}`} aria-live="polite">
             <div className="wbr-tabs" role="tablist" aria-label="Views">
               {[
-                ["build", guideView ? "Guide build" : solverView ? "Solver build" : "Build", null, "◈"],
+                ["build", guideView ? "Guide build" : solverView ? "Solver build" : sharedView ? "Shared build" : "Build", null, "◈"],
                 ["tree", "Ability tree", playerClass, "❋"],
                 ["aspects", "Aspects", extrasTabLocked ? `lv ${RAID_CONTENT_MIN_LEVEL}+` : null, "✧"],
                 ["tomes", "Tomes", extrasTabLocked ? `lv ${RAID_CONTENT_MIN_LEVEL}+` : null, "❖"],
@@ -19557,8 +20358,10 @@ export default function BuildRecommender() {
                 onGenerate={playerClass && level && treeIds.length > 0 ? handleGenerateDamage : null}
               />
             )}
-            {tab === "aspects" && build && extrasEnv && <AspectsPanel build={build} env={extrasEnv} />}
-            {tab === "tomes" && build && extrasEnv && <TomesPanel build={build} env={extrasEnv} />}
+            {tab === "aspects" && build && sharedView && !extrasTabLocked && <SharedExtrasPanel build={build} what="aspects" />}
+            {tab === "tomes" && build && sharedView && !extrasTabLocked && <SharedExtrasPanel build={build} what="tomes" />}
+            {tab === "aspects" && build && !sharedView && extrasEnv && <AspectsPanel build={build} env={extrasEnv} />}
+            {tab === "tomes" && build && !sharedView && extrasEnv && <TomesPanel build={build} env={extrasEnv} />}
             {tab === "guides" && !archetypeValid && <NeedsPick what="a class and archetype" why="Guide builds are listed per archetype." />}
             {tab === "guides" && archetypeValid && <GuideBuilds archetype={archetype} activeUrl={guideView ? guideView.url : null} onShow={showGuideBuild} />}
             {tab === "info" && !build && (
@@ -19573,10 +20376,6 @@ export default function BuildRecommender() {
                 treeSettings={buildTreeSettings}
                 onOpenTree={() => setTab("tree")}
               />
-            )}
-            {tab === "score" && !archetypeValid && <NeedsPick what="a class and archetype" why="The weights depend on the archetype." />}
-            {tab === "score" && archetypeValid && (
-              <ScoreWeightsPanel archetype={archetype} playerClass={playerClass} level={effectiveLevel} options={options} onChange={setOptions} outdated={outdated} onGenerate={handleGenerate} />
             )}
             {tab === "solver" && (
               <SolverPanel
@@ -19661,14 +20460,27 @@ export default function BuildRecommender() {
             )}
             {tab === "build" && build && (
             <>
-            <section className="mc-panel flex flex-col gap-3 p-4">
+            {recalc && damageRunning && (
+              <div className="wbr-info-note flex flex-wrap items-center justify-between gap-2 text-sm" role="status" aria-live="polite">
+                <span>
+                  {recalc} <span className="text-zinc-400">{damageProgress ? `· ${damageProgress.label}` : ""}</span>
+                </span>
+                <button type="button" className="mc-btn mc-btn-sm" onClick={handleStopDamage} title="Stop: the build stays as it is; the change stays in your settings for the next Generate">
+                  Stop
+                </button>
+              </div>
+            )}
+            <section ref={buildHeaderRef} className="mc-panel flex scroll-mt-2 flex-col gap-3 p-4">
               {solverBuild && !guideResult ? (
                 <div className="flex flex-col gap-2">
                   <p className="mc-gold text-xs uppercase">Build Solver result</p>
-                  <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
                     <h2 className="mc-title text-xl">
                       #{solverView.candidate.rank} · {build.playerClass} level {build.level}
                     </h2>
+                    {headerLink && <BuildLinkBar wbUrl={headerLink.url} shareUrl={shareUrl} onSave={saveCurrentBuild} saveName={`Solver #${solverView.candidate.rank} · ${build.playerClass} lv ${build.level}`} />}
+                  </div>
+                  <div className="flex flex-wrap items-baseline justify-between gap-2">
                     <p className="text-sm text-zinc-400">
                       Solver score <span className="tabular-nums font-bold text-amber-400">{formatNumber(Math.round(solverView.candidate.score))}</span> · score under{" "}
                       {build.archetype} weights <span className="tabular-nums font-bold text-amber-400">{formatScore(build.score)}</span>
@@ -19687,6 +20499,39 @@ export default function BuildRecommender() {
                       Back to solver results
                     </button>
                   </div>
+                </div>
+              ) : sharedBuild ? (
+                <div className="flex flex-col gap-2">
+                  <p className="mc-gold text-xs uppercase">Shared build</p>
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <h2 className="mc-title text-xl">
+                      {build.archetype} {build.playerClass} <span className="text-zinc-400">· level {build.level}</span>
+                    </h2>
+                    <BuildLinkBar wbUrl={WB_BUILDER_URL + sharedView.b} shareUrl={shareUrl} onSave={saveCurrentBuild} saveName={saveName} />
+                  </div>
+                  <p className="text-sm text-zinc-400">
+                    {sharedView.s
+                      ? "Opened from a link, with its generator settings - the form on the left has them now."
+                      : "Opened from a Wynnbuilder link: items, powders, skill points, tree, tomes and aspects from the link; your generator settings stay."}
+                  </p>
+                  {sharedView.notes.length > 0 && <p className="text-sm text-amber-300">{sharedView.notes.join(" ")}</p>}
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleGenerateDamage()}
+                      disabled={damageRunning}
+                      className="mc-btn mc-btn-primary"
+                      title="Runs the generator with these settings. The result can differ from this build if the item data or the generator changed since the link was made."
+                    >
+                      Regenerate with these settings
+                    </button>
+                    {generated && (
+                      <button type="button" onClick={() => setSharedView(null)} className="mc-btn">
+                        Back to generated build
+                      </button>
+                    )}
+                  </div>
+                  <p className="text-xs text-zinc-500">Regenerating can give a different build if the item data or the generator changed since the link was made.</p>
                 </div>
               ) : guideResult ? (
                 <div className="flex flex-col gap-2">
@@ -19724,9 +20569,12 @@ export default function BuildRecommender() {
                 </div>
               ) : (
                 <div className="flex flex-wrap items-baseline justify-between gap-2">
-                  <h2 className="mc-title text-xl">
-                    {build.archetype} {build.playerClass} <span className="text-zinc-400">· level {build.level}</span>
-                  </h2>
+                  <div className="flex w-full flex-wrap items-start justify-between gap-2">
+                    <h2 className="mc-title text-xl">
+                      {build.archetype} {build.playerClass} <span className="text-zinc-400">· level {build.level}</span>
+                    </h2>
+                    {headerLink && <BuildLinkBar wbUrl={headerLink.url} shareUrl={shareUrl} onSave={saveCurrentBuild} saveName={saveName} />}
+                  </div>
                   <p className="text-sm text-zinc-400">
                     {build.mode === "damage" ? (
                       <>
@@ -19827,7 +20675,7 @@ export default function BuildRecommender() {
                     {SLOTS.every((slot) => openCards[slot.id]) ? "▲ Collapse all" : "▼ Expand all"}
                   </button>
                 </div>
-                <div className="grid grid-cols-1 items-start gap-3 sm:grid-cols-[repeat(auto-fill,minmax(300px,1fr))]">
+                <div className="grid grid-cols-1 items-start gap-3 sm:grid-cols-[repeat(auto-fill,minmax(300px,1fr))]" style={recalc && damageRunning ? { opacity: 0.6 } : undefined}>
                   {build.slots.map((slot) => (
                     <ItemCard
                       key={slot.id}
@@ -19840,7 +20688,7 @@ export default function BuildRecommender() {
                     />
                   ))}
                 </div>
-                {build.mode === "damage" && !guideView && !solverView && <WynnbuilderExport build={build} treeSettings={buildTreeSettings} />}
+                {build.mode === "damage" && !guideView && !solverView && !sharedView && <WynnbuilderExport build={build} treeSettings={buildTreeSettings} link={headerLink} withExtras={withExtras} onWithExtras={setWithExtras} />}
                 <button
                   type="button"
                   onClick={() => copyToMode("creator", workspaceFromBuild(build, { rank, treeIds: buildTreeSettings.selected, rolls, treeFx: treeEffects[build.playerClass] || {} }), guideView ? "the guide builds" : solverView ? "the Build Solver" : "the Recommender")}
@@ -19886,15 +20734,11 @@ export default function BuildRecommender() {
             {rollsFor && build.slots.find((slot) => slot.id === rollsFor && slot.item) && (
               <RollsDialog
                 item={build.slots.find((slot) => slot.id === rollsFor).item}
-                rolls={rolls[build.slots.find((slot) => slot.id === rollsFor).item.name] || null}
+                rolls={rollsOf(rolls, rollsFor, build.slots.find((slot) => slot.id === rollsFor).item.name)}
                 onChange={(next) => {
                   const name = build.slots.find((slot) => slot.id === rollsFor).item.name;
-                  setRolls((current) => {
-                    const updated = { ...current };
-                    if (next) updated[name] = next;
-                    else delete updated[name];
-                    return updated;
-                  });
+                  const slotNames = Object.fromEntries(build.slots.filter((slot) => slot.item).map((slot) => [slot.id, slot.item.name]));
+                  setRolls((current) => withSlotRolls(current, rollsFor, name, next, slotNames));
                 }}
                 onClose={() => setRollsFor(null)}
               />
@@ -19927,6 +20771,7 @@ export default function BuildRecommender() {
           level={effectiveLevel}
           options={options}
           onPick={pinFromBrowser}
+          onExclude={excludeFromBrowser}
           onClose={() => setBrowseOpen(false)}
           pickLabel="Pin"
         />
@@ -19953,6 +20798,16 @@ export const __engine = {
   optBranchAndBound,
   optEvaluate,
   optEmptySlots,
+  optCandidates,
+  solveBuilds,
+  solverBuildResult,
+  DEFAULT_SOLVER,
+  rollKey,
+  rollsOf,
+  withSlotRolls,
+  applyBuildRolls,
+  workspaceItem,
+  slotAlternatives,
   applyOptimizerChanges,
   manualBuild,
   emptyWorkspace,
@@ -19964,6 +20819,15 @@ export const __engine = {
   powderListFromText,
   applyPowderList,
   wynnbuilderLink,
+  decodeWynnbuilderHash,
+  encodeShareSettings,
+  decodeShareSettings,
+  parseBuildHash,
+  buildFromShare,
+  migrateDamageForm,
+  migrateOptParams,
+  normalizeRange,
+  DEFAULT_DAMAGE_FORM,
   decodeTreeHash,
   encodeTreeHash,
   wynnbuilderExtras,

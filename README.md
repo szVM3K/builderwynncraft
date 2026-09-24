@@ -3,7 +3,8 @@
 Pick a level, class and ability-tree archetype and get a full 9-slot build (Helmet, Chestplate, Leggings, Boots,
 2× Ring, Bracelet, Necklace, Weapon) chosen from every item in Wynnbuilder's database and validated against the
 game's skill-point rules. Two more modes share the page: the **Build Optimizer** fills in a build you started (and
-never changes what you picked) and the **Build Creator** is a manual editor like Wynnbuilder.
+never changes what you picked) and the **Build Creator** is a manual editor like Wynnbuilder. Every build has its
+own address (`#b=<Wynnbuilder code>&s=<settings>`), so it can be shared, saved in the browser and compared in tabs.
 
 ## Live site (GitHub Pages)
 
@@ -36,6 +37,8 @@ npm run test:stable  # same settings twice = same build (5 scenarios), a few min
 npm run test:workers # Web Worker tasks give the same build as one thread (2 scenarios), a few minutes
 npm run test:discord # Discord feedback fixes: rolls, Mana/Life Steal from M hits, poison, drain, life recovery, whole cycle, guide tree presets
 npm run test:optimizer # Optimizer/Creator: full search = every combination, your picks stay, full >= quick, Wynnbuilder import/export round trip, ~2-3 min
+npm run test:feedback  # 0.37 fixes: Exclude = Generate, Fits my skill points, range sliders (mana, life, walk speed), migration, ring rolls, welcome v2
+npx vite-node scripts/compare-defaults.mjs -- 0 1 50,80,106  # what the new default ranges change vs Any (0.35 behaviour)
 npm run bench:optimizer -- 45 Warrior,Mage 106  # full-search benchmark: 1-9 empty slots per class vs the beam (seconds per run, classes, level)
 npm run test:deep    # deep optimality certificate: exhaustive pair swaps + triples for 8 builds, ~15-20 min
 npm run test:matrix  # the matrix only
@@ -74,6 +77,7 @@ Useful variables (PowerShell: `$env:NAME="value"; npm run …`, cmd: `set NAME=v
 | `MATRIX_LEVELS` | `30,50,70,90,100` | levels of the matrix |
 | `MATRIX_VARIANTS` | `base,second,main,lowEhp,noCycle,pinned` | runs per archetype and level |
 | `MATRIX_AP_LOAN` | `0` | rank AP loan (2 = VIP+, 4 = HERO+) |
+| `MATRIX_RANGES` | – (Any) | `defaults` = the UI's default ranges in every scenario (mana balance 0 to +1 with a cycle, walk speed ≥ −20 %) |
 | `SP_SETS` / `SP_SEED` | `20000` / fixed | random sets for the skill point test |
 | `SOAK_MINUTES` | `0` (forever) | stop the soak run after N minutes |
 | `SOAK_SHARDS` | CPU cores − 1 (max 4) | parallel soak processes |
@@ -134,11 +138,14 @@ field is disabled and everything else works as before.
 
 ### Welcome popup
 
-The first visit shows a short welcome (what the site is for – levelling from about level 30 to 100 – a link to
-The Ultimate Build Guide for endgame builds, and the list of sources). **I confirm** unlocks after 5 seconds and
+The first visit shows a short welcome: the three modes (Recommender - a whole build from a few answers, best for
+levelling from about level 30 to 100; Optimizer - fills what you left empty and suggests swaps, nothing changes
+until you accept; Creator - a manual editor like Wynnbuilder), a link to The Ultimate Build Guide for endgame
+builds, a reminder that results are suggestions, and the list of sources. **I confirm** unlocks after 5 seconds and
 once the text has been scrolled to the end; the page behind it doesn't scroll meanwhile. The confirmation is kept
-in `localStorage` (`wbr-welcome-confirmed-v1`), so the popup doesn't come back; if the browser blocks storage it
-simply shows again on the next visit.
+in `localStorage` (`wbr-welcome-confirmed-v2` since 0.37, so players who confirmed the old text see the new one
+once); if the browser blocks storage it simply shows again on the next visit. Each mode also has its own short popup
+on the first visit.
 
 ### Info button
 
@@ -267,6 +274,100 @@ about 300). That is what the **2-minute limit** is for: above it the Optimizer a
 search or use quick mode, which the table shows is usually as good or within a few % (but can miss builds that fit
 the skill points). With 1-3 empty slots (15 cases) the full search found a better build than the beam in 5, and
 in 2 more a build that fits where the beam found none.
+
+### Feedback fixes, range sliders and build links (0.37.0)
+
+Eight changes from the forum feedback and two additions to the Optimizer/Creator spec.
+
+**Exclude uses the generator from Generate.** Exclude, Unpin, Other picks and Pin from the item browser used to call
+the old weights generator (removed from the UI in 0.30), so after Exclude a completely different build appeared -
+without the goal, the EHP threshold, the mana cycle and the tree. Now each of them runs `handleGenerateDamage()` with
+the current settings plus the change from the card (the options are passed as an argument, because React's state
+isn't updated yet right after `setOptions`). The progress bar and Stop work as for Generate. The old generator
+(`generateOptimizedBuild`, `timedBuild`, `handleGenerate`, the hidden "Score calculation" tab) is gone from the code;
+the archetype weights stay for Other picks, the Build Solver and guide builds.
+
+**Wynnbuilder link always visible.** The build header (next to the archetype and level) has **Wynnbuilder ↗**,
+**Copy link**, **Share link** and **Save**, also for Build Solver results (with the tree of the current class, like
+the Tomes and Aspects tabs); on a phone they wrap under the title. The block under the cards stays; both use the same
+link (`useWynnbuilderLink`), also with *With the recommended tomes and aspects* checked.
+
+**Range sliders** (Generate and Optimize): three sliders with two handles (minimum and maximum; the far ends are
+*Any* = no limit on that side), with presets above them.
+
+| Slider | Unit | Default | Presets |
+| --- | --- | --- | --- |
+| Mana balance (needs a spell cycle) | the cycle's mana per second: negative = drain, positive = surplus | 0 to +1 (full sustain, nothing wasted) | Full sustain, Raid buffs (−3 to +1), Burst (≥ −8), Any |
+| Life recovery | HP/s: Health Regen ÷ 4 + Life Steal from the cycle's M hits | Any | Any, Light, Strong sustain (10 % / 40 % of the slider's range) |
+| Walk Speed | % of the whole build (the number in the summary) | at least −20 % | Any, Default, No slowdown (≥ 0), Mobile (≥ +20), Fast (≥ +40) |
+
+The maximum keeps the search from "completely oversustaining": stats above the mana or life you need go to damage or
+EHP instead. The generator treats a range like the EHP threshold: soft penalties while it searches, a hard cut at the
+end; when nothing fits, the closest build is shown with a warning that names the range (and the one furthest off if
+several fail). The *Life sustain > 0* switch is gone - the same is Life recovery with a minimum of 1 HP/s. *Suggest
+mana drain & life recovery* now sets both ends: the minimum as before and the maximum at the suggested build's
+value + 20 %. Old settings migrate with the same behaviour: `drain: d` → `{ min: −d, max: null }`, `lr: x` →
+`{ min: x, max: null }`, no walk speed → Any (`migrateDamageForm`, `migrateOptParams`).
+
+*How the upper limits are searched.* A hard maximum inside the approximate search (beam, single and pair swaps)
+pushed the polishing into the first set under the limit and lost better ones (−5 to −7 % in tests, even when the
+result without the limit already had a surplus under +1). So the approximate stages keep only the lower limits hard
+(like EHP) and see the maxima as a mild penalty; the exact stage (every item in every slot, exact pairs, free skill
+points) enforces both ends. Free skill points only raise the mana surplus (INT makes spells cheaper), so for the
+maxima the shortcut "all free points everywhere" is checked on the build without them. Walk speed below the minimum
+gives the slot's fastest items a place among the candidates (the beam would drop them before the filter sees them).
+With at least one maximum set, `generateDamageBuild` first searches with the minimums only (walk speed minimum
+included). If that build already fits every maximum, it is the result, so a maximum never makes a build weaker than
+the same settings without it. Only when it goes over a maximum does a second search run with both ends, starting
+from the first result and skipping the "with EHP to spare" and "other spells" passes the first search already did
+(the progress bar says *Fitting the ranges*). That second search costs time (numbers below).
+Parallel helper threads get the settings of the search they belong to (`task.override`).
+In the Optimizer the full search stays exact: with a maximum, an item dominates another only with the same value of
+the bounded statistics (and of INT for a mana maximum).
+
+**Build in the address, saved builds, comparing.** After every Generate, Exclude or Other picks the address becomes
+`…/#b=<Wynnbuilder code>&s=<settings>` (`history.replaceState`, no new history entry): `b` is exactly the "Open in
+Wynnbuilder" code (items with powders, skill points, level, tomes, aspects, tree), `s` the generator settings (format
+version, rank, goal, cycle, clicks/s, EHP threshold, the three ranges, the switches, pinned and excluded items as
+Wynnbuilder numbers) as short-key JSON in base64url. Class comes from the weapon, archetype from the tree. Opening such
+an address - or pasting a Wynnbuilder link into **Import** - shows the build as **Shared build** (cards, summary, the
+link's tomes and aspects in their tabs) and puts the settings into the form; **Regenerate with these settings** runs
+the generator (the result can differ if the item data or the generator changed). A crafted item or one missing from
+this data version stays an empty slot with a note; a broken link or a settings format from a newer version shows a
+message and changes nothing. **Saved builds** (bottom of the left panel): Save in the build header stores the name
+(default "Archetype lv N · goal"), the address and the damage / EHP / mana at that moment in `localStorage`
+(`wbr-saved-builds-v1`, up to 50); click opens, **Open in new tab** (or a middle click) opens it next to the current
+one to compare, ✕ deletes, **Export** copies every link, one per line, for another computer. The link decoder
+(`decodeWynnbuilderHash`) moved from the tests into `src/` next to the encoder; the Creator's import uses it too.
+
+**Rolls of two identical rings** (feedback during the release): rolls were stored by item name, so the same ring on
+both ring slots shared them. Ring slots now keep their own rolls (`rollKey`: `ring2|Warsong`); rolls saved before
+are split between the two rings on the first change, so nothing is lost.
+
+**Welcome and sources.** The welcome describes the three modes (see *Welcome popup*); the sources list adds what
+0.34-0.37 started using (Wynnbuilder tomes/aspects data, powder and damage calculations and the link format; wiki
+pages on skill points, tomes, aspects, raid and dungeon levels; forum threads on spell costs, Mana Steal and attack
+speed) and lists The Ultimate Build Guide on its own. The unused `@fontsource/tiny5` dependency is removed.
+
+**What the new defaults change** (`VERIFY=1 npx vite-node scripts/compare-defaults.mjs -- <shard> 2 100`: the 15
+archetypes at level 100, EHP ≥ 25 %, the goal's first cycle and no cycle, full search; *Any* = the 0.35/0.36
+behaviour). All 30 default builds pass, with no warnings.
+
+| | Any already fits | Changed | Damage vs Any (median) | Range | Worse by > 2 % | Better by > 2 % |
+| --- | --- | --- | --- | --- | --- | --- |
+| With a cycle (mana 0 to +1, walk ≥ −20 %) | 2 / 15 | 14 | −5.7 % | −40.9 % to +6.2 % | 9 | 2 |
+| No cycle (walk ≥ −20 %) | 4 / 15 | 13 | −0.6 % | −10.2 % to +8.2 % | 6 | 5 |
+
+- **Walk speed.** 23 of the 30 *Any* builds walk slower than −20 % (down to −146 %). Without a cycle the cost of
+  the minimum is small on average (median −0.6 %); the gains come from the search taking another path, and they
+  show how much the heuristic search varies (±8 %).
+- **Mana maximum.** With a cycle, 5 of 15 *Any* builds have more than +1 mana/s left over. Where the surplus comes
+  from items it costs little: Sharpshooter +0.7 %, Acolyte −5.1 %, Fallen −7.7 %. Where it comes from the tree (Mage
+  Arcanist with 3-3-4-1: +18.7 mana/s from the tree's mana gain), the only way under +1 is to drop items that give
+  mana or make spells cheaper, and the build loses 40.9 %. A maximum can only take damage away from a
+  damage-first search; what is left over is left over because it was free.
+- **Time.** When the *Any* build doesn't fit, the default run takes a median 1.2-1.3× as long (0.6-4.7× on a
+  2-core machine running both shards at once).
 
 ### Generating a build
 
@@ -475,9 +576,13 @@ turns it on for experiments.
 - **Trade Market availability**: the dot next to the slot name (● N on market / ○ not on market) says whether the
   item was listed on the Trade Market today; the expanded card shows the listing count and the lowest price, and
   the item browser has a **● Listed today** filter.
+- **Pin or exclude an item** (left panel, *Pin items · rarities*): type a name; every result has **Pin** (always in
+  its slot) and **Exclude** (never used; an excluded item that was pinned is unpinned). Like other form settings
+  this doesn't run the search by itself - the build gets the "Settings changed: regenerate" mark.
 - **Browse items…** opens the item browser: every weapon of your class, armour piece and accessory up to your
   level with filters for name, slot, element, rarity, level range, attack speed and minimum DPS, sorted by value
-  in the current build, weapon DPS, level, health or name. Pin puts an item in its slot and re-fits the rest.
+  in the current build, weapon DPS, level, health or name. Pin puts an item in its slot and re-fits the rest;
+  Exclude takes it out of the pool.
 - **Identification filter** (item browser and Other picks): "+ Add identification" opens a searchable list of
   every identification in the item data; set an optional minimum for each, match all or any.
 - **Weapon powders**: every weapon is compared with the best powder element for your goal in all its slots (the
@@ -485,7 +590,14 @@ turns it on for experiments.
 - **Set bonuses** as in Wynnbuilder (Morph, Moirai, Petal, Visceral, …); sets marked illegal (e.g. the Hive sets)
   are never combined. Quest-reward items that can't be traded are never put on both ring slots.
 - **Other picks / Exclude / Unpin** on every card: the next candidates for the slot with the change in damage and
-  EHP after the swap and whether they fit your skill points. Using one pins it and re-fits the rest.
+  EHP after the swap and whether they fit your skill points. Using one pins it and re-fits the rest - with the
+  **same generator and settings as Generate** (0.37; before, these buttons used the old weights generator and gave a
+  build without the goal, EHP threshold, mana cycle and tree). While it runs, the previous build stays with
+  "Recalculating without X…"; Stop keeps it, and the exclusion or pin stays in your settings.
+- **✓ Fits my skill points** (Other picks and Browse items, with a build): only items that can replace the current
+  one without changing the other slots (no skill point shortage, no illegal set, within the budget). The filter runs
+  before the list is cut to 40, so fitting items further down the ranking show up; "N of M fit your skill points"
+  above the list. Remembered until the page is reloaded; off by default.
 
 ### Wynnpool item weights
 
@@ -708,7 +820,10 @@ tomes need level 60, so one threshold covers both tabs.
   Optimizer parts: `manualBuild()` (a player's workspace → a build in the generator's shape, with the warnings),
   `workspaceFromWynnbuilderLink()` (link import), `optimizerSpec()` / `runOptimizer()` (the Optimize stages),
   `optContext()` / `optBranchAndBound()` / `optPlane()` (the full search), `ManualWorkspace`, `OptimizeDialog`,
-  `OptimizeResult`, `ModeBar`.
+  `OptimizeResult`, `ModeBar`. 0.37: the range sliders (`normalizeRange`, `RangeControl`, `McRangePair`), the build
+  link in the address (`encodeShareSettings`, `decodeShareSettings`, `parseBuildHash`, `buildFromShare`,
+  `decodeWynnbuilderHash`), `SavedBuildsPanel`, `BuildLinkBar`.
+- `scripts/compare-defaults.mjs`: the new default ranges vs Any on the matrix scenarios.
 - `scripts/bench-optimizer.mjs`: the full-search benchmark (`npm run bench:optimizer`).
 - `src/wynncraft-items.json`: 5,414 items (Wynnbuilder data 2.2.4.0) with `fixID`, the list of static IDs and the
   item's set, plus the 79 sets with their bonuses.
@@ -740,12 +855,18 @@ tomes need level 60, so one threshold covers both tabs.
 
 ## Sources
 
-- Wynnbuilder – item and tree data, damage formulas: https://wynnbuilder.github.io/ (GPL-3.0)
+- Wynnbuilder – item and tree data, damage formulas, tomes and aspects data (2.2.4.0), powder and damage
+  calculations, the build link format for import and export (`wynnbuilderLink`, `decodeWynnbuilderHash`):
+  https://wynnbuilder.github.io/ (GPL-3.0)
 - Build Solver (rawfish69) – the model for the Build Solver tab (targets, priorities, Advanced IDs, top N,
   "near miss"): https://rawfish69.github.io/build-solver/
-- Wynncraft Wiki – weapon DPS, identification rolls, ability trees, powders: https://wynncraft.wiki.gg/
+- Wynncraft Wiki – weapon DPS, identification rolls, ability trees, powders, skill points, tomes, aspects, raid and
+  dungeon levels, version history: https://wynncraft.wiki.gg/
 - Wynncraft forums – Stats and Identifications Guide (thread 246308), The Ultimate Build Guide (thread 320092),
-  How Damage Is Calculated – Rekindled Edition (thread 320808)
+  How Damage Is Calculated – Rekindled Edition (thread 320808), threads on spell costs and Mana Steal in 2.0 and on
+  Attack Speed and spell damage
+- The Ultimate Build Guide – the guide builds, their ability trees, tomes and aspects (starting points and presets):
+  https://forums.wynncraft.com/threads/the-ultimate-build-guide.320092/
 - Wynnguides (afeenah): https://afeenah.github.io/wynnguides/
 - WynnVentory – Trade Market prices for the budget and today's listings: https://wynnventory.com
 - Official Wynncraft Wiki (wynncraft.wiki.gg) – class portraits (Archer/Warrior/Mage/Assassin/Shaman.png) and the

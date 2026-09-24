@@ -86,8 +86,12 @@ export function makeEvaluator(params) {
       const spOk = spent <= ctx.available && sp.capOverflow === 0 && E.SKILLS.every((skill) => (sp.assigned[skill] || 0) + ((extra && extra[skill]) || 0) <= E.MAX_ASSIGNED_PER_SKILL);
       const ehpOk = params.minEhp <= 0 || m.ehp >= params.minEhp;
       const manaOk = E.manaOk(m, cycle);
-      const sustainOk = (!params.requireSustain || m.sustain > 0) && (!(params.minSustain > 0) || m.sustain >= params.minSustain - 1e-9);
-      return { spOk, ehpOk, manaOk, sustainOk, feasible: spOk && !illegal && !clash && ehpOk && manaOk && sustainOk };
+      // life: the 0.37 range (lifeRange) or the old minimum (minSustain); walk speed: spdRange (null = Any)
+      const lifeRange = params.lifeRange !== undefined ? E.normalizeRange(params.lifeRange) : params.minSustain > 0 ? { min: params.minSustain, max: null } : null;
+      const inRange = (value, range) => !range || ((range.min === null || value >= range.min - 1e-9) && (range.max === null || value <= range.max + 1e-9));
+      const sustainOk = (!params.requireSustain || m.sustain > 0) && inRange(m.sustain, lifeRange);
+      const speedOk = inRange(m.walkSpeed, E.normalizeRange(params.spdRange));
+      return { spOk, ehpOk, manaOk, sustainOk, speedOk, feasible: spOk && !illegal && !clash && ehpOk && manaOk && sustainOk && speedOk };
     };
     let extra = auto ? null : extraSkills;
     let m;
@@ -98,8 +102,14 @@ export function makeEvaluator(params) {
         if (j.feasible) return 1e15 + metrics.damage;
         let miss = 0;
         if (!j.ehpOk) miss += 1 - metrics.ehp / params.minEhp;
-        if (!j.manaOk) miss += metrics.manaUsed > 0 ? Math.max(0, 1 - (metrics.manaIncome + metrics.manaGain + cycle.drain) / metrics.manaUsed) : 1;
+        if (!j.manaOk) {
+          const range = cycle.mana;
+          const floor = range && range.min !== null ? range.min : null;
+          if (range && range.max !== null && metrics.manaNet > range.max) miss += Math.min(1, (metrics.manaNet - range.max) / Math.max(range.min !== null ? range.max - range.min : 5, 1));
+          else miss += metrics.manaUsed > 0 && floor !== null ? Math.max(0, 1 - (metrics.manaIncome + metrics.manaGain - floor) / metrics.manaUsed) : 1;
+        }
         if (!j.sustainOk) miss += 0.5;
+        if (!j.speedOk) miss += 0.5;
         return -miss;
       };
       const allocated = E.allocateFreeSkillPoints(ctx, items, weapon, sp, params.goal, cycle, rank);
@@ -261,6 +271,11 @@ export async function checkBuild(scenario, build, { limits = DEFAULT_LIMITS, pai
   const uiDamage = (Array.isArray(params.goal) ? params.goal : [params.goal]).reduce((sum, id) => sum + uiGoalDamage(id), 0);
   if (!close(build.metrics.damage, uiDamage)) add("error", "DAMAGE_MISMATCH", `generator damage ${Math.round(build.metrics.damage)} vs summary ${Math.round(uiDamage)}`);
   if (!close(build.metrics.ehp, stats.ehp)) add("error", "EHP_MISMATCH", `generator EHP ${Math.round(build.metrics.ehp)} vs summary ${Math.round(stats.ehp)}`);
+  // walk speed: the number the Walk Speed range filters (evaluateGoal) is the one in the summary (computeBuildStats)
+  if (Math.abs((asReported.walkSpeed || 0) - stats.walkSpeed) > 1e-6) add("error", "WALK_SPEED_MISMATCH", `generator walk speed ${asReported.walkSpeed} vs summary ${stats.walkSpeed}`);
+  if (build.metrics.walkSpeed !== undefined && Math.abs(build.metrics.walkSpeed - stats.walkSpeed) > 1e-6) add("error", "WALK_SPEED_MISMATCH", `build walk speed ${build.metrics.walkSpeed} vs summary ${stats.walkSpeed}`);
+  // a build outside a range must say so (the closest build is shown with a warning)
+  if (!build.passed && !(build.warnings || []).length) add("error", "FAILED_WITHOUT_WARNING", "the build fails a filter but shows no warning");
   if (!close(build.metrics.damage, asReported.damage) || !close(build.metrics.ehp, asReported.ehp))
     add("error", "EVAL_MISMATCH", `generator metrics (${Math.round(build.metrics.damage)} / ${Math.round(build.metrics.ehp)}) differ from a re-evaluation with the same skill points (${Math.round(asReported.damage)} / ${Math.round(asReported.ehp)})`);
   if (params.cycle.ids.length) {
@@ -284,7 +299,7 @@ export async function checkBuild(scenario, build, { limits = DEFAULT_LIMITS, pai
 
   // 4. "passed" must mean every hard filter holds.
   if (build.passed && !asReported.feasible)
-    add("error", "PASSED_BUT_INFEASIBLE", `build says it passes, but: ${[!asReported.spOk && "skill points", !asReported.ehpOk && `EHP ${Math.round(asReported.ehp)} < ${params.minEhp}`, !asReported.manaOk && `mana ${asReported.manaNet.toFixed(2)}/s`, !asReported.sustainOk && `sustain ${asReported.sustain.toFixed(1)}`, asReported.illegal && "illegal set", asReported.clash && "ring duplicate"].filter(Boolean).join(", ")}`);
+    add("error", "PASSED_BUT_INFEASIBLE", `build says it passes, but: ${[!asReported.spOk && "skill points", !asReported.ehpOk && `EHP ${Math.round(asReported.ehp)} < ${params.minEhp}`, !asReported.manaOk && `mana ${asReported.manaNet.toFixed(2)}/s`, !asReported.sustainOk && `sustain ${asReported.sustain.toFixed(1)}`, !asReported.speedOk && `walk speed ${Math.round(asReported.walkSpeed)}%`, asReported.illegal && "illegal set", asReported.clash && "ring duplicate"].filter(Boolean).join(", ")}`);
   if (!build.passed && asReported.feasible) add("error", "FEASIBLE_BUT_FAILED", "build reports a failed filter although every filter holds");
 
   // 5. Local optimality: no single swap (any allowed item, any powder element on the weapon) may improve the

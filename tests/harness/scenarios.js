@@ -51,6 +51,9 @@ export function archetypeCycles(playerClass, archetype, level, treeSettings) {
  *   ehpPct     minimum EHP as % of the reachable maximum (the UI slider; 0 = off)
  *   cycle      "none" | "first" | "random" | array of spell ids (0 = main attack, "M")
  *   cps, steal, gain, poison, drain, requireSustain, excludeEvents, tradeableOnly, options  as in the UI
+ *   mana, life, spd   range sliders (0.37): { min, max } with null = Any; mana = the cycle's mana balance (mana/s),
+ *              life = life recovery (HP/s), spd = walk speed (%). ranges: "defaults" = the UI defaults (mana 0..+1 with
+ *              a cycle, walk speed >= -20 %). Env MATRIX_RANGES=defaults applies them to every scenario.
  *   rolls      100 (default, max rolls like Wynnbuilder) | 50 ("Realistic rolls")
  *   random     rng() for the "random" choices
  */
@@ -76,6 +79,12 @@ export function makeScenario(s) {
   else if (s.cycle === "first" && cycles.length) cycleIds = cycles[0].ids;
   else if (s.cycle === "random" && cycles.length) cycleIds = r.pick(cycles).ids;
   const cycle = { ids: cycleIds, cps: s.cps ?? 3, steal: s.steal ?? true, gain: s.gain ?? true, poison: Boolean(s.poison), drain: s.drain ?? 0, buff: s.buff ?? 0 };
+  // range sliders (0.37): the UI defaults, or explicit ranges
+  const useDefaults = (s.ranges || process.env.MATRIX_RANGES) === "defaults";
+  const manaRange = s.mana !== undefined ? s.mana : useDefaults ? E.DEFAULT_DAMAGE_FORM.drain : undefined;
+  if (manaRange !== undefined) cycle.mana = manaRange;
+  const lifeRange = s.life !== undefined ? s.life : undefined;
+  const spdRange = s.spd !== undefined ? s.spd : useDefaults ? E.DEFAULT_DAMAGE_FORM.spd : null;
   if (s.goal === "cycle" && cycleIds.some((id) => id !== 0)) goal = E.DAMAGE_GOAL_CYCLE;
   const params = {
     playerClass,
@@ -87,6 +96,8 @@ export function makeScenario(s) {
     minEhp,
     requireSustain: Boolean(s.requireSustain),
     minSustain: s.lr ?? 0,
+    ...(lifeRange !== undefined ? { lifeRange } : {}),
+    spdRange: E.normalizeRange(spdRange),
     excludeEvents: s.excludeEvents ?? true,
     tradeableOnly: Boolean(s.tradeableOnly),
     options: E.normalizeOptions(s.options || {}),
@@ -94,7 +105,11 @@ export function makeScenario(s) {
     rollPercent: s.rolls ?? 100,
   };
   const goalName = (Array.isArray(goal) ? goal : [goal]).map((id) => (goals.find((entry) => entry.id === id) || { name: String(id) }).name).join(" + ");
-  const label = `${playerClass}/${archetype} L${level} ${goalName} EHP≥${ehpPct}%${cycleIds.length ? ` cycle ${E.cycleText(cycleIds)}@${cycle.cps}${cycle.drain ? ` drain ${cycle.drain}` : ""}` : ""}${cycle.poison ? " +poison" : ""}${params.rollPercent !== 100 ? ` rolls ${params.rollPercent}%` : ""}${params.requireSustain ? " sustain" : ""}${params.minSustain ? ` life≥${params.minSustain}` : ""}${params.tradeableOnly ? " tradeable" : ""}${params.excludeEvents ? "" : " +events"}${describeOptions(params.options)}`;
+  const rangeText = (name, range) => {
+    const r = E.normalizeRange(range);
+    return r ? ` ${name} ${r.min ?? "any"}..${r.max ?? "any"}` : "";
+  };
+  const label = `${playerClass}/${archetype} L${level} ${goalName} EHP≥${ehpPct}%${cycleIds.length ? ` cycle ${E.cycleText(cycleIds)}@${cycle.cps}${cycle.mana !== undefined ? rangeText("mana", cycle.mana) : cycle.drain ? ` drain ${cycle.drain}` : ""}` : ""}${lifeRange !== undefined ? rangeText("life", lifeRange) : ""}${rangeText("walk", spdRange)}${cycle.poison ? " +poison" : ""}${params.rollPercent !== 100 ? ` rolls ${params.rollPercent}%` : ""}${params.requireSustain ? " sustain" : ""}${params.minSustain ? ` life≥${params.minSustain}` : ""}${params.tradeableOnly ? " tradeable" : ""}${params.excludeEvents ? "" : " +events"}${describeOptions(params.options)}`;
   return { label, params, meta: { ehpMax, ehpPct, goals, cycles, treeIds: tree.ids } };
 }
 

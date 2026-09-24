@@ -58,6 +58,42 @@ describe("full search = every combination", () => {
   }
 });
 
+// 0.37 range sliders: with a maximum (mana surplus, life, walk speed) "more" isn't always better, so dominance may only
+// drop an item that has the same value of the bounded statistics. Checked against the raw pool (no pruning at all).
+describe("range sliders keep the full search exact", () => {
+  const cases = [
+    ["Mage", "necklace", { cycle: "cyc", mana: { min: -1, max: 0.5 } }],
+    ["Warrior", "boots", { spd: { min: 0, max: 25 } }],
+    ["Shaman", "bracelet", { life: { min: 20, max: 250 } }],
+    ["Archer", "helmet", { cycle: "cyc", mana: { min: null, max: 0 }, spd: { min: -10, max: null } }],
+  ];
+  for (const [playerClass, slotId, extra] of cases) {
+    it(`${playerClass}: ${slotId} · ${Object.keys(extra).filter((key) => key !== "cycle").join(" + ")}`, async () => {
+      const { ws: start } = guideWorkspace(playerClass);
+      const ws = withEmpty(start, [slotId]);
+      const params = paramsFor(ws, extra);
+      if (params.cycle === "cyc") params.cycle = `${params.goals.filter((goal) => typeof goal.id === "number").slice(0, 2).map((goal) => goal.id).join("")}M`;
+      delete params.goals;
+      const spec = E.optimizerSpec(ws, params);
+      const slots = E.optEmptySlots(spec);
+      const opt = E.optContext(spec, spec.treeIds, slots);
+      const fast = E.optBranchAndBound(opt, {});
+      // every candidate of the raw (unpruned) pool, evaluated the same way as a leaf of the search
+      let best = -Infinity;
+      for (const candidate of E.optCandidates(spec, slotId)) {
+        const items = [...opt.fixedItems, { ...candidate, __slot: slotId }];
+        const weapon = slotId === "weapon" ? items[items.length - 1] : opt.fixedWeapon;
+        if (!weapon) continue;
+        const result = E.optEvaluate(opt, items, weapon);
+        if (result && !result.infeasible && !result.below && result.value > best) best = result.value;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      if (best === -Infinity) expect(fast.best).toBe(-Infinity);
+      else expect(Math.abs(fast.best - best)).toBeLessThanOrEqual(1e-6 * Math.abs(best));
+    });
+  }
+});
+
 describe("Optimize keeps what the player picked", () => {
   it("Mage: empty boots + helmet, free AP, empty tomes and aspects - full search, changes only fill", async () => {
     const { ws: start } = guideWorkspace("Mage");

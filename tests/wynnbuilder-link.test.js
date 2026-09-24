@@ -1,88 +1,19 @@
-// "Open in Wynnbuilder": the build link must decode back to exactly what the app shows. The decoder below follows
-// Wynnbuilder's ENCODING.md (binary V12) on its own, so a mistake in the encoder can't hide behind the same mistake.
+// "Open in Wynnbuilder": the build link must decode back to exactly what the app shows (decoder: src, binary V12).
 // It also writes test-results/wynnbuilder-links.json (build + link) for a check in the real Wynnbuilder page.
+// 0.37: the build in the site's address (#b=<Wynnbuilder code>&s=<settings>) - round trip of 10 generator builds,
+// every guide link, and broken addresses that must never throw anything but a readable Error.
 import { describe, it, expect } from "vitest";
 import fs from "node:fs";
 import { E, makeScenario } from "./harness/scenarios.js";
 
 const B64 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz+-";
 const ENC = E.WB_IDS.encoding;
-const NAME_OF = new Map(Object.entries(E.WB_IDS.items).map(([name, id]) => [id, name]));
 
-function reader(hash) {
-  const bits = [];
-  for (const char of hash) {
-    const value = B64.indexOf(char);
-    if (value < 0) throw new Error(`bad character ${char}`);
-    for (let j = 0; j < 6; j++) bits.push((value >> j) & 1);
-  }
-  let at = 0;
-  const read = (length) => {
-    let value = 0;
-    for (let i = 0; i < length; i++) value |= bits[at + i] << i;
-    at += length;
-    return value >>> 0;
-  };
-  return { read, rest: () => bits.slice(at), get at() { return at; }, length: bits.length };
-}
-
-function decodePowders(r) {
-  const tiers = ENC.POWDER_TIERS;
-  const count = ENC.POWDER_ELEMENTS.length;
-  const out = [r.read(ENC.POWDER_ID_BITLEN)];
-  for (;;) {
-    const prev = out[out.length - 1];
-    if (r.read(ENC.POWDER_REPEAT_OP.BITLEN) === ENC.POWDER_REPEAT_OP.REPEAT) {
-      out.push(prev);
-      continue;
-    }
-    if (r.read(ENC.POWDER_REPEAT_TIER_OP.BITLEN) === ENC.POWDER_REPEAT_TIER_OP.REPEAT_TIER) {
-      const wrap = r.read(ENC.POWDER_WRAPPER_BITLEN);
-      const element = (Math.floor(prev / tiers) + wrap + 1) % count;
-      out.push(element * tiers + (prev % tiers));
-      continue;
-    }
-    if (r.read(ENC.POWDER_CHANGE_OP.BITLEN) === ENC.POWDER_CHANGE_OP.NEW_POWDER) {
-      out.push(r.read(ENC.POWDER_ID_BITLEN));
-      continue;
-    }
-    return out;
-  }
-}
-
-export function decodeWynnbuilderHash(hash) {
-  const r = reader(hash);
-  const legacy = r.read(6);
-  const version = r.read(10);
-  const items = [];
-  const powders = [];
-  for (let i = 0; i < ENC.EQUIPMENT_NUM; i++) {
-    const kind = r.read(ENC.EQUIPMENT_KIND.BITLEN);
-    if (kind !== ENC.EQUIPMENT_KIND.NORMAL) throw new Error(`slot ${i}: kind ${kind}`);
-    const id = r.read(ENC.ITEM_ID_BITLEN);
-    items.push(id === 0 ? null : NAME_OF.get(id - 1) || `#${id - 1}`);
-    if ([0, 1, 2, 3, 8].includes(i)) powders.push(r.read(1) === ENC.EQUIPMENT_POWDERS_FLAG.HAS_POWDERS ? decodePowders(r) : []);
-  }
-  const tomes = [];
-  if (r.read(1) === ENC.TOMES_FLAG.HAS_TOMES)
-    for (let i = 0; i < ENC.TOME_NUM; i++) tomes.push(r.read(1) === ENC.TOME_SLOT_FLAG.USED ? r.read(ENC.TOME_ID_BITLEN) : null);
-  let sp = null;
-  if (r.read(1) === ENC.SP_FLAG.ASSIGNED) {
-    sp = [];
-    for (let i = 0; i < ENC.SP_TYPES; i++) {
-      if (r.read(1) === ENC.SP_ELEMENT_FLAG.ELEMENT_ASSIGNED) {
-        const shift = 32 - ENC.MAX_SP_BITLEN;
-        sp.push((r.read(ENC.MAX_SP_BITLEN) << shift) >> shift);
-      } else sp.push(null);
-    }
-  }
-  const level = r.read(1) === ENC.LEVEL_FLAG.MAX ? ENC.MAX_LEVEL : r.read(ENC.LEVEL_BITLEN);
-  const aspects = [];
-  if (r.read(1) === ENC.ASPECTS_FLAG.HAS_ASPECTS)
-    for (let i = 0; i < ENC.NUM_ASPECTS; i++) aspects.push(r.read(1) === ENC.ASPECT_SLOT_FLAG.USED ? { id: r.read(ENC.ASPECT_ID_BITLEN), tier: r.read(ENC.ASPECT_TIER_BITLEN) + 1 } : null);
-  const treeBits = r.rest();
-  return { legacy, version, items, powders, tomes, sp, level, aspects, treeBits };
-}
+// The decoder lives in src (next to the encoder, used by the Creator's import and by #b= links); it follows
+// Wynnbuilder's ENCODING.md on its own code path, so a mistake in the encoder can't hide behind the same mistake.
+const decodeWynnbuilderHash = E.decodeWynnbuilderHash;
+// give vitest's worker RPC a turn between long synchronous stretches
+const tick = () => new Promise((resolve) => setImmediate(resolve));
 
 const CASES = [
   ["Archer", 0, 45], ["Archer", 1, 106],
@@ -147,5 +78,128 @@ describe("Open in Wynnbuilder link", () => {
     }
     fs.mkdirSync("test-results", { recursive: true });
     fs.writeFileSync("test-results/wynnbuilder-links.json", JSON.stringify(out, null, 1));
+  });
+});
+
+describe("Build Solver result in Wynnbuilder (header link, 0.37)", () => {
+  it("opens with the same 9 items and the current class tree", () => {
+    const solved = E.solveBuilds(100, { ...E.DEFAULT_SOLVER, playerClass: "Mage", archetype: "Riftwalker" });
+    const candidate = solved.candidates[0] || solved.nearMisses[0];
+    const build = E.solverBuildResult(candidate, solved, solved.archetype);
+    const tree = E.suggestAbilityTree("Mage", "Riftwalker", E.abilityPointCap(100, 0)).ids;
+    const link = E.wynnbuilderLink(build, tree, null);
+    expect(link.missing).toEqual([]);
+    const d = decodeWynnbuilderHash(link.hash);
+    expect(d.items).toEqual(build.slots.map((slot) => (slot.item ? slot.item.name : null)));
+    expect(d.level).toBe(100);
+  });
+});
+
+describe("build link in the site's address (#b=&s=)", () => {
+  it("10 generator builds: encode -> decode gives the same items, powders, skill points, level, tree and settings", async () => {
+    for (const [index, [playerClass, archIndex, level]] of CASES.entries()) {
+      await tick();
+      const archetype = E.CLASSES[playerClass].archetypes[archIndex];
+      const scenario = makeScenario({ playerClass, archetype, level, goal: "first", ehpPct: 20, cycle: "first", cps: 3, ranges: "defaults" });
+      const build = await E.generateDamageBuild({ ...scenario.params, effort: "quick", onProgress: () => {} });
+      const treeIds = scenario.params.treeSettings.selected;
+      const link = E.wynnbuilderLink(build, treeIds, null);
+      // settings as the form holds them (ranges differ per case so every field is exercised)
+      const form = {
+        ...E.DEFAULT_DAMAGE_FORM,
+        preset: archetype,
+        goal: build.goal,
+        cycle: E.cycleText(scenario.params.cycle.ids),
+        cps: 3 + (index % 3),
+        minEhp: scenario.params.minEhp,
+        drain: index % 2 ? { min: -3, max: 1 } : { min: 0, max: null },
+        lr: index % 3 === 0 ? { min: 20, max: 400 } : { min: null, max: null },
+        spd: index % 4 === 0 ? { min: null, max: null } : { min: -20 + index * 5, max: index === 5 ? 60 : null },
+        rolls: index % 2 ? "avg" : "max",
+        poison: index === 3,
+        tradeable: index === 4,
+      };
+      const heavy = build.slots.find((slot) => slot.item && slot.id === "helmet");
+      const options = E.normalizeOptions({ excluded: ["Morph-Stardust", "Warsong"], locked: heavy ? { helmet: heavy.item.name } : {}, excludedTiers: index === 2 ? ["Mythic"] : [] });
+      const s = E.encodeShareSettings({ form, options, rank: index % 2 ? "vip" : "" });
+      const address = `https://szvm3k.github.io/builderwynncraft/#b=${link.hash}&s=${s}`;
+      const parsed = E.parseBuildHash(address);
+      expect(parsed).toEqual({ b: link.hash, s });
+      const opened = E.buildFromShare(parsed);
+      // items and powders
+      expect(opened.build.slots.map((slot) => (slot.item ? slot.item.name : null))).toEqual(build.slots.map((slot) => (slot.item ? slot.item.name : null)));
+      const weapon = build.slots.find((slot) => slot.id === "weapon").item;
+      const powderOf = (item) => (item && item.powders && item.powders.list ? item.powders.list.map((p) => `${p.element}${p.tier}`).sort().join(" ") : "");
+      expect(powderOf(opened.build.slots.find((slot) => slot.id === "weapon").item)).toBe(powderOf(weapon));
+      // skill points (totals), level, class, tree
+      expect(E.SKILLS.map((skill) => opened.build.skillPoints.totals[skill])).toEqual(E.SKILLS.map((skill) => Math.round(build.skillPoints.totals[skill])));
+      expect(opened.build.level).toBe(level);
+      expect(opened.ws.playerClass).toBe(playerClass);
+      expect(treeIds.every((id) => opened.ws.tree.includes(id))).toBe(true);
+      // settings
+      const back = opened.settings;
+      expect(back.form.drain).toEqual(E.normalizeRange(form.drain) || { min: null, max: null });
+      expect(back.form.lr).toEqual(E.normalizeRange(form.lr) || { min: null, max: null });
+      expect(back.form.spd).toEqual(E.normalizeRange(form.spd) || { min: null, max: null });
+      for (const key of ["goal", "cycle", "cps", "minEhp", "rolls", "poison", "tradeable", "noEvents", "freeSp", "preset"]) expect(back.form[key]).toEqual(form[key]);
+      expect(back.options.excluded).toEqual(options.excluded);
+      expect(back.options.locked).toEqual(options.locked);
+      expect(back.options.excludedTiers).toEqual(options.excludedTiers);
+      expect(back.rank).toBe(index % 2 ? "vip" : "");
+    }
+  });
+
+  it("every guide link opens with the same items as the Guide build view", async () => {
+    let checked = 0;
+    for (const [index, guide] of E.GUIDE_DATA.builds.entries()) {
+      if (index % 8 === 0) await tick();
+      const parsed = E.parseBuildHash(guide.url);
+      expect(parsed && parsed.b).toBeTruthy();
+      let opened;
+      try {
+        opened = E.buildFromShare(parsed);
+      } catch (error) {
+        // a crafted weapon: no class from the link (the Creator's import still reads it)
+        expect(error).toBeInstanceOf(Error);
+        expect(E.workspaceFromWynnbuilderLink(guide.url).ws.items.weapon).toBeUndefined();
+        continue;
+      }
+      E.SLOTS.forEach((slot) => {
+        const expected = guide.items[slot.id] && E.ITEM_BY_NAME.has(guide.items[slot.id]) ? guide.items[slot.id] : null;
+        const got = opened.ws.items[slot.id] || null;
+        if (expected) expect(got).toBe(expected);
+      });
+      checked += 1;
+    }
+    expect(checked).toBeGreaterThan(80);
+  });
+
+  it("a broken address never throws anything but a readable Error", async () => {
+    const valid = E.GUIDE_DATA.builds[0].url.split("#")[1];
+    const inputs = [];
+    let seed = 7;
+    const random = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+    for (let i = 0; i < 150; i += 1) {
+      const length = 1 + Math.floor(random() * 120);
+      inputs.push(Array.from({ length }, () => B64[Math.floor(random() * 64)]).join(""));
+    }
+    for (let cut = 1; cut < valid.length; cut += 3) inputs.push(valid.slice(0, cut));
+    inputs.push("%%%", "b=", "b=@@@", "b=abc&s=%%%", `b=${valid}&s=abc`, `b=${valid}&s=${Buffer.from('{"v":99}').toString("base64url")}`);
+    let errors = 0;
+    for (const [index, text] of inputs.entries()) {
+      if (index % 10 === 0) await tick();
+      const parsed = E.parseBuildHash(text.startsWith("b=") ? `#${text}` : `#b=${text}`);
+      if (!parsed) continue;
+      try {
+        E.buildFromShare(parsed);
+      } catch (error) {
+        errors += 1;
+        expect(error.constructor).toBe(Error);
+        expect(String(error.message).length).toBeGreaterThan(10);
+      }
+    }
+    expect(errors).toBeGreaterThan(50);
+    // a newer settings format is refused with a message
+    expect(() => E.decodeShareSettings(Buffer.from('{"v":99}').toString("base64url"))).toThrow(/newer version/);
   });
 });
