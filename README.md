@@ -373,6 +373,17 @@ behaviour). All 30 default builds pass, with no warnings.
 - **Time.** When the *Any* build doesn't fit, the default run takes a median 1.2-1.3× as long (0.6-4.7× on a
   2-core machine running both shards at once).
 
+### Left panel fits, version in Info (0.39.2)
+
+- **Nothing is cut off in the left panel.** A `<fieldset>` never shrinks below its widest line (the browser default
+  `min-width: min-content`), so a long guide tree name ("Sharpshooter · Stratiformis +5 · Stratiformis, Grandmother")
+  made the Ability tree block wider than the panel and the panel's `clip-path` cut its right side (archetype buttons,
+  search box, guide trees). Fieldsets now shrink (`.wbr-mc fieldset{min-width:0}`), long guide tree names end
+  with "…" (full text on hover) and are left-aligned, and archetype buttons wrap to a second row instead of being
+  cut (Sharpshooter, Light Bender, Battle Monk).
+- **Version in Info.** The Info window (bottom right) shows "Info · v0.39.2" above its title, and the Info button's
+  hover text ends with the version. It comes from `package.json`, so bumping the version there is enough.
+
 ### Fixes: dialogs, guide tree button, guide builds (0.39.1)
 
 **Dialogs open on top of the page.** Panels (`.mc-panel`) have pixel corners made with `clip-path`, and a

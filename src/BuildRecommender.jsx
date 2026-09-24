@@ -12,6 +12,10 @@ import { CLASS_PORTRAITS, ITEM_SHEET, ITEM_SHEET_ORDER } from "./game-icons.js";
 import EVENT_ITEMS from "./event-items.json";
 import TOMES_ASPECTS from "./tomes-aspects.json";
 import WB_IDS from "./wynnbuilder-ids.json";
+import PACKAGE_INFO from "../package.json";
+
+// Wersja strony (package.json) - w oknie Info i w podpowiedzi przycisku Info (0.39.2)
+const APP_VERSION = PACKAGE_INFO.version;
 
 /*
  * Wynncraft Build Recommender (MVP)
@@ -4010,6 +4014,7 @@ const MC_STYLES = `
 .wbr-mc .font-bold{font-weight:700}
 .wbr-mc .mc-title,.wbr-mc h1,.wbr-mc h2,.wbr-mc h3{font-weight:700}
 .wbr-mc .mc-btn{font-weight:600}
+.wbr-mc fieldset{min-width:0}
 .wbr-mc .tabular-nums{font-variant-numeric:tabular-nums}
 .wbr-mc .text-zinc-50,.wbr-mc .text-zinc-100{color:#fff}
 .wbr-mc .text-zinc-200,.wbr-mc .text-zinc-300{color:#e0e0e0}
@@ -9320,9 +9325,9 @@ function DamageForm({
       {playerClass && level && (
         <fieldset className="wbr-fade flex flex-col gap-1.5">
           <legend className={`${label} mb-1.5`}>Ability tree</legend>
-          <div className="grid grid-cols-3 gap-1.5">
+          <div className="flex flex-wrap gap-1.5">
             {classConfig.archetypes.map((arch) => (
-              <button key={arch} type="button" onClick={() => onPreset(arch)} className={`mc-btn mc-btn-sm flex w-full items-center justify-center px-1 leading-tight ${form.preset === arch ? "mc-btn-on" : ""}`} title={`Load the suggested ${arch} tree for level ${level}`}>
+              <button key={arch} type="button" onClick={() => onPreset(arch)} className={`mc-btn mc-btn-sm flex flex-auto items-center justify-center px-2 leading-tight ${form.preset === arch ? "mc-btn-on" : ""}`} title={`Load the suggested ${arch} tree for level ${level}`}>
                 {arch}
               </button>
             ))}
@@ -9734,8 +9739,8 @@ function GuideTreePresets({ playerClass, archetype, apCap, selected, onPick, com
           const trimmed = preset.points > apCap;
           const title = `${preset.builds.join(", ")}. ${preset.points} AP${trimmed ? `; your ${apCap} AP keep the most useful part of it (the full tree comes back when you level up)` : ""}.${preset.cycle ? ` Guide cycle: ${preset.cycle.name} (${preset.cycle.cycle}).` : ""}`;
           return compact ? (
-            <button key={preset.id} type="button" onClick={() => onPick(preset)} title={title} className={`mc-btn mc-btn-sm w-full min-w-0 justify-start overflow-hidden text-left ${on ? "mc-btn-on" : ""}`}>
-              <span className="min-w-0 truncate">
+            <button key={preset.id} type="button" onClick={() => onPick(preset)} title={title} className={`mc-btn mc-btn-sm w-full min-w-0 justify-start overflow-hidden text-left ${on ? "mc-btn-on" : ""}`} style={{ textAlign: "left" }}>
+              <span className="block min-w-0 truncate">
                 {preset.name}
                 <span className="text-zinc-500"> · {preset.community ? `community${preset.author ? `, ${preset.author}` : ""}` : `${preset.weapons.slice(0, 2).join(", ")}${preset.weapons.length > 2 ? "…" : ""}`}{trimmed ? ` · trimmed to ${apCap} AP` : ""}</span>
               </span>
@@ -11963,7 +11968,7 @@ function InfoButton() {
   }, [open]);
   return (
     <>
-      <button type="button" className="mc-btn wbr-info-fab" onClick={() => setOpen(true)} aria-haspopup="dialog" title="How to use the Build Recommender and how it calculates">
+      <button type="button" className="mc-btn wbr-info-fab" onClick={() => setOpen(true)} aria-haspopup="dialog" title={`How to use the Build Recommender and how it calculates · version ${APP_VERSION}`}>
         <span className="wbr-info-icon" aria-hidden="true">
           i
         </span>
@@ -11988,7 +11993,9 @@ function InfoDialogBody({ onClose }) {
       <div className="wbr-pop wbr-welcome flex max-h-full w-full max-w-3xl flex-col">
         <div className="wbr-welcome-head flex items-center justify-between gap-3 px-5 pb-4 pt-5">
           <div className="flex min-w-0 flex-col gap-1">
-            <span className="wbr-hero-kicker">Info</span>
+            <span className="wbr-hero-kicker">
+              Info · <span style={{ textTransform: "none" }}>v{APP_VERSION}</span>
+            </span>
             <h2 id="wbr-info-title" className="wbr-hero-title wbr-welcome-title">
               How to use it
             </h2>
@@ -18818,13 +18825,13 @@ function WorkspaceSetup({ mode, ws, onWs }) {
       <span className="text-xs text-zinc-300">
         Archetype{mode === "creator" ? <span className="text-zinc-500"> (optional: Build info and guide builds)</span> : ""}
       </span>
-      <div className="grid grid-cols-3 gap-1.5">
+      <div className="flex flex-wrap gap-1.5">
         {archetypes.map((arch) => (
           <button
             key={arch}
             type="button"
             onClick={() => onWs((current) => ({ ...current, archetype: current.archetype === arch && mode === "creator" ? "" : arch }))}
-            className={`mc-btn mc-btn-sm flex w-full items-center justify-center px-1 text-center leading-tight ${ws.archetype === arch ? "mc-btn-on" : ""}`}
+            className={`mc-btn mc-btn-sm flex flex-auto items-center justify-center px-2 text-center leading-tight ${ws.archetype === arch ? "mc-btn-on" : ""}`}
             style={{ whiteSpace: "normal", minHeight: 36, fontSize: 14, overflowWrap: "anywhere" }}
             aria-pressed={ws.archetype === arch}
           >
