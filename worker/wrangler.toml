@@ -7,7 +7,7 @@ compatibility_date = "2025-09-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "wbr"
-database_id = "REPLACE_WITH_DATABASE_ID"
+database_id = "b92a843b-8355-452d-ad6d-0c3085f45813"
 
 [vars]
 # Only this site may call the API from a browser (comma-separated; empty = any).
