@@ -2045,9 +2045,11 @@ async function generateDamageBuild(args) {
   const mana = hasCycle ? manaRangeOf(cycleIn) : null;
   const life = args.lifeRange !== undefined ? normalizeRange(args.lifeRange) : rangeFromMinimum(args.minSustain);
   const spd = normalizeRange(args.spdRange);
-  if (!(mana && mana.max !== null) && !(life && life.max !== null) && !(spd && spd.max !== null)) return generateDamageBuildOnce(args);
+  const ehpMaxArg = Number(args.maxEhp) > 0 ? Math.max(Number(args.maxEhp), Number(args.minEhp) || 0) : null;
+  if (!(mana && mana.max !== null) && !(life && life.max !== null) && !(spd && spd.max !== null) && ehpMaxArg === null) return generateDamageBuildOnce(args);
   const relaxed = await generateDamageBuildOnce({
     ...args,
+    maxEhp: null,
     cycle: hasCycle ? { ...cycleIn, mana: mana ? { min: mana.min, max: null } : null } : cycleIn,
     lifeRange: life ? normalizeRange({ min: life.min, max: null }) : null,
     minSustain: 0,
@@ -2056,10 +2058,10 @@ async function generateDamageBuild(args) {
   });
   const m = relaxed.metrics;
   const fullCycle = normalizeCycle(cycleIn);
-  const fits = relaxed.passed && (!hasCycle || manaOk(m, fullCycle)) && inRange(m.sustain, life) && inRange(m.walkSpeed, spd);
+  const fits = relaxed.passed && (!hasCycle || manaOk(m, fullCycle)) && inRange(m.sustain, life) && inRange(m.walkSpeed, spd) && (ehpMaxArg === null || m.ehp <= ehpMaxArg + 1e-9);
   if (fits) {
     // ten sam build, opisany zakresami gracza (podsumowanie, Why this build?, link)
-    return { ...relaxed, metrics: { ...m, cycle: fullCycle, lifeRange: life, spdRange: spd, minSustain: life && life.min !== null ? Math.max(0, life.min) : 0 }, stats: { ...relaxed.stats, ranges: "fit on the first search" } };
+    return { ...relaxed, metrics: { ...m, cycle: fullCycle, lifeRange: life, spdRange: spd, minSustain: life && life.min !== null ? Math.max(0, life.min) : 0, maxEhp: ehpMaxArg }, stats: { ...relaxed.stats, ranges: "fit on the first search" } };
   }
   const seed = { picks: Object.fromEntries(relaxed.slots.filter((slot) => slot.item && slot.id !== "weapon").map((slot) => [slot.id, slot.item])), weapon: relaxed.slots.find((slot) => slot.id === "weapon").item };
   const onProgress = args.onProgress ? (progress) => args.onProgress({ ...progress, label: `Fitting the ranges: ${String(progress.label || "").charAt(0).toLowerCase()}${String(progress.label || "").slice(1)}` }) : null;
@@ -2068,7 +2070,7 @@ async function generateDamageBuild(args) {
   return { ...constrained, stats: { ...constrained.stats, ranges: "second search with the ranges" } };
 }
 
-async function generateDamageBuildOnce({ playerClass, level, archetype = null, treeSettings, goal, cycle, minEhp = 0, requireSustain = false, minSustain = 0, lifeRange = undefined, spdRange = null, secondSearch = false, options = DEFAULT_OPTIONS, items = ITEM_DB, powders = "auto", objective = "damage", onProgress = null, seeds = [], excludeEvents = true, tradeableOnly = false, effort = "full", spendFreeSkillPoints = true, task = null, parallel = null, caches = null, rollPercent = 100, spReserve = 0 }) {
+async function generateDamageBuildOnce({ playerClass, level, archetype = null, treeSettings, goal, cycle, minEhp = 0, maxEhp = null, requireSustain = false, minSustain = 0, lifeRange = undefined, spdRange = null, secondSearch = false, options = DEFAULT_OPTIONS, items = ITEM_DB, powders = "auto", objective = "damage", onProgress = null, seeds = [], excludeEvents = true, tradeableOnly = false, effort = "full", spendFreeSkillPoints = true, task = null, parallel = null, caches = null, rollPercent = 100, spReserve = 0 }) {
   // "Realistic rolls": wszystkie losowane ID przy podanym rollu (np. 50%) zamiast maksymalnych
   if (rollPercent < 100) items = rolledItems(items, rollPercent);
   // effort "quick" (lista buildów dla każdego progu EHP): bez wiązki z zapasem EHP i wiązek pod inne czary,
@@ -2215,6 +2217,11 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
   // Jak daleko zestawowi do progów (0 = przechodzi): używane przy naprawie, gdy nic nie przechodzi od razu.
   // Próg EHP, na który aktualnie szukamy: zwykle minEhp, na czas przebiegu "z zapasem" wyższy (krok 2b).
   let ehpTarget = minEhp;
+  // Górna granica EHP (suwak Effective HP, 0.38; null = Any): jak inne górne granice - łagodna kara w przybliżonym
+  // szukaniu, twarda w dokładnym etapie. Wolne skill pointy (DEF/AGI) tylko podnoszą EHP, więc sprawdza ją ocena bez nich.
+  const ehpCeil = Number.isFinite(Number(maxEhp)) && Number(maxEhp) > 0 && maxEhp !== null ? Math.max(Number(maxEhp), minEhp || 0) : null;
+  const ehpLimits = ehpCeil !== null ? { min: minEhp > 0 ? minEhp : null, max: ehpCeil } : null;
+  const ehpScale = Math.max(1, ehpCeil || 1) * 0.25;
   // Życie: zakres Life recovery w HP/s (lifeRange; stary zapis: minSustain) i stary warunek "> 0" (requireSustain):
   // Health Regen / 4 s + Life Steal z trafień main attacku w cyklu.
   const lifeLimits = lifeRange !== undefined ? normalizeRange(lifeRange) : rangeFromMinimum(minSustain);
@@ -2232,16 +2239,19 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
   // górne granice (nadwyżka many, życie, Walk Speed) - wolne skill pointy ich nie obniżają, więc sprawdza je ocena bez
   // wolnych punktów (zob. evaluateExact)
   const upperOk = (metrics) =>
+    (ehpCeil === null || metrics.ehp <= ehpCeil + 1e-9) &&
     (manaCeil === null || metrics.manaNet <= manaCeil + 1e-9) &&
     (!lifeLimits || lifeLimits.max === null || metrics.sustain <= lifeLimits.max + 1e-9) &&
     (!spdLimits || spdLimits.max === null || metrics.walkSpeed <= spdLimits.max + 1e-9);
   const upperMiss = (metrics) =>
+    (ehpCeil !== null && metrics.ehp > ehpCeil ? rangeMiss(metrics.ehp, ehpLimits, ehpScale) : 0) +
     (manaCeil !== null && metrics.manaNet > manaCeil ? rangeMiss(metrics.manaNet, manaLimits, RANGE_SCALE.mana) : 0) +
     (lifeLimits && lifeLimits.max !== null && metrics.sustain > lifeLimits.max ? rangeMiss(metrics.sustain, lifeLimits, RANGE_SCALE.life) : 0) +
     (spdLimits && spdLimits.max !== null && metrics.walkSpeed > spdLimits.max ? rangeMiss(metrics.walkSpeed, spdLimits, RANGE_SCALE.spd) : 0);
   const shortfall = (metrics) => {
     let miss = metrics.spOver / 10;
     if (ehpTarget > 0 && metrics.ehp < ehpTarget) miss += 1 - metrics.ehp / ehpTarget;
+    if (ehpCeil !== null && metrics.ehp > ehpCeil) miss += Math.min(1, rangeMiss(metrics.ehp, ehpLimits, ehpScale));
     if (!sustainOk(metrics)) miss += 0.5 + Math.min(1, lifeLimits ? rangeMiss(metrics.sustain, lifeLimits, Math.max(RANGE_SCALE.life, lifeFloor)) : Math.max(0, -metrics.sustain) / RANGE_SCALE.life);
     if (cycleCfg.ids.length > 0 && metrics.manaUsed > 0) {
       if (manaFloor !== null) {
@@ -2757,6 +2767,7 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
   const exactOk = (metrics) =>
     metrics.spOver === 0 &&
     (minEhp <= 0 || metrics.ehp >= minEhp) &&
+    (ehpCeil === null || metrics.ehp <= ehpCeil + 1e-9) &&
     sustainOk(metrics) &&
     manaOk(metrics, cycleCfg) &&
     spdOk(metrics) &&
@@ -2883,6 +2894,7 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
       sp.total <= ctx.available &&
       sp.capOverflow === 0 &&
       (minEhp <= 0 || metrics.ehp >= minEhp) &&
+      (ehpCeil === null || metrics.ehp <= ehpCeil + 1e-9) &&
       manaOk(metrics, cycleCfg) &&
       sustainOk(metrics) &&
       spdOk(metrics)
@@ -3138,7 +3150,7 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
   };
   // zadania w innych wątkach liczą się z ustawieniami tego szukania (pierwsze szukanie bez górnych granic zakresów
   // różni się od parametrów całego zlecenia)
-  const taskOverride = { cycle, lifeRange: lifeLimits, spdRange: spdLimits, minSustain, requireSustain };
+  const taskOverride = { cycle, lifeRange: lifeLimits, spdRange: spdLimits, minSustain, requireSustain, maxEhp: ehpCeil };
   // Tryb zadania (wątek pomocniczy): bez wiązki, tylko jedno zadanie od podanego startu.
   if (task) {
     const start = unpackCandidate(task.start);
@@ -3292,6 +3304,7 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
   const passed =
     spValid &&
     (minEhp <= 0 || finalMetrics.ehp >= minEhp) &&
+    (ehpCeil === null || finalMetrics.ehp <= ehpCeil + 1e-9) &&
     manaOk(finalMetrics, cycleCfg) &&
     sustainOk(finalMetrics) &&
     spdOk(finalMetrics);
@@ -3300,6 +3313,10 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
   if (minEhp > 0 && finalMetrics.ehp < minEhp)
     warnings.push(
       `Nothing with these settings reaches ${formatNumber(Math.round(minEhp))} effective HP; the closest build (${formatNumber(Math.round(finalMetrics.ehp))}) is shown. Lower the effective HP slider or relax the mana cycle.`
+    );
+  else if (ehpCeil !== null && finalMetrics.ehp > ehpCeil + 1e-9)
+    warnings.push(
+      `Nothing with these settings stays under ${formatNumber(Math.round(ehpCeil))} effective HP; the closest build has ${formatNumber(Math.round(finalMetrics.ehp))}. Raise the effective HP maximum or set it to Any.`
     );
   if (requireSustain && finalMetrics.sustain <= 0)
     warnings.push(`Nothing with these settings keeps life sustain above zero; the closest build loses ${Math.abs(finalMetrics.sustain).toFixed(1)} health per second. Turn off the life sustain filter or lower the other thresholds.`);
@@ -3330,7 +3347,7 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
   // kilka zakresów naraz bez rozwiązania: który jest najdalej
   {
     const misses = [
-      ["effective HP", minEhp > 0 && finalMetrics.ehp < minEhp ? 1 - finalMetrics.ehp / minEhp : 0],
+      ["effective HP", minEhp > 0 && finalMetrics.ehp < minEhp ? 1 - finalMetrics.ehp / minEhp : rangeMiss(finalMetrics.ehp, ehpLimits, ehpScale)],
       ["mana", cycleCfg.ids.length > 0 ? rangeMiss(finalMetrics.manaNet, manaLimits, RANGE_SCALE.mana) : 0],
       ["life recovery", rangeMiss(finalMetrics.sustain, lifeLimits, Math.max(RANGE_SCALE.life, lifeFloor))],
       ["walk speed", rangeMiss(finalMetrics.walkSpeed, spdLimits, RANGE_SCALE.spd)],
@@ -3386,6 +3403,7 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
       healthGain: finalMetrics.healthGain || 0,
       poisonDps: finalMetrics.poisonDps || 0,
       minEhp,
+      maxEhp: ehpCeil,
       cycle: cycleCfg,
     },
     warnings,
@@ -4135,6 +4153,16 @@ select.mc-input option{background:#000;color:#fff}
 .wbr-mc .wbr-info-fab{position:fixed;right:16px;bottom:16px;z-index:55;display:inline-flex;align-items:center;gap:8px;padding:6px 12px 6px 7px;box-shadow:0 4px 14px rgba(0,0,0,.45)}
 .wbr-info-icon{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border:2px solid #000;border-radius:50%;background:#55FFFF;color:#101228;font:italic 700 15px/1 Georgia,"Times New Roman",serif;text-shadow:none}
 .wbr-info-note{border:2px solid #FFAA00;background:rgba(255,170,0,.08);padding:10px 12px}
+.wbr-share-preview{background:#313338;color:#dbdee1;border:2px solid #000;padding:8px 10px;font:14px/1.375 "gg sans","Noto Sans","Helvetica Neue",Helvetica,Arial,sans-serif;text-shadow:none;overflow-wrap:anywhere}
+.wbr-share-title{font-weight:700;color:#f2f3f5}
+.wbr-share-link{display:block;color:#00a8fc;text-decoration:none}
+.wbr-share-link:hover{text-decoration:underline}
+.wbr-share-quote{margin-top:4px;border-left:4px solid #4e5058;padding-left:10px}
+.wbr-sub{color:#FFAA00;font-weight:700}
+.wbr-sep{height:6px;flex-shrink:0;margin:0 -16px;background:#15131b;box-shadow:inset 0 2px 0 #0b0a0e,inset 0 -2px 0 #2a2633}
+.wbr-sep-wide{margin:0 -20px}
+.wbr-mc[data-theme=light] .wbr-sub{color:#854A00}
+.wbr-mc[data-theme=light] .wbr-sep{background:#D6D2DE;box-shadow:inset 0 2px 0 #BDB8C8,inset 0 -2px 0 #F7F6FA}
 .wbr-info-list{counter-reset:wbrstep;display:flex;flex-direction:column;gap:6px}
 .wbr-info-list>li{position:relative;padding-left:30px;counter-increment:wbrstep}
 .wbr-info-list>li::before{content:counter(wbrstep);position:absolute;left:0;top:.1em;min-width:20px;height:20px;display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:#101228;background:#FFAA00;text-shadow:none}
@@ -5698,6 +5726,7 @@ function damageAlternatives(build, slotId, limit, pool) {
   const ctx = damageGoalContext(build.playerClass, build.level, build.treeSettings);
   const cycle = build.metrics.cycle;
   const minEhp = build.metrics.minEhp || 0;
+  const maxEhp = Number(build.metrics.maxEhp) > 0 ? build.metrics.maxEhp : null;
   const current = build.slots.find((entry) => entry.id === slotId).item;
   const others = build.slots.filter((entry) => entry.item && entry.id !== slotId).map((entry) => entry.item);
   const weapon = slotId === "weapon" ? null : (build.slots.find((entry) => entry.id === "weapon") || {}).item;
@@ -5726,6 +5755,7 @@ function damageAlternatives(build, slotId, limit, pool) {
         spOver === 0 &&
         !illegalSet &&
         (minEhp <= 0 || metrics.ehp >= minEhp) &&
+        (maxEhp === null || metrics.ehp <= maxEhp + 1e-9) &&
         manaOk(metrics, cycle) &&
         sustainPasses({ ...metrics, requireSustain: build.metrics.requireSustain, minSustain: build.metrics.minSustain, lifeRange: build.metrics.lifeRange }) &&
         speedPasses({ walkSpeed: metrics.walkSpeed, spdRange: build.metrics.spdRange });
@@ -8549,6 +8579,15 @@ function rangeValueText(range, ui) {
   if (r.min !== null) return `≥ ${text(r.min)}${ui.unit}`;
   return `≤ ${text(r.max)}${ui.unit}`;
 }
+// Zakres EHP buildu jako tekst: "≥ 12,340", "12,340 to 30,000", "≤ 30,000"; "" gdy bez warunku.
+function ehpRangeText(metrics) {
+  const min = metrics && metrics.minEhp > 0 ? metrics.minEhp : null;
+  const max = metrics && Number(metrics.maxEhp) > 0 ? metrics.maxEhp : null;
+  if (min !== null && max !== null) return `${formatNumber(Math.round(min))} to ${formatNumber(Math.round(max))}`;
+  if (min !== null) return `≥ ${formatNumber(Math.round(min))}`;
+  if (max !== null) return `≤ ${formatNumber(Math.round(max))}`;
+  return "";
+}
 function sameRange(a, b) {
   const x = normalizeRange(a);
   const y = normalizeRange(b);
@@ -8556,15 +8595,17 @@ function sameRange(a, b) {
   return x.min === y.min && x.max === y.max;
 }
 // Suwak zakresu z etykietą, wartością, presetami i podpowiedzią (hint - tekst albo null).
-function RangeControl({ id, kind, level, value, onChange, hint = null, disabled = false, disabledHint = null, title = undefined, compact = false }) {
-  const ui = rangeUi(kind, level);
+// ui: własna skala zamiast rangeUi (Effective HP), valueText: własny tekst wartości, heading: etykieta jako nagłówek
+// sekcji (kreator: większa, wielkie litery).
+function RangeControl({ id, kind, level, value, onChange, hint = null, disabled = false, disabledHint = null, title = undefined, compact = false, ui: uiProp = null, valueText = null, heading = false }) {
+  const ui = uiProp || rangeUi(kind, level);
   return (
     <div className="flex flex-col gap-1" title={title}>
-      <div className={SLIDER_HEAD}>
-        <label htmlFor={id} className="text-zinc-300">
+      <div className={heading ? "flex items-baseline justify-between gap-2" : SLIDER_HEAD}>
+        <label htmlFor={id} className={heading ? SECTION_HEAD : SUB_HEAD}>
           {ui.label}
         </label>
-        <span className="tabular-nums text-zinc-100">{disabled ? "off" : rangeValueText(value, ui)}</span>
+        <span className={`tabular-nums text-zinc-100 ${heading ? "text-sm" : ""}`}>{disabled ? "off" : valueText !== null ? valueText : rangeValueText(value, ui)}</span>
       </div>
       <div className={`flex flex-wrap gap-1 ${compact ? "" : "mb-0.5"}`} role="group" aria-label={`${ui.label} presets`}>
         {ui.presets.map(([name, range, tip]) => (
@@ -8979,7 +9020,7 @@ function goalKey(goal) {
 const DEFAULT_MANA_RANGE = { min: 0, max: 1 };
 const DEFAULT_LIFE_RANGE = { min: null, max: null };
 const DEFAULT_SPD_RANGE = { min: -20, max: null };
-const DEFAULT_DAMAGE_FORM = { preset: "", goal: null, minEhp: null, cycle: "", cps: 3, steal: true, gain: true, noEvents: true, tradeable: false, freeSp: true, poison: false, rolls: "max", drain: DEFAULT_MANA_RANGE, lr: DEFAULT_LIFE_RANGE, spd: DEFAULT_SPD_RANGE, raidMana: 0 };
+const DEFAULT_DAMAGE_FORM = { preset: "", goal: null, minEhp: null, maxEhp: null, cycle: "", cps: 3, steal: true, gain: true, noEvents: true, tradeable: false, freeSp: true, poison: false, rolls: "max", drain: DEFAULT_MANA_RANGE, lr: DEFAULT_LIFE_RANGE, spd: DEFAULT_SPD_RANGE, raidMana: 0 };
 // Para { min, max } z formularza; stare wartości liczbowe (0.35-0.36) przez fromNumber.
 function rangePair(value, fromNumber) {
   if (value && typeof value === "object") {
@@ -9024,6 +9065,75 @@ function ehpStep(ehpMax) {
 function defaultMinEhp(ehpMax) {
   return ehpStep(ehpMax) * 5;
 }
+// Suwak Effective HP (0.38): zakres w % tego, co da się osiągnąć na poziomie, co 2%; lewy koniec = bez minimum,
+// prawy = bez maksimum. Formularz trzyma liczby EHP (minEhp, maxEhp) - tak jak link buildu i lista buildów.
+function ehpUi(ehpMax) {
+  const at = (pct) => formatNumber(Math.round((pct / 100) * ehpMax));
+  return {
+    label: "Effective HP",
+    unit: "%",
+    lo: 2,
+    hi: 100,
+    step: 2,
+    digits: 0,
+    signed: false,
+    accent: "#55FF55",
+    presets: [
+      ["Any", { min: null, max: null }, "No effective HP condition - pure damage"],
+      ["Light", { min: 20, max: null }, `At least 20% of the most EHP your level can reach (${at(20)})`],
+      ["Balanced", { min: 25, max: null }, `At least 25% (${at(25)}) - the default`],
+      ["Sturdy", { min: 35, max: null }, `At least 35% (${at(35)})`],
+      ["Tank", { min: 50, max: null }, `At least 50% (${at(50)})`],
+    ],
+  };
+}
+function formMinEhp(form, ehpMax) {
+  return form.minEhp === null || form.minEhp === undefined ? defaultMinEhp(ehpMax) : Math.min(Math.max(0, Number(form.minEhp) || 0), ehpMax);
+}
+function formMaxEhp(form, ehpMax) {
+  const max = Number(form.maxEhp);
+  return max > 0 ? Math.max(max, formMinEhp(form, ehpMax)) : null;
+}
+// { min, max } w % (dla suwaka)
+function ehpPctPair(form, ehpMax) {
+  const pct = (value) => Math.round((value / Math.max(1, ehpMax)) * 100);
+  const min = formMinEhp(form, ehpMax);
+  const max = formMaxEhp(form, ehpMax);
+  return { min: min > 0 ? Math.max(1, pct(min)) : null, max: max !== null ? Math.min(100, pct(max)) : null };
+}
+// % z suwaka -> liczby EHP w formularzu
+function ehpFormPatch(range, ehpMax) {
+  const r = range || {};
+  const abs = (pct) => Math.round((pct / 100) * ehpMax);
+  const min = r.min === null || r.min === undefined ? 0 : abs(r.min);
+  const max = r.max === null || r.max === undefined ? null : Math.max(abs(r.max), min);
+  return { minEhp: min, maxEhp: max };
+}
+// compact: sam procent (lewy panel - liczby EHP są w podpowiedzi pod suwakiem)
+function ehpValueText(form, ehpMax, compact = false) {
+  const min = formMinEhp(form, ehpMax);
+  const max = formMaxEhp(form, ehpMax);
+  const pct = (value) => Math.round((value / Math.max(1, ehpMax)) * 100);
+  if (compact) {
+    if (min > 0 && max !== null) return `${pct(min)}-${pct(max)}%`;
+    if (min > 0) return `≥ ${pct(min)}%`;
+    if (max !== null) return `≤ ${pct(max)}%`;
+    return "any";
+  }
+  if (min > 0 && max !== null) return `${formatNumber(min)} to ${formatNumber(max)} · ${pct(min)}-${pct(max)}%`;
+  if (min > 0) return `≥ ${formatNumber(min)} · ${pct(min)}%`;
+  if (max !== null) return `≤ ${formatNumber(max)} · ${pct(max)}%`;
+  return "any";
+}
+// liczby EHP zakresu dla podpowiedzi pod suwakiem w lewym panelu
+function ehpNumbersText(form, ehpMax) {
+  const min = formMinEhp(form, ehpMax);
+  const max = formMaxEhp(form, ehpMax);
+  if (min > 0 && max !== null) return `${formatNumber(min)} to ${formatNumber(max)} EHP`;
+  if (min > 0) return `At least ${formatNumber(min)} EHP`;
+  if (max !== null) return `At most ${formatNumber(max)} EHP`;
+  return "No EHP condition";
+}
 
 // Formularz zakładki "New": klasa → ranga → poziom → drzewko → cel → próg EHP → cykl czarów (twardy filtr many).
 // Wiersz z polem wyboru w lewym panelu: pole przy pierwszej linii, opis i podpowiedź jako jeden tekst, który się
@@ -9041,6 +9151,13 @@ function CheckRow({ id = undefined, checked, onChange, label, hint = null, title
 }
 // Suwaki w lewym panelu wyglądają jak suwak Effective HP: etykieta i wartość w jednej linii, pod nimi pełna szerokość.
 const SLIDER_HEAD = "flex items-baseline justify-between gap-2 text-xs";
+// Nagłówki (0.38): podsekcja (np. Weapon attack speed w Items) - żółta jak "ITEMS"; sekcja kreatora (Filters,
+// Walk speed...) - żółta, wielkie litery, większa. Sekcje oddziela ciemniejszy pasek (wbr-sep).
+const SUB_HEAD = "wbr-sub text-xs";
+const SECTION_HEAD = "mc-title text-base uppercase";
+function SectionBar({ wide = false }) {
+  return <div className={`wbr-sep ${wide ? "wbr-sep-wide" : ""}`} aria-hidden="true" />;
+}
 
 function DamageForm({
   restrictions,
@@ -9088,11 +9205,7 @@ function DamageForm({
   const cycleIds = parseCycle(form.cycle);
   const cycleCasts = cycleIds.filter((id) => id !== 0).length;
   const cycleMelee = cycleIds.length - cycleCasts;
-  const minEhp = form.minEhp === null || form.minEhp === undefined ? defaultMinEhp(ehpMax) : Math.min(form.minEhp, ehpMax);
   const ready = Boolean(playerClass && level && treeIds.length > 0 && goal);
-  // Suwak chodzi co 5% tego, co da się osiągnąć na tym poziomie. Drobniejsze kroki tylko udawały precyzję:
-  // różnica między 15% a 16% progu to inny zestaw, a nie "o włos mocniejszy" ten sam.
-  const step = ehpStep(ehpMax);
   const label = "mc-title text-xs uppercase";
   const hint = "text-xs text-zinc-500";
   // pole "cps" trzyma tekst, żeby dało się je wyczyścić i wpisać nową liczbę (wartość przyjmujemy, gdy ma sens)
@@ -9103,7 +9216,6 @@ function DamageForm({
   useEffect(() => {
     setCpsText((text) => (Number(text.replace(",", ".")) === form.cps ? text : String(form.cps)));
   }, [form.cps]);
-  const pct = Math.round((minEhp / Math.max(1, ehpMax)) * 100);
   return (
     <div className="flex flex-col gap-3.5">
       <div className="flex items-end gap-2.5">
@@ -9155,6 +9267,7 @@ function DamageForm({
         </p>
       )}
 
+      {playerClass && level && <SectionBar />}
       {playerClass && level && (
         <fieldset className="wbr-fade flex flex-col gap-1.5">
           <legend className={`${label} mb-1.5`}>Ability tree</legend>
@@ -9188,6 +9301,7 @@ function DamageForm({
         </fieldset>
       )}
 
+      {treeIds.length > 0 && goals.length > 0 && <SectionBar />}
       {treeIds.length > 0 && goals.length > 0 && (
         <div className="wbr-fade flex flex-col gap-1.5">
           <label htmlFor="new-goal" className={label}>
@@ -9228,19 +9342,21 @@ function DamageForm({
         </div>
       )}
 
+      {treeIds.length > 0 && <SectionBar />}
       {treeIds.length > 0 && (
-        <fieldset className="wbr-fade flex flex-col gap-2">
+        <fieldset className="wbr-fade flex flex-col gap-2.5">
           <legend className={`${label} mb-1`}>Must have</legend>
           <div className="flex flex-col gap-1">
-            <div className="flex items-baseline justify-between gap-2 text-xs">
-              <label htmlFor="new-ehp" className="text-zinc-300">
-                Effective HP
-              </label>
-              <span className="tabular-nums" title={`Level ${level || "?"} can reach about ${formatNumber(ehpMax)} with items alone; the slider moves in 5% steps of that.`}>
-                <span className="text-zinc-100">{formatNumber(minEhp)}</span> <span className="text-zinc-500">· {pct}%</span>
-              </span>
-            </div>
-            <McRange id="new-ehp" min={0} max={ehpMax} step={step} value={minEhp} accent="#55FF55" onChange={(event) => set({ minEhp: Number(event.target.value) })} className="w-full" />
+            <RangeControl
+              id="new-ehp"
+              kind="ehp"
+              ui={ehpUi(ehpMax)}
+              value={ehpPctPair(form, ehpMax)}
+              valueText={ehpValueText(form, ehpMax, true)}
+              onChange={(range) => set(ehpFormPatch(range, ehpMax))}
+              hint={`${ehpNumbersText(form, ehpMax)} (100% = ${formatNumber(ehpMax)}, the most level ${level || "?"} reaches with items).`}
+              title="Effective HP range in 2% steps of the most your level can reach. The generator keeps only builds inside it; a maximum stops it from spending stats on more EHP than you want. Left end = no minimum, right end = no maximum."
+            />
             {sweep && <p className="text-xs text-zinc-500">Builds for every EHP step: List of builds, at the bottom of this panel.</p>}
           </div>
           <RangeControl
@@ -9264,6 +9380,7 @@ function DamageForm({
         </fieldset>
       )}
 
+      {treeIds.length > 0 && <SectionBar />}
       {treeIds.length > 0 && (
         <fieldset className="wbr-fade flex flex-col gap-1.5">
           <legend className={`${label} mb-1`}>Mana: spell cycle</legend>
@@ -9324,12 +9441,18 @@ function DamageForm({
         </fieldset>
       )}
 
+      {treeIds.length > 0 && <SectionBar />}
       {treeIds.length > 0 && (
         <fieldset className="wbr-fade flex flex-col gap-1">
           <legend className={`${label} mb-1`}>Items</legend>
+          <span className={SUB_HEAD}>Filters</span>
           <div className="flex flex-col gap-1.5">
             <CheckRow id="new-no-events" checked={form.noEvents !== false} onChange={() => set({ noEvents: form.noEvents === false })} label="No limited-time event items" title={`Skips the ${EVENT_ITEM_NAMES.size} items you can only get during a festival (Blizzard, Bonfire, Heroes, Spirits). Pinned items stay.`} />
             <CheckRow id="new-tradeable" checked={Boolean(form.tradeable)} onChange={() => set({ tradeable: !form.tradeable })} label="Tradeable only" hint="Trade Market" title="Only items that can be bought and sold on the Trade Market: no untradable or quest items. Pinned items stay." />
+            <ItemFilterChecks options={options} onChange={onOptions} />
+          </div>
+          <span className={`${SUB_HEAD} mt-2`}>How builds are counted</span>
+          <div className="flex flex-col gap-1.5">
             <CheckRow id="new-free-sp" checked={form.freeSp !== false} onChange={() => set({ freeSp: form.freeSp === false })} label="Spend free skill points" hint="shown as (+X)" title="When the set needs fewer skill points than your level gives, spend the rest where they raise the goal most (or first where they get the build over the filters). Off: the rest stays unspent, like a fresh build in Wynnbuilder." />
             <CheckRow id="new-rolls" checked={form.rolls === "avg"} onChange={() => set({ rolls: form.rolls === "avg" ? "max" : "avg" })} label="Realistic rolls (50%)" hint="off = max, like Wynnbuilder" title="Off (default): identifications at their maximum roll, like Wynnbuilder. On: every rolled ID at 50% - then items with fixed IDs (mostly quest rewards) get an edge, because they always count at 100%." />
             <CheckRow id="new-poison" checked={Boolean(form.poison)} onChange={() => set({ poison: !form.poison })} label="Count poison in the goal" title="Adds Poison per second to the goal (spread over the casts for a spell). Off by default: how poison stacks and works on bosses isn't known, and counting it made the search pick poison-only items. The Poison DPS row in the Damage panel is always shown." />
@@ -9342,7 +9465,7 @@ function DamageForm({
           </div>
         </fieldset>
       )}
-
+      <SectionBar />
 
       <div className="flex flex-col gap-1.5">
         <button
@@ -9681,7 +9804,7 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
     level: level ? `Lv ${level}` : null,
     tree: treeIds.length > 0 ? preset || "own tree" : null,
     goal: goal ? goal.name : null,
-    ehp: treeIds.length > 0 ? `${Math.round((minEhp / Math.max(1, ehpMax)) * 100)}%` : null,
+    ehp: treeIds.length > 0 ? rangeValueText(ehpPctPair(form, ehpMax), ehpUi(ehpMax)) : null,
     mana: treeIds.length > 0 ? `${cycleDigits.length ? `${cycleDigits.join("")} · ${form.cps} cps · ${rangeValueText(formManaPair(form), rangeUi("mana", level))}` : "off"}${formLifeRange(form) ? ` · life ${rangeValueText(formLifePair(form), rangeUi("life", level))}` : ""}` : null,
     extras: treeIds.length > 0 ? [formSpdRange(form) ? `walk ${rangeValueText(formSpdPair(form), rangeUi("spd", level))}` : "any walk speed", form.noEvents !== false ? "no events" : null, form.tradeable ? "tradeable" : null, normalized.avoidNegativeDefences ? "no -def" : null, form.rolls === "avg" ? "50% rolls" : null, form.poison ? "poison" : null].filter(Boolean).join(", ") || "none" : null,
     generate: null,
@@ -9691,7 +9814,7 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
     level: ["Your level", "Items above it are left out; skill points and ability points come from it."],
     tree: ["Ability tree", `Pick an archetype - its suggested tree for ${apCap} AP is shown below, where you can compare archetypes and click abilities to change it. "Use this tree" or Next goes on.`],
     goal: ["What to maximise", "One spell (one cast, crits included), the main attack (damage per second) - or click several to maximise their sum. Numbers: with the best weapon for your level alone."],
-    ehp: ["How tanky", `Minimum effective HP in 5% steps of the most your level can reach (${formatNumber(ehpMax)}). Builds below it are thrown away.`],
+    ehp: ["How tanky", `Effective HP range in 2% steps of the most your level can reach (${formatNumber(ehpMax)}). Builds outside it are thrown away; the maximum is optional.`],
     mana: ["Mana: spell cycle", "The spells (1-4) and main attacks (M) you do in a loop must pay for themselves (Mana Regen, Mana Steal from M hits, ability mana), within the mana balance range: the minimum is the drain you accept, the maximum stops the search from wasting stats on mana. Type your own cycle or pick a preset."],
     extras: ["Extras", "Optional filters - click to toggle."],
     generate: ["Ready", "The search runs until a pass finds nothing better: usually 5-30 s, up to ~1.5 min at level 100+ with a high EHP threshold and a mana cycle. You can change anything later in the panel on the left."],
@@ -9931,37 +10054,53 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
       )}
 
       {active === "ehp" && (
-        <div className="grid grid-cols-3 gap-2 sm:grid-cols-7">
-          {Array.from({ length: 21 }, (_, index) => index * 5).map((pct) => {
-            // co 5% osiągalnego EHP (jak suwak w panelu); nazwane progi zostają jako podpisy
-            const named = WIZARD_EHP.find((entry) => entry.pct === pct) || null;
-            const value = step * Math.round(pct / 5);
-            return (
-              <WizardTile
-                key={pct}
-                selected={Math.round(minEhp) === Math.round(value)}
-                onClick={() => {
-                  set({ minEhp: value });
-                  next("ehp");
-                }}
-                title={named ? named.hint : `${pct}% of the most EHP your level can reach`}
-                className="p-2"
-              >
-                <span className="text-base font-bold text-zinc-100">{pct}%</span>
-                <span className="text-sm tabular-nums" style={ts({ color: "#55FF55" })}>
-                  {pct === 0 ? "any" : `≥ ${formatNumber(value)}`}
-                </span>
-                <span className="text-xs text-zinc-500">{named ? named.label : "\u00a0"}</span>
-              </WizardTile>
-            );
-          })}
+        <div className="flex flex-col gap-4">
+          <RangeControl
+            id="wiz-ehp"
+            kind="ehp"
+            heading
+            ui={ehpUi(ehpMax)}
+            value={ehpPctPair(form, ehpMax)}
+            valueText={ehpValueText(form, ehpMax)}
+            onChange={(range) => set(ehpFormPatch(range, ehpMax))}
+            hint="Drag the left handle for the minimum and the right one for a maximum (optional). The far ends = no limit on that side."
+          />
+          <SectionBar wide />
+          <h3 className={SECTION_HEAD}>
+            Quick picks <span className="text-sm normal-case text-zinc-400">(minimum; the maximum stays)</span>
+          </h3>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-7">
+            {WIZARD_EHP.map((entry) => {
+              const value = entry.pct === 25 ? defaultMinEhp(ehpMax) : Math.round((entry.pct / 100) * ehpMax);
+              const currentMin = ehpPctPair(form, ehpMax).min;
+              return (
+                <WizardTile
+                  key={entry.pct}
+                  selected={(currentMin || 0) === entry.pct}
+                  onClick={() => {
+                    const max = formMaxEhp(form, ehpMax);
+                    set({ minEhp: value, maxEhp: max !== null && max < value ? null : max });
+                    next("ehp");
+                  }}
+                  title={entry.hint}
+                  className="p-2"
+                >
+                  <span className="text-base font-bold text-zinc-100">{entry.label}</span>
+                  <span className="text-sm tabular-nums" style={ts({ color: "#55FF55" })}>
+                    {entry.pct === 0 ? "any" : `≥ ${formatNumber(value)}`}
+                  </span>
+                  <span className="text-xs text-zinc-500">{entry.pct}%</span>
+                </WizardTile>
+              );
+            })}
+          </div>
         </div>
       )}
 
       {active === "mana" && (
         <div className="flex flex-col gap-4">
-          <div className="grid grid-cols-1 items-center gap-x-4 gap-y-3 sm:grid-cols-[11rem_minmax(0,1fr)]">
-            <label htmlFor="wizard-cps" className="text-sm text-zinc-300">
+          <div className="flex flex-col gap-2">
+            <label htmlFor="wizard-cps" className={SECTION_HEAD}>
               Clicks per second
             </label>
             <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
@@ -9988,11 +10127,13 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
               <CheckRow checked={form.steal} onChange={() => set({ steal: !form.steal })} label="Mana Steal" hint="from M hits" title="Mana Steal only works on main attack hits - add M to the cycle" />
               <CheckRow checked={form.gain} onChange={() => set({ gain: !form.gain })} label="Mana from abilities" />
             </div>
-            <span className="text-sm text-zinc-300">Mana balance</span>
-            <RangeControl id="wiz-drain" kind="mana" level={level} value={formManaPair(form)} onChange={(range) => set({ drain: range })} hint={manaRangeHint(formManaPair(form))} title="The cycle's mana balance per second: negative = drain you accept, positive = surplus. The maximum keeps the search from wasting stats on mana." />
-            <span className="text-sm text-zinc-300">Life recovery</span>
-            <RangeControl id="wiz-lr" kind="life" level={level} value={formLifePair(form)} onChange={(range) => set({ lr: range, sustain: undefined })} hint={lifeRangeHint(formLifePair(form), 0)} title="Health Regen ÷ 4 s + Life Steal from the cycle's main attacks (M). Any = no condition." />
           </div>
+          <SectionBar wide />
+          <RangeControl id="wiz-drain" kind="mana" level={level} heading value={formManaPair(form)} onChange={(range) => set({ drain: range })} hint={manaRangeHint(formManaPair(form))} title="The cycle's mana balance per second: negative = drain you accept, positive = surplus. The maximum keeps the search from wasting stats on mana." />
+          <SectionBar wide />
+          <RangeControl id="wiz-lr" kind="life" level={level} heading value={formLifePair(form)} onChange={(range) => set({ lr: range, sustain: undefined })} hint={lifeRangeHint(formLifePair(form), 0)} title="Health Regen ÷ 4 s + Life Steal from the cycle's main attacks (M). Any = no condition." />
+          <SectionBar wide />
+          <h3 className={SECTION_HEAD}>Spell cycle</h3>
           {goals.some((entry) => entry.kind === "cycle") && (
             <CheckRow
               checked={selectedGoals.some((id) => isCycleGoal(id))}
@@ -10002,7 +10143,6 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
               title="Maximise the damage per second of the whole cycle (every spell once per cast + every main attack hit) instead of one spell - the players' compromise for spells that deal their damage over time."
             />
           )}
-
           <div className={`mc-slot flex flex-col gap-2 p-3 ${customSelected ? "wbr-tile-on" : ""}`}>
             <span className="text-base font-bold text-zinc-100">Your own cycle</span>
             <span className="text-xs text-zinc-500">Type the spell numbers in the order you cast them (e.g. 1213), or click the spells below.</span>
@@ -10068,8 +10208,8 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
             </button>
           </div>
 
-          <div className="flex flex-col gap-1.5">
-            <span className="text-sm text-zinc-300">{preset && combos.length > 0 ? `Presets for ${preset}` : "Presets"}</span>
+          <div className="flex flex-col gap-2">
+            <h3 className={SECTION_HEAD}>{preset && combos.length > 0 ? `Presets for ${preset}` : "Presets"}</h3>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <WizardTile
                 selected={cycleDigits.length === 0}
@@ -10097,7 +10237,7 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
       )}
 
       {active === "extras" && (
-        <div className="flex flex-col gap-3">
+        <div className="flex flex-col gap-4">
           {[
             [
               "Filters",
@@ -10117,9 +10257,11 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
                 ["Count poison in the goal", "Adds Poison per second to the goal (off: it picked poison-only items)", Boolean(form.poison), () => set({ poison: !form.poison })],
               ],
             ],
-          ].map(([group, grid, tiles]) => (
-            <div key={group} className="flex flex-col gap-1.5">
-              <span className="text-sm text-zinc-300">{group}</span>
+          ].map(([group, grid, tiles], index) => (
+            <React.Fragment key={group}>
+            {index > 0 && <SectionBar wide />}
+            <div className="flex flex-col gap-2">
+              <h3 className={SECTION_HEAD}>{group}</h3>
               <div className={grid}>
                 {tiles.map(([label, hint, on, toggle]) => (
                   <WizardTile key={label} selected={on} onClick={toggle} title={hint}>
@@ -10132,13 +10274,15 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
                 ))}
               </div>
             </div>
+            </React.Fragment>
           ))}
-          <div className="flex flex-col gap-1.5">
-            <span className="text-sm text-zinc-300">Walk speed</span>
-            <RangeControl id="wiz-spd" kind="spd" level={level} value={formSpdPair(form)} onChange={(range) => set({ spd: range })} hint="Walk Speed of the whole build (items, sets, ability tree). The default minimum (−20%) keeps the search from slow builds; Any = no condition." />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <span className="text-sm text-zinc-300">Weapon attack speed (none = any)</span>
+          <SectionBar wide />
+          <RangeControl id="wiz-spd" kind="spd" level={level} heading value={formSpdPair(form)} onChange={(range) => set({ spd: range })} hint="Walk Speed of the whole build (items, sets, ability tree). The default minimum (−20%) keeps the search from slow builds; Any = no condition." />
+          <SectionBar wide />
+          <div className="flex flex-col gap-2">
+            <h3 className={SECTION_HEAD}>
+              Weapon attack speed <span className="text-sm normal-case text-zinc-400">(none = any)</span>
+            </h3>
             <div className="flex flex-wrap justify-center gap-2">
               {ATTACK_SPEEDS.map((speed) => (
                 <WizardTile key={speed} selected={normalized.attackSpeeds.includes(speed)} onClick={() => onOptions({ ...options, attackSpeeds: toggleValue(normalized.attackSpeeds, speed) })} className="shrink-0 grow-0 basis-[calc(25%-0.375rem)] p-2 sm:basis-[calc(14.2857%-0.4286rem)]">
@@ -10419,9 +10563,9 @@ function DamageSummary({ build }) {
       {chip(build.goalName || "Damage", formatNumber(Math.round(metrics.damage)), null, build.goal === DAMAGE_GOAL_MAIN ? "Main attack damage per second - the number this build maximises" : isCycleGoal(build.goal) ? "Damage per second of the whole spell cycle (every spell once per cast + main attack hits) - the number this build maximises" : "One hit of the chosen spell - the number this build maximises")}
       {chip(
         "EHP",
-        `${formatNumber(Math.round(metrics.ehp))}${metrics.minEhp > 0 ? ` / ${formatNumber(Math.round(metrics.minEhp))}` : ""}`,
-        metrics.minEhp > 0 ? metrics.ehp >= metrics.minEhp : null,
-        metrics.minEhp > 0 ? "Effective HP of this build and the minimum you asked for" : "Effective HP (no minimum set)"
+        `${formatNumber(Math.round(metrics.ehp))}${ehpRangeText(metrics) ? ` / ${ehpRangeText(metrics)}` : ""}`,
+        ehpRangeText(metrics) ? (metrics.minEhp <= 0 || metrics.ehp >= metrics.minEhp) && !(Number(metrics.maxEhp) > 0 && metrics.ehp > metrics.maxEhp + 1e-9) : null,
+        ehpRangeText(metrics) ? "Effective HP of this build and the range you asked for" : "Effective HP (no range set)"
       )}
       {cycle.ids.length > 0 &&
         chip(
@@ -10518,6 +10662,26 @@ function itemFilterKey(normalized) {
   return JSON.stringify([normalized.excludedTiers, normalized.budget, normalized.onlyListed, normalized.locked, normalized.excluded, normalized.attackSpeeds, normalized.avoidNegativeDefences]);
 }
 
+// Pola "Avoid negative defences" i "Live on the Trade Market" (sekcja Items › Filters w lewym panelu).
+function ItemFilterChecks({ options, onChange }) {
+  const normalized = normalizeOptions(options);
+  const live = hasLiveData();
+  return (
+    <>
+      <CheckRow id="new-no-negdef" checked={normalized.avoidNegativeDefences} onChange={() => onChange({ ...options, avoidNegativeDefences: !normalized.avoidNegativeDefences })} label="Avoid negative defences" title="Skips armour, accessories and weapons with a negative elemental defence. Pinned items stay." />
+      <CheckRow
+        id="new-live"
+        disabled={!live}
+        checked={live && normalized.onlyListed}
+        onChange={() => onChange({ ...options, onlyListed: !normalized.onlyListed })}
+        label="Live on the Trade Market"
+        hint={live ? formatClock(PRICE_DATA.liveAt) : "no data here"}
+        style={ts(live ? undefined : { opacity: 0.55 })}
+        title={live ? "Only items listed on the Trade Market right now (WynnVentory snapshot). Pinned items stay." : "Needs live Trade Market data: the GitHub Pages version fetches it from WynnVentory (WYNNVENTORY_KEY secret, see the README)."}
+      />
+    </>
+  );
+}
 // Filtry przedmiotów zakładki głównej: przedmiot do zbudowania wokół, rzadkości, budżet i rynek.
 function ItemFilters({ options, onChange, weaponType, level, onBrowse }) {
   const normalized = normalizeOptions(options);
@@ -10529,7 +10693,7 @@ function ItemFilters({ options, onChange, weaponType, level, onBrowse }) {
   return (
     <div className="flex flex-col gap-2.5">
       <div className="flex flex-col gap-1.5">
-        <span className="text-xs text-zinc-300">Weapon attack speed</span>
+        <span className={SUB_HEAD}>Weapon attack speed</span>
         {/* 3 + 3 + 1 przyciski równej szerokości, ostatni wyśrodkowany (siatka 6 kolumn, każdy przycisk na 2) */}
         <div className="grid grid-cols-6 gap-1">
           {ATTACK_SPEEDS.map((speed, index) => (
@@ -10546,17 +10710,6 @@ function ItemFilters({ options, onChange, weaponType, level, onBrowse }) {
         </div>
         <span className="text-xs text-zinc-500">{normalized.attackSpeeds.length > 0 ? "Only weapons with the checked speeds." : "None checked = any speed."}</span>
       </div>
-      <CheckRow id="new-no-negdef" checked={normalized.avoidNegativeDefences} onChange={() => onChange({ ...options, avoidNegativeDefences: !normalized.avoidNegativeDefences })} label="Avoid negative defences" title="Skips armour, accessories and weapons with a negative elemental defence. Pinned items stay." />
-      <CheckRow
-        id="new-live"
-        disabled={!live}
-        checked={live && normalized.onlyListed}
-        onChange={() => onChange({ ...options, onlyListed: !normalized.onlyListed })}
-        label="Live on the Trade Market"
-        hint={live ? formatClock(PRICE_DATA.liveAt) : "no data here"}
-        style={ts(live ? undefined : { opacity: 0.55 })}
-        title={live ? "Only items listed on the Trade Market right now (WynnVentory snapshot). Pinned items stay." : "Needs live Trade Market data: the GitHub Pages version fetches it from WynnVentory (WYNNVENTORY_KEY secret, see the README)."}
-      />
       <button type="button" className="mc-link self-start text-xs" aria-expanded={open} onClick={() => setOpen(!open)}>
         {open ? "▾" : "▸"} Pin items · rarities{market ? " · budget" : ""}
         {active > 0 ? ` (${active} set)` : ""}
@@ -11340,7 +11493,7 @@ const ROMAN = ["I", "II", "III", "IV", "V", "VI", "VII"];
 function WeaponPowdersControl({ options, onChange }) {
   return (
     <div className="flex flex-col gap-2">
-      <label htmlFor="weapon-powders" className="text-xs text-zinc-300">
+      <label htmlFor="weapon-powders" className={SUB_HEAD}>
         Weapon powders
       </label>
       <select
@@ -11805,7 +11958,7 @@ function InfoDialog({ onClose }) {
                 from the tree.
               </li>
               <li>{hl("Maximise.")} One spell (one cast), the main attack (damage per second), several spells at once (their sum), or the whole cycle (its damage per second).</li>
-              <li>{hl("Effective HP.")} The minimum EHP, in 5% steps of the most your level can reach. Builds below it are thrown away.</li>
+              <li>{hl("Effective HP.")} The EHP range (minimum, optional maximum), in 2% steps of the most your level can reach. Builds outside it are thrown away.</li>
               <li>
                 {hl("Mana.")} Type your spell cycle (1-4 = spells, M = main attack) and clicks per second, and the range of its mana balance (the minimum = the drain you accept,
                 the maximum = how much surplus is fine). Life recovery has a range too. In raids you can add your team's mana buff under Advanced, at the bottom of the left panel.
@@ -12331,6 +12484,7 @@ function explainBuild(build) {
     const fails = [];
     if (spOver > 0) fails.push(`needs ${spOver} skill point${spOver === 1 ? "" : "s"} more than level ${build.level} gives`);
     if (minEhp > 0 && metrics.ehp < minEhp) fails.push(`EHP ${formatNumber(Math.round(metrics.ehp))} < ${formatNumber(Math.round(minEhp))}`);
+    if (Number(build.metrics.maxEhp) > 0 && metrics.ehp > build.metrics.maxEhp + 1e-9) fails.push(`EHP ${formatNumber(Math.round(metrics.ehp))} > ${formatNumber(Math.round(build.metrics.maxEhp))}`);
     if (!manaOk(metrics, cycle)) fails.push(`mana ${metrics.manaNet.toFixed(1)}/s for the cycle`);
     if (!sustainPasses({ ...metrics, requireSustain: build.metrics.requireSustain, minSustain: build.metrics.minSustain, lifeRange: build.metrics.lifeRange })) fails.push(`life recovery ${metrics.sustain.toFixed(1)} HP/s`);
     if (!speedPasses({ walkSpeed: metrics.walkSpeed, spdRange: build.metrics.spdRange })) fails.push(`walk speed ${Math.round(metrics.walkSpeed)}%`);
@@ -12422,16 +12576,188 @@ async function copyToClipboard(text) {
   }
 }
 
-// Przyciski w nagłówku buildu: Wynnbuilder ↗, Copy link (link Wynnbuildera), Share link (adres tej strony z #b=&s=)
-// i Save (lista zapisanych buildów w lewym panelu). Na telefonie przechodzą do wiersza pod tytułem.
-function BuildLinkBar({ wbUrl, shareUrl = null, onSave = null, saveName = "" }) {
+// ---- Share: link do tej strony + gotowa wiadomość z listą przedmiotów ----
+// Strona stoi na GitHub Pages (statyczna), a część adresu po # nie trafia do serwera, więc podgląd linku w
+// komunikatorach nie może pokazać przedmiotów konkretnego buildu. Dlatego Share kopiuje gotową wiadomość: tytuł,
+// krótki link i nazwy przedmiotów jako cytat ("> ") - zwykły tekst, czytelny wszędzie; tam, gdzie cytaty działają
+// (Discord, Slack, WhatsApp), lista dostaje szary pasek jak podgląd linku Wynnbuildera.
+const ROMAN_TIERS = ["I", "II", "III", "IV", "V", "VI", "VII"];
+const MESSAGE_LIMIT = 2000; // najniższy limit popularnych komunikatorów (Discord)
+function powderGroupsText(powders) {
+  const list = powders && Array.isArray(powders.list) ? powders.list : [];
+  const groups = [];
+  list.forEach((powder) => {
+    const last = groups[groups.length - 1];
+    if (last && last.element === powder.element && last.tier === powder.tier) last.count += 1;
+    else groups.push({ element: powder.element, tier: powder.tier, count: 1 });
+  });
+  return groups.map((group) => `${group.count > 1 ? `${group.count}× ` : ""}${ELEMENT_NAMES[group.element] || capitalize(String(group.element))} ${ROMAN_TIERS[group.tier - 1] || group.tier}`).join(", ");
+}
+// Adres tej strony z buildem: b = kod Wynnbuildera, s = ustawienia generatora (opcjonalnie), n = nazwa buildu.
+function shareUrlFor({ code, s = null, name = "" }) {
+  const cleanName = String(name || "").replace(/\s+/g, " ").trim().slice(0, 60);
+  // nawiasy też zakodowane: ")" na końcu adresu komunikatory często ucinają z linku
+  const encoded = encodeURIComponent(cleanName).replace(/[()'!*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `${siteBaseUrl()}#b=${code}${s ? `&s=${s}` : ""}${cleanName ? `&n=${encoded}` : ""}`;
+}
+// Liczby pod listą: obrażenia celu (build z generatora) i EHP.
+function shareSummary(build, stats = null) {
+  if (!build) return "";
+  const parts = [];
+  const damage = build.metrics && build.mode === "damage" ? build.metrics.damage : null;
+  if (Number.isFinite(damage) && damage > 0) {
+    const unit =
+      build.goal === DAMAGE_GOAL_MAIN ? "main attack DPS" : isCycleGoal(build.goal) ? `${build.goalName} DPS` : Array.isArray(build.goal) ? `${build.goalName} (one cast each)` : build.goalName ? `per ${build.goalName} hit` : "damage";
+    parts.push(`${formatNumber(Math.round(damage))} ${unit}`);
+  }
+  const ehp = stats && Number.isFinite(stats.ehp) ? stats.ehp : build.metrics && Number.isFinite(build.metrics.ehp) ? build.metrics.ehp : null;
+  if (ehp) parts.push(`${formatNumber(Math.round(ehp))} EHP`);
+  return parts.join(" · ");
+}
+// { title, lines, url, message } - message: wiadomość do wklejenia (≤ 2000 znaków), zwykły tekst.
+function buildShareMessage({ build, url, name = "", summary = "", shortUrl = null, wbUrl = null }) {
+  const who = [build.archetype, build.playerClass].filter(Boolean).join(" ");
+  const cleanName = String(name || "").replace(/\s+/g, " ").trim();
+  const title = `${cleanName ? `${cleanName} · ` : ""}${who} · level ${build.level}`;
+  // same nazwy przedmiotów w kolejności slotów (jak lista pod linkiem Wynnbuildera), powdery w nawiasie; bez nazw
+  // slotów i bez linijki z liczbami (prośba gracza)
+  const lines = SLOTS.map((slotDef) => {
+    const slot = build.slots.find((entry) => entry.id === slotDef.id);
+    const item = slot && slot.item;
+    if (!item) return "—";
+    const powders = item.powders && item.powders.list ? powderGroupsText(item.powders) : "";
+    return `${item.name}${powders ? ` [${powders}]` : ""}`;
+  });
+  const compose = (link) => [title, link, ...lines.map((line) => `> ${line}`)].join("\n");
+  let message = compose(url);
+  // za długa wiadomość (bardzo długi link z ustawieniami): link bez ustawień
+  if (message.length > MESSAGE_LIMIT && shortUrl) message = compose(shortUrl);
+  return { title, lines, summary, url, wbUrl, message };
+}
+// Share dla buildu z Creatora / Optimizera (workspace): link Wynnbuildera z tomami i aspektami buildu.
+function workspaceShare(ws) {
+  const build = manualBuild(ws);
+  if (!build || !build.slots.some((slot) => slot.id === "weapon" && slot.item)) return { error: "Add a weapon first - the link takes the class from it." };
+  const link = wynnbuilderLinkFor(build, build.treeSettings, false, workspaceExtras(ws));
+  const code = link.url.slice(link.url.indexOf("#") + 1);
+  const url = shareUrlFor({ code, name: ws.name || "" });
+  return buildShareMessage({ build, url, wbUrl: link.url, name: ws.name || "", summary: shareSummary(build, computeBuildStats(build, build.treeSettings)) });
+}
+// Share dla zapisanego linku (Saved builds): build odtworzony z adresu.
+function linkShare(link, name = "") {
+  const parsed = parseBuildHash(link);
+  if (!parsed) return { error: "This saved link can't be read." };
+  try {
+    const { build } = buildFromShare(parsed);
+    // nazwa z zapisu tylko wtedy, gdy gracz ją zmienił (domyślna "Archetyp lv N · cel" powtarzałaby tytuł)
+    const own = parsed.n || (name && !name.startsWith(`${build.archetype} lv `) && !/^Solver #/.test(name) ? name : "");
+    const common = { build, wbUrl: WB_BUILDER_URL + parsed.b, name: own, summary: shareSummary(build, computeBuildStats(build, build.treeSettings)) };
+    const shortUrl = shareUrlFor({ code: parsed.b, name: own });
+    const short = buildShareMessage({ ...common, url: shortUrl });
+    return { ...short, withSettings: parsed.s ? buildShareMessage({ ...common, url: shareUrlFor({ code: parsed.b, s: parsed.s, name: own }), shortUrl }) : null };
+  } catch (error) {
+    return { error: error.message };
+  }
+}
+
+// Panel Share: podgląd wiadomości + Copy message / Copy link only / Send… (telefon: systemowe udostępnianie).
+function SharePanel({ share: base, onClose }) {
+  const [message, setMessage] = useState("");
+  const [fallback, setFallback] = useState(null);
+  const [withSettings, setWithSettings] = useState(false);
+  const share = base && !base.error && withSettings && base.withSettings ? base.withSettings : base;
+  const canSend = typeof navigator !== "undefined" && typeof navigator.share === "function";
+  const copy = async (text, what) => {
+    if (await copyToClipboard(text)) {
+      setMessage(`${what} copied.`);
+      setFallback(null);
+    } else {
+      setFallback(text);
+      setMessage("Clipboard is blocked here - copy it from the box below.");
+    }
+  };
+  if (!share || share.error) {
+    return (
+      <div className="mc-slot flex w-full flex-col gap-2 p-2 text-left" role="group" aria-label="Share this build">
+        <p className="text-xs text-amber-300">{share ? share.error : "Nothing to share yet."}</p>
+        <button type="button" className="mc-btn mc-btn-sm self-start" onClick={onClose}>
+          Close
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div className="mc-slot flex w-full min-w-0 flex-col gap-2 p-2 text-left sm:w-[26rem]" role="group" aria-label="Share this build">
+      <p className="text-xs text-zinc-400">Paste it anywhere - a chat, a forum post, your notes. The link opens this build on this site.</p>
+      <div className="wbr-share-preview" aria-label="Preview of the message">
+        <p className="wbr-share-title">{share.title}</p>
+        <a className="wbr-share-link" href={share.url} target="_blank" rel="noreferrer">
+          {share.url}
+        </a>
+        <div className="wbr-share-quote">
+          {share.lines.map((line, index) => (
+            <div key={`${index}-${line}`}>{line}</div>
+          ))}
+        </div>
+      </div>
+      {base.withSettings && (
+        <CheckRow
+          checked={withSettings}
+          onChange={() => {
+            setWithSettings(!withSettings);
+            setMessage("");
+            setFallback(null);
+          }}
+          label="Include my generator settings"
+          hint={`longer link · ${base.withSettings.url.length} instead of ${base.url.length} characters`}
+          title="Adds the form's settings (goal, EHP range, mana cycle, filters, pinned items) so the other person can press Regenerate with these settings. Without them the link has just the build, like a Wynnbuilder link."
+        />
+      )}
+      <div className="flex flex-wrap gap-1.5">
+        <button type="button" className="mc-btn mc-btn-sm mc-btn-primary" onClick={() => copy(share.message, "Message")} title="Copies the title, the link and the item list as plain text">
+          Copy message
+        </button>
+        <button type="button" className="mc-btn mc-btn-sm" onClick={() => copy(share.url, "Link")} title="Copies only the address of this build on this site">
+          Copy link only
+        </button>
+        {canSend && (
+          <button
+            type="button"
+            className="mc-btn mc-btn-sm"
+            onClick={async () => {
+              try {
+                await navigator.share({ title: share.title, text: share.message });
+              } catch (error) {
+                // anulowane albo niedostępne - nic do zrobienia
+              }
+            }}
+            title="Opens your device's share menu"
+          >
+            Send…
+          </button>
+        )}
+        <button type="button" className="mc-btn mc-btn-sm" onClick={onClose}>
+          Close
+        </button>
+      </div>
+      {message && <p className="text-xs text-emerald-300">{message}</p>}
+      {fallback && <textarea readOnly value={fallback} onFocus={(event) => event.target.select()} className="mc-input h-28 w-full text-xs" aria-label="Text to copy" />}
+    </div>
+  );
+}
+
+// Przyciski w nagłówku buildu: Wynnbuilder ↗, Copy link (link Wynnbuildera), Share (link tej strony + wiadomość z
+// listą przedmiotów) i Save (lista zapisanych buildów w lewym panelu). Na telefonie przechodzą do wiersza pod tytułem.
+function BuildLinkBar({ wbUrl, shareUrl = null, share = null, onSave = null, saveName = "" }) {
   const [message, setMessage] = useState("");
   const [fallback, setFallback] = useState(null);
   const [naming, setNaming] = useState(false);
+  const [shareData, setShareData] = useState(null);
   const [name, setName] = useState(saveName);
   useEffect(() => {
     setMessage("");
     setFallback(null);
+    setShareData(null);
   }, [wbUrl, shareUrl]);
   const copy = async (text, what) => {
     if (await copyToClipboard(text)) {
@@ -12451,9 +12777,26 @@ function BuildLinkBar({ wbUrl, shareUrl = null, onSave = null, saveName = "" }) 
         <button type="button" className="mc-btn mc-btn-sm" onClick={() => copy(wbUrl, "Wynnbuilder link")} title="Copy the Wynnbuilder link of this build">
           Copy link
         </button>
-        {shareUrl && (
-          <button type="button" className="mc-btn mc-btn-sm" onClick={() => copy(shareUrl, "Share link")} title="Copy this page's address: it opens this build (and your settings) again, e.g. in another tab to compare">
-            Share link
+        {(share || shareUrl) && (
+          <button
+            type="button"
+            className={`mc-btn mc-btn-sm ${shareData ? "mc-btn-on" : ""}`}
+            onClick={() => {
+              if (shareData) {
+                setShareData(null);
+                return;
+              }
+              setNaming(false);
+              try {
+                setShareData((typeof share === "function" ? share() : share) || { error: "Nothing to share yet." });
+              } catch (error) {
+                setShareData({ error: String((error && error.message) || error) });
+              }
+            }}
+            aria-expanded={Boolean(shareData)}
+            title="Share this build: a short link to it on this site, and a ready message with the item list"
+          >
+            Share
           </button>
         )}
         {onSave && (
@@ -12462,6 +12805,7 @@ function BuildLinkBar({ wbUrl, shareUrl = null, onSave = null, saveName = "" }) 
             className="mc-btn mc-btn-sm"
             onClick={() => {
               setName(saveName);
+              setShareData(null);
               setNaming((open) => !open);
             }}
             aria-expanded={naming}
@@ -12489,6 +12833,7 @@ function BuildLinkBar({ wbUrl, shareUrl = null, onSave = null, saveName = "" }) 
           </button>
         </div>
       )}
+      {shareData && <SharePanel share={shareData} onClose={() => setShareData(null)} />}
       {message && <p className="text-xs text-emerald-300">{message}</p>}
       {fallback && <input readOnly value={fallback} onFocus={(event) => event.target.select()} className="mc-input w-full text-xs" aria-label="Link to copy" />}
     </div>
@@ -12570,6 +12915,7 @@ function storeSavedLinks(list) {
 
 function SavedBuildsPanel({ saved, storageOk, onOpen, onDelete, onImport, importMessage }) {
   const [text, setText] = useState("");
+  const [sharing, setSharing] = useState(null); // { key, data }
   const [message, setMessage] = useState("");
   const [fallback, setFallback] = useState(null);
   const exportAll = async () => {
@@ -12620,13 +12966,17 @@ function SavedBuildsPanel({ saved, storageOk, onOpen, onDelete, onImport, import
         </div>
         {importMessage && <p className={`text-xs ${importMessage.error ? "text-red-400" : "text-emerald-300"}`}>{importMessage.text}</p>}
       </div>
-      {!storageOk && <p className="text-xs text-amber-300">This browser doesn't allow saving here, so the list can't be kept. Share link and Copy link still work.</p>}
+      {!storageOk && <p className="text-xs text-amber-300">This browser doesn't allow saving here, so the list can't be kept. Share and Copy link still work.</p>}
       {saved.length === 0 ? (
         <p className="text-xs text-zinc-500">Save a build with Save in its header. Builds stay in this browser only; Export copies the links to move them.</p>
       ) : (
         <ul className="mc-divide flex flex-col">
-          {saved.map((entry, index) => (
-            <li key={`${entry.savedAt}-${index}`} className="flex items-start gap-2 py-1.5">
+          {saved.map((entry, index) => {
+            const key = `${entry.savedAt}-${index}`;
+            const open = Boolean(sharing && sharing.key === key);
+            return (
+            <li key={key} className="flex flex-col gap-1.5 py-1.5">
+            <div className="flex items-start gap-2">
               <button type="button" className="min-w-0 flex-1 text-left hover:bg-white/5" onClick={() => onOpen(entry)} title="Open this build">
                 <span className="block truncate text-sm text-zinc-100">{entry.name}</span>
                 <span className="block text-xs tabular-nums text-zinc-500">
@@ -12636,14 +12986,28 @@ function SavedBuildsPanel({ saved, storageOk, onOpen, onDelete, onImport, import
                   {entry.metrics && Number.isFinite(entry.metrics.mana) ? ` · ${entry.metrics.mana >= 0 ? "+" : ""}${entry.metrics.mana.toFixed(1)} mana/s` : ""}
                 </span>
               </button>
-              <a href={entry.url} target="_blank" rel="noreferrer" className="mc-link whitespace-nowrap text-xs" title="Open in a new tab (middle click works too)">
-                Open in new tab
-              </a>
+              <span className="flex flex-col items-end gap-1">
+                <a href={entry.url} target="_blank" rel="noreferrer" className="mc-link whitespace-nowrap text-xs" title="Open in a new tab (middle click works too)">
+                  Open in new tab
+                </a>
+                <button
+                  type="button"
+                  className="mc-link whitespace-nowrap text-xs"
+                  aria-expanded={open}
+                  onClick={() => setSharing(open ? null : { key, data: linkShare(entry.url, entry.name) })}
+                  title="Share this build: a short link to it on this site, and a ready message with the item list"
+                >
+                  Share
+                </button>
+              </span>
               <button type="button" className="px-1 text-xs text-zinc-400 hover:text-white" aria-label={`Delete ${entry.name}`} onClick={() => onDelete(index)}>
                 ✕
               </button>
+            </div>
+            {open && <SharePanel share={sharing.data} onClose={() => setSharing(null)} />}
             </li>
-          ))}
+            );
+          })}
         </ul>
       )}
       {saved.length > 0 && (
@@ -12785,7 +13149,7 @@ function WhyBuildDialog({ build, onClose }) {
               little is thrown away, however strong it is.
             </p>
             <div className="flex flex-col gap-1">
-              <WhyRow label="Effective HP" value={m.minEhp > 0 ? `at least ${formatNumber(Math.round(m.minEhp))}` : "no minimum"} />
+              <WhyRow label="Effective HP" value={ehpRangeText(m) || "any"} />
               <WhyRow label="Mana: spell cycle" value={m.cycle.ids.length ? `${cycleText(m.cycle.ids)} at ${m.cycle.cps} clicks/s${m.cycle.steal ? ", Mana Steal from main attacks (M)" : ""}${m.cycle.gain ? ", ability mana counted" : ""}, balance ${rangeValueText(manaRangeOf(m.cycle), rangeUi("mana", build.level))}` : "no cycle"} />
               <WhyRow label="Life recovery" value={lifeRangeOf(m) ? rangeValueText(lifeRangeOf(m), rangeUi("life", build.level)) : m.requireSustain ? "more than 0 HP/s" : "any"} />
               <WhyRow label="Walk Speed" value={m.spdRange ? rangeValueText(m.spdRange, rangeUi("spd", build.level)) : "any"} />
@@ -12842,7 +13206,7 @@ function WhyBuildDialog({ build, onClose }) {
               <WhyRow
                 label="Effective HP"
                 value={`${formatNumber(Math.round(hpNow))} HP ÷ (${(AGILITY_DAMAGE_TAKEN * agiPct + (1 - agiPct) * (1 - defPct)).toFixed(3)} damage taken) ÷ ${(classMult * treeDefence).toFixed(2)} = ${formatNumber(Math.round(m.ehp))}`}
-                good={m.minEhp > 0 ? m.ehp >= m.minEhp : null}
+                good={ehpRangeText(m) ? (m.minEhp <= 0 || m.ehp >= m.minEhp) && !(Number(m.maxEhp) > 0 && m.ehp > m.maxEhp + 1e-9) : null}
                 hint={`Defence ${(defPct * 100).toFixed(1)}% less damage, Agility ${(agiPct * 100).toFixed(1)}% dodge (10% damage when dodging), class multiplier ${classMult.toFixed(2)}${treeDefence !== 1 ? `, tree resistances ×${treeDefence.toFixed(2)}` : ""}.`}
               />
               {m.cycle.ids.length > 0 && (
@@ -15800,9 +16164,10 @@ function workspaceFromWynnbuilderLink(text) {
 // b: ten sam kod co "Open in Wynnbuilder" (9 przedmiotów z powderami, skill pointy, poziom, tomy, aspekty, drzewko), więc
 // link Wynnbuildera też da się otworzyć tutaj. s: ustawienia formularza (JSON z krótkimi kluczami -> base64url; wersja
 // formatu v, przypięte i wykluczone przedmioty jako numery Wynnbuildera). Klasa wynika z broni, archetyp z drzewka.
-const SHARE_VERSION = 1;
+// 1 (0.37): wszystkie ustawienia; 2 (0.38): tylko to, co różni się od domyślnych - brakujący klucz = wartość domyślna
+const SHARE_VERSION = 2;
 const SITE_URL = "https://szvm3k.github.io/builderwynncraft/";
-// Adres strony do "Share link": własny adres na GitHub Pages / lokalnie, w innym miejscu (np. artifact) - SITE_URL.
+// Adres strony do "Share": własny adres na GitHub Pages / lokalnie, w innym miejscu (np. artifact) - SITE_URL.
 function siteBaseUrl() {
   try {
     const loc = window.location;
@@ -15828,18 +16193,18 @@ const rangeToPair = (range) => {
   return value ? [value.min, value.max] : null;
 };
 const pairToRange = (pair) => (Array.isArray(pair) ? { min: pair[0] ?? null, max: pair[1] ?? null } : { min: null, max: null });
-// Ustawienia generatora (formularz, opcje przedmiotów, ranga) -> s.
-function encodeShareSettings({ form, options, rank }) {
+// Ustawienia generatora (formularz, opcje przedmiotów, ranga) jako obiekt z krótkimi kluczami.
+function shareSettingsData({ form, options, rank }) {
   const f = migrateDamageForm(form);
   const o = normalizeOptions(options || DEFAULT_OPTIONS);
   const id = (name) => (WB_IDS.items[name] !== undefined ? WB_IDS.items[name] : name);
-  const data = {
-    v: SHARE_VERSION,
+  return {
     r: rank || "",
     g: f.goal,
     c: f.cycle || "",
     p: f.cps,
     e: f.minEhp,
+    eh: Number(f.maxEhp) > 0 ? Math.round(f.maxEhp) : null,
     m: rangeToPair(f.drain),
     l: rangeToPair(f.lr),
     w: rangeToPair(f.spd),
@@ -15851,7 +16216,21 @@ function encodeShareSettings({ form, options, rank }) {
     pr: f.preset || "",
     tp: f.treePreset || null,
   };
-  return b64urlEncode(JSON.stringify(data));
+}
+let shareDefaultsCache = null;
+function shareDefaults() {
+  if (!shareDefaultsCache) shareDefaultsCache = shareSettingsData({ form: DEFAULT_DAMAGE_FORM, options: DEFAULT_OPTIONS, rank: "" });
+  return shareDefaultsCache;
+}
+// -> s: tylko klucze różne od domyślnych (krótki link; zwykle kilkadziesiąt znaków zamiast ~330)
+function encodeShareSettings(args) {
+  const data = shareSettingsData(args);
+  const defaults = shareDefaults();
+  const out = { v: SHARE_VERSION };
+  Object.keys(data).forEach((key) => {
+    if (JSON.stringify(data[key]) !== JSON.stringify(defaults[key])) out[key] = data[key];
+  });
+  return b64urlEncode(JSON.stringify(out));
 }
 // s -> { form, options, rank }. Rzuca błąd przy nieznanej wersji formatu albo uszkodzonym kodzie.
 function decodeShareSettings(code) {
@@ -15864,6 +16243,8 @@ function decodeShareSettings(code) {
   if (!data || typeof data !== "object") throw new Error("The settings part of this link (s=) is damaged.");
   if (!(Number(data.v) >= 1)) throw new Error("The settings part of this link (s=) has no format version.");
   if (Number(data.v) > SHARE_VERSION) throw new Error(`This link was made by a newer version of the site (settings format ${data.v}); reload the page to get the new version.`);
+  // format 2: brakujący klucz = ustawienie domyślne; format 1 miał zawsze wszystkie
+  if (Number(data.v) >= 2) data = { ...shareDefaults(), ...data };
   const name = (value) => (typeof value === "number" ? WB_ITEM_BY_ID.get(value) || null : typeof value === "string" ? value : null);
   const flags = Array.isArray(data.t) ? data.t : [];
   const flag = (index, fallback) => (flags[index] === undefined ? fallback : Boolean(flags[index]));
@@ -15874,6 +16255,7 @@ function decodeShareSettings(code) {
     cycle: typeof data.c === "string" ? data.c.toUpperCase().replace(/[^1-4M]/g, "").slice(0, 16) : "",
     cps: Number(data.p) >= 0.5 && Number(data.p) <= 12 ? Number(data.p) : 3,
     minEhp: data.e === null || data.e === undefined ? null : Math.max(0, Number(data.e) || 0),
+    maxEhp: Number(data.eh) > 0 ? Number(data.eh) : null,
     drain: pairToRange(data.m),
     lr: pairToRange(data.l),
     spd: pairToRange(data.w),
@@ -15918,7 +16300,13 @@ function parseBuildHash(text) {
       const at = part.indexOf("=");
       if (at > 0) parts[part.slice(0, at)] = part.slice(at + 1);
     });
-    return parts.b ? { b: parts.b, s: parts.s || null } : null;
+    let name = "";
+    try {
+      name = parts.n ? decodeURIComponent(parts.n).replace(/\s+/g, " ").trim().slice(0, 60) : "";
+    } catch (error) {
+      name = "";
+    }
+    return parts.b ? { b: parts.b, s: parts.s || null, ...(name ? { n: name } : {}) } : null;
   }
   // link Wynnbuildera (builder/#...) albo sam jego kod
   if (/wynnbuilder/i.test(raw) || /^[0-9A-Za-z+-]{8,}$/.test(hash)) return { b: hash, s: null };
@@ -18313,6 +18701,7 @@ function CreatorFiles({ ws, onWs, onLoad }) {
   const [message, setMessage] = useState("");
   const [importText, setImportText] = useState("");
   const [importNotes, setImportNotes] = useState([]);
+  const [sharing, setSharing] = useState(null); // { name, data } - panel Share pod zapisanym buildem
   const save = () => {
     const name = (ws.name || "").trim() || `${ws.playerClass || "Build"} ${ws.level || 120}`;
     const entry = { name, savedAt: Date.now(), ws: { ...ws, name } };
@@ -18357,22 +18746,34 @@ function CreatorFiles({ ws, onWs, onLoad }) {
           <summary className="cursor-pointer text-xs text-zinc-300">Saved builds ({saved.length})</summary>
           <ul className="mc-divide mt-2 flex flex-col">
             {saved.map((entry) => (
-              <li key={entry.name} className="flex items-center justify-between gap-2 py-1.5 text-sm">
-                <span className="min-w-0 truncate text-zinc-100" title={new Date(entry.savedAt).toLocaleString()}>
-                  {entry.name}
-                  <span className="text-xs text-zinc-500">
-                    {" "}
-                    · {entry.ws.playerClass || "?"} {entry.ws.level || 120}
+              <li key={entry.name} className="flex flex-col gap-1.5 py-1.5 text-sm">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="min-w-0 truncate text-zinc-100" title={new Date(entry.savedAt).toLocaleString()}>
+                    {entry.name}
+                    <span className="text-xs text-zinc-500">
+                      {" "}
+                      · {entry.ws.playerClass || "?"} {entry.ws.level || 120}
+                    </span>
                   </span>
-                </span>
-                <span className="flex flex-shrink-0 gap-1">
-                  <button type="button" onClick={() => onLoad(sanitizeWorkspace(entry.ws), `"${entry.name}"`)} className="mc-btn mc-btn-sm">
-                    Load
-                  </button>
-                  <button type="button" onClick={() => remove(entry.name)} className="mc-btn mc-btn-sm" aria-label={`Delete ${entry.name}`} title="Delete from this browser">
-                    ✕
-                  </button>
-                </span>
+                  <span className="flex flex-shrink-0 gap-1">
+                    <button type="button" onClick={() => onLoad(sanitizeWorkspace(entry.ws), `"${entry.name}"`)} className="mc-btn mc-btn-sm">
+                      Load
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSharing(sharing && sharing.name === entry.name ? null : { name: entry.name, data: workspaceShare({ ...sanitizeWorkspace(entry.ws), name: entry.name }) })}
+                      className={`mc-btn mc-btn-sm ${sharing && sharing.name === entry.name ? "mc-btn-on" : ""}`}
+                      aria-expanded={Boolean(sharing && sharing.name === entry.name)}
+                      title="Share this build: a short link to it on this site, and a ready message with the item list"
+                    >
+                      Share
+                    </button>
+                    <button type="button" onClick={() => remove(entry.name)} className="mc-btn mc-btn-sm" aria-label={`Delete ${entry.name}`} title="Delete from this browser">
+                      ✕
+                    </button>
+                  </span>
+                </div>
+                {sharing && sharing.name === entry.name && <SharePanel share={sharing.data} onClose={() => setSharing(null)} />}
               </li>
             ))}
           </ul>
@@ -18895,6 +19296,8 @@ function ManualWorkspace({ mode, ws, onWs, tab, onTab, onSendToOptimizer = null,
   const stats = useMemo(() => (build ? computeBuildStats(build, build.treeSettings) : null), [build]);
   const gaps = useMemo(() => workspaceGaps(ws, manualBuild(ws)), [ws]);
   const extras = useMemo(() => workspaceExtras(viewWs), [viewWs]);
+  // link Wynnbuildera w nagłówku (z tomami i aspektami tego buildu); Share liczy wiadomość przy kliknięciu
+  const headLink = useMemo(() => (build && build.slots.some((slot) => slot.item) ? wynnbuilderLinkFor(build, build.treeSettings, false, extras) : null), [build, extras]);
   const level = build ? build.level : ws.level || 120;
   const optimizerMode = mode === "optimizer";
   const change = (patch) => onWs((current) => ({ ...current, ...(typeof patch === "function" ? patch(current) : patch) }));
@@ -19027,7 +19430,7 @@ function ManualWorkspace({ mode, ws, onWs, tab, onTab, onSendToOptimizer = null,
         {tab === "build" && ws.playerClass && build && (
           <>
             <section className="mc-panel flex flex-col gap-3 p-4">
-              <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <div className="flex flex-wrap items-start justify-between gap-2">
                 <h2 className="mc-title text-xl">
                   {ws.name || "Your build"}{" "}
                   <span className="text-zinc-400">
@@ -19036,6 +19439,9 @@ function ManualWorkspace({ mode, ws, onWs, tab, onTab, onSendToOptimizer = null,
                     {ws.level ? "" : " (no level set)"}
                   </span>
                 </h2>
+                {headLink && <BuildLinkBar wbUrl={headLink.url} share={() => workspaceShare(viewWs)} />}
+              </div>
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
                 <p className="text-sm text-zinc-400">
                   <span className="tabular-nums text-zinc-200">{filled}</span>/9 items · <span className="tabular-nums text-zinc-200">{build.apUsed}</span>/{build.apCap} AP · skill points{" "}
                   <span className="tabular-nums" style={ts({ color: build.skillPoints.valid ? undefined : "#FF5555" })}>
@@ -19508,7 +19914,8 @@ export default function BuildRecommender() {
   );
   const ehpMax = playerClass && level ? reachableEhp(playerClass, level) : 100000;
   const damageGoal = resolveGoal(damageGoals, damageForm.goal);
-  const damageMinEhp = damageForm.minEhp === null || damageForm.minEhp === undefined ? defaultMinEhp(ehpMax) : Math.min(damageForm.minEhp, ehpMax);
+  const damageMinEhp = formMinEhp(damageForm, ehpMax);
+  const damageMaxEhp = formMaxEhp(damageForm, ehpMax);
   // ustawienia generatora bez progu EHP: lista buildów pod suwakiem obowiązuje, dopóki się nie zmienią
   const sweepKeyOf = (opts) => JSON.stringify([
     playerClass,
@@ -19550,6 +19957,7 @@ export default function BuildRecommender() {
     damageForm.freeSp !== false,
     itemFilterKey(normalizeOptions(options)),
     Math.round(damageMinEhp),
+    Math.round(damageMaxEhp || 0),
   ]);
   // ograniczenia ustawione w zakładce "Old" (rzadkości, budżet, przypięte, rynek) działają też tutaj
   const damageRestrictions = useMemo(() => {
@@ -19578,7 +19986,7 @@ export default function BuildRecommender() {
   const headerLink = useWynnbuilderLink(linkBuild, buildTreeSettings, withExtras);
   // adres strony z buildem: #b=<kod>&s=<ustawienia z chwili generowania>
   const pageHash = sharedView
-    ? `b=${sharedView.b}${sharedView.s ? `&s=${sharedView.s}` : ""}`
+    ? `b=${sharedView.b}${sharedView.s ? `&s=${sharedView.s}` : ""}${sharedView.name ? `&n=${encodeURIComponent(sharedView.name)}` : ""}`
     : generated && generated.mode === "damage" && headerLink && result && result.settings && !guideView && !solverView
       ? `b=${headerLink.hash}&s=${encodeShareSettings(result.settings)}`
       : null;
@@ -19589,6 +19997,15 @@ export default function BuildRecommender() {
       : solverView && headerLink
         ? `${siteBaseUrl()}#b=${headerLink.hash}`
         : null;
+  // Share w nagłówku: link tej strony + wiadomość z listą przedmiotów (liczona przy kliknięciu)
+  // domyślnie krótki link (sam build, jak Wynnbuilder); z ustawieniami generatora - na życzenie (pole w panelu Share)
+  const shareFor = () => {
+    const shortUrl = sharedView ? shareUrlFor({ code: sharedView.b, name: sharedView.name || "" }) : headerLink ? shareUrlFor({ code: headerLink.hash }) : null;
+    if (!build || !shortUrl) return null;
+    const common = { build, name: sharedView ? sharedView.name || "" : "", summary: shareSummary(build, buildStats), wbUrl: sharedView ? WB_BUILDER_URL + sharedView.b : headerLink ? headerLink.url : null };
+    const short = buildShareMessage({ ...common, url: shortUrl });
+    return { ...short, withSettings: shareUrl && shareUrl !== shortUrl && /&s=/.test(shareUrl) ? buildShareMessage({ ...common, url: shareUrl, shortUrl }) : null };
+  };
   const formGoalId = damageGoal && build && build.playerClass === playerClass ? damageGoal.id : null;
   const extrasEnv = useMemo(
     () => (build && extrasTabVisible && !extrasLocked(build.level) ? extrasEnvFor(build, buildTreeSettings, formGoalId, formCycle) : null),
@@ -19602,6 +20019,7 @@ export default function BuildRecommender() {
           generated.playerClass !== playerClass ||
           goalKey(generated.goal) !== (damageGoal ? goalKey(damageGoal.id) : "null") ||
           Math.round(generated.metrics.minEhp) !== Math.round(damageMinEhp) ||
+          Math.round(Number(generated.metrics.maxEhp) || 0) !== Math.round(damageMaxEhp || 0) ||
           cycleText(generated.metrics.cycle.ids) !== cycleText(parseCycle(damageForm.cycle)) ||
           generated.metrics.cycle.cps !== damageForm.cps ||
           Boolean(generated.metrics.cycle.poison) !== Boolean(damageForm.poison) ||
@@ -19675,6 +20093,7 @@ export default function BuildRecommender() {
       rollPercent: damageForm.rolls === "avg" ? 50 : 100,
       lifeRange: formLifeRange(damageForm),
       spdRange: formSpdRange(damageForm),
+      maxEhp: damageMaxEhp,
       excludeEvents: damageForm.noEvents !== false,
       tradeableOnly: Boolean(damageForm.tradeable),
       spendFreeSkillPoints: damageForm.freeSp !== false,
@@ -19836,7 +20255,8 @@ export default function BuildRecommender() {
   useEffect(() => {
     if (!sweepOpen || !sweep || sweep.key !== sweepKeyNow || sweep.rows || sweep.running || !sweepSource.current || sweepSource.current.key !== sweep.key) return undefined;
     const shown = result && result.build && result.build.mode === "damage" ? result.build : null;
-    const timer = setTimeout(() => runSweep(sweepSource.current, shown), 50);
+    // build z maksimum EHP nie jest wierszem listy (lista liczy same minima)
+    const timer = setTimeout(() => runSweep(sweepSource.current, shown && Number(shown.metrics.maxEhp) > 0 ? null : shown), 50);
     return () => clearTimeout(timer);
   }, [sweepOpen, sweep, sweepKeyNow]); // eslint-disable-line react-hooks/exhaustive-deps
   // ---- lista buildów dla kolejnych progów EHP ----
@@ -19883,7 +20303,7 @@ export default function BuildRecommender() {
         publish(true);
         try {
           const seeds = [];
-          const build = await runDamageGeneration({ ...source.params, seeds, minEhp: row.minEhp, effort: "quick" });
+          const build = await runDamageGeneration({ ...source.params, seeds, minEhp: row.minEhp, maxEhp: null, effort: "quick" });
           if (sweepToken.current !== token) return;
           row.build = build;
           row.status = build.passed ? "done" : "fail";
@@ -19931,8 +20351,8 @@ export default function BuildRecommender() {
 
   function pickSweepRow(row) {
     if (!row.build) return;
-    setResult({ build: row.build, run: (result ? result.run : 0) + 1, ms: row.build.stats ? row.build.stats.ms : 0, at: new Date(), settings: { form: { ...damageForm, minEhp: row.minEhp }, options, rank } });
-    setDamageForm((current) => ({ ...current, minEhp: row.minEhp }));
+    setResult({ build: row.build, run: (result ? result.run : 0) + 1, ms: row.build.stats ? row.build.stats.ms : 0, at: new Date(), settings: { form: { ...damageForm, minEhp: row.minEhp, maxEhp: null }, options, rank } });
+    setDamageForm((current) => ({ ...current, minEhp: row.minEhp, maxEhp: Number(current.maxEhp) > 0 && current.maxEhp < row.minEhp ? null : current.maxEhp ?? null }));
     setGuideView(null);
     setSolverView(null);
     setSharedView(null);
@@ -20030,7 +20450,7 @@ export default function BuildRecommender() {
       setDamageForm((current) => ({ ...current, preset: ws.archetype || current.preset, treePreset: null, goal: null }));
     }
     if (!rankConfirmed && !(settings && settings.rank)) setRankConfirmed(true);
-    setSharedView({ b: parsed.b, s: parsed.s || null, ws, notes, build: sharedBuildNow });
+    setSharedView({ b: parsed.b, s: parsed.s || null, name: parsed.n || "", ws, notes, build: sharedBuildNow });
     setGuideView(null);
     setSolverView(null);
     setTab("build");
@@ -20057,7 +20477,7 @@ export default function BuildRecommender() {
     const list = [{ name, url: shareUrl, savedAt: new Date().toISOString(), metrics }, ...savedLinks.list].slice(0, SAVED_LINKS_MAX);
     const ok = storeSavedLinks(list);
     setSavedLinks({ ok, list });
-    return ok ? `Saved "${name}" (Saved builds, bottom of the left panel).` : "This browser doesn't allow saving here - use Share link instead.";
+    return ok ? `Saved "${name}" (Saved builds, bottom of the left panel).` : "This browser doesn't allow saving here - use Share instead.";
   }
   function deleteSavedLink(index) {
     const list = savedLinks.list.filter((_, i) => i !== index);
@@ -20478,7 +20898,7 @@ export default function BuildRecommender() {
                     <h2 className="mc-title text-xl">
                       #{solverView.candidate.rank} · {build.playerClass} level {build.level}
                     </h2>
-                    {headerLink && <BuildLinkBar wbUrl={headerLink.url} shareUrl={shareUrl} onSave={saveCurrentBuild} saveName={`Solver #${solverView.candidate.rank} · ${build.playerClass} lv ${build.level}`} />}
+                    {headerLink && <BuildLinkBar wbUrl={headerLink.url} shareUrl={shareUrl} share={shareFor} onSave={saveCurrentBuild} saveName={`Solver #${solverView.candidate.rank} · ${build.playerClass} lv ${build.level}`} />}
                   </div>
                   <div className="flex flex-wrap items-baseline justify-between gap-2">
                     <p className="text-sm text-zinc-400">
@@ -20505,14 +20925,15 @@ export default function BuildRecommender() {
                   <p className="mc-gold text-xs uppercase">Shared build</p>
                   <div className="flex flex-wrap items-start justify-between gap-2">
                     <h2 className="mc-title text-xl">
+                      {sharedView.name ? `${sharedView.name} · ` : ""}
                       {build.archetype} {build.playerClass} <span className="text-zinc-400">· level {build.level}</span>
                     </h2>
-                    <BuildLinkBar wbUrl={WB_BUILDER_URL + sharedView.b} shareUrl={shareUrl} onSave={saveCurrentBuild} saveName={saveName} />
+                    <BuildLinkBar wbUrl={WB_BUILDER_URL + sharedView.b} shareUrl={shareUrl} share={shareFor} onSave={saveCurrentBuild} saveName={sharedView.name || saveName} />
                   </div>
                   <p className="text-sm text-zinc-400">
                     {sharedView.s
                       ? "Opened from a link, with its generator settings - the form on the left has them now."
-                      : "Opened from a Wynnbuilder link: items, powders, skill points, tree, tomes and aspects from the link; your generator settings stay."}
+                      : "Opened from a link: items, powders, skill points, tree, tomes and aspects from the link; your generator settings stay."}
                   </p>
                   {sharedView.notes.length > 0 && <p className="text-sm text-amber-300">{sharedView.notes.join(" ")}</p>}
                   <div className="flex flex-wrap gap-2">
@@ -20524,6 +20945,14 @@ export default function BuildRecommender() {
                       title="Runs the generator with these settings. The result can differ from this build if the item data or the generator changed since the link was made."
                     >
                       Regenerate with these settings
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => copyToMode("creator", { ...sharedView.ws, name: sharedView.name || "" }, "a shared link")}
+                      className="mc-btn"
+                      title="Copies this build to the Build Creator to change it by hand; your previous Creator build can be restored with Undo"
+                    >
+                      Edit in Creator ✎
                     </button>
                     {generated && (
                       <button type="button" onClick={() => setSharedView(null)} className="mc-btn">
@@ -20573,7 +21002,7 @@ export default function BuildRecommender() {
                     <h2 className="mc-title text-xl">
                       {build.archetype} {build.playerClass} <span className="text-zinc-400">· level {build.level}</span>
                     </h2>
-                    {headerLink && <BuildLinkBar wbUrl={headerLink.url} shareUrl={shareUrl} onSave={saveCurrentBuild} saveName={saveName} />}
+                    {headerLink && <BuildLinkBar wbUrl={headerLink.url} shareUrl={shareUrl} share={shareFor} onSave={saveCurrentBuild} saveName={saveName} />}
                   </div>
                   <p className="text-sm text-zinc-400">
                     {build.mode === "damage" ? (
@@ -20805,6 +21234,21 @@ export const __engine = {
   rollKey,
   rollsOf,
   withSlotRolls,
+  buildShareMessage,
+  shareUrlFor,
+  shareSummary,
+  linkShare,
+  workspaceShare,
+  powderGroupsText,
+  ehpUi,
+  ehpPctPair,
+  ehpFormPatch,
+  ehpValueText,
+  formMinEhp,
+  formMaxEhp,
+  guideBuildResult,
+  DEFAULT_OPTIONS,
+  WB_BUILDER_URL,
   applyBuildRolls,
   workspaceItem,
   slotAlternatives,

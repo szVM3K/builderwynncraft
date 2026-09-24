@@ -4,7 +4,8 @@ Pick a level, class and ability-tree archetype and get a full 9-slot build (Helm
 2× Ring, Bracelet, Necklace, Weapon) chosen from every item in Wynnbuilder's database and validated against the
 game's skill-point rules. Two more modes share the page: the **Build Optimizer** fills in a build you started (and
 never changes what you picked) and the **Build Creator** is a manual editor like Wynnbuilder. Every build has its
-own address (`#b=<Wynnbuilder code>&s=<settings>`), so it can be shared, saved in the browser and compared in tabs.
+own address (`#b=<Wynnbuilder code>&s=<settings>`), so it can be shared, saved in the browser and compared in tabs;
+**Share** copies a short link to the build and a ready message with the item list.
 
 ## Live site (GitHub Pages)
 
@@ -38,6 +39,7 @@ npm run test:workers # Web Worker tasks give the same build as one thread (2 sce
 npm run test:discord # Discord feedback fixes: rolls, Mana/Life Steal from M hits, poison, drain, life recovery, whole cycle, guide tree presets
 npm run test:optimizer # Optimizer/Creator: full search = every combination, your picks stay, full >= quick, Wynnbuilder import/export round trip, ~2-3 min
 npm run test:feedback  # 0.37 fixes: Exclude = Generate, Fits my skill points, range sliders (mana, life, walk speed), migration, ring rolls, welcome v2
+npm run test:share     # 0.38: Share (short link + message with the item list), short settings links, Effective HP range
 npx vite-node scripts/compare-defaults.mjs -- 0 1 50,80,106  # what the new default ranges change vs Any (0.35 behaviour)
 npm run bench:optimizer -- 45 Warrior,Mage 106  # full-search benchmark: 1-9 empty slots per class vs the beam (seconds per run, classes, level)
 npm run test:deep    # deep optimality certificate: exhaustive pair swaps + triples for 8 builds, ~15-20 min
@@ -288,7 +290,7 @@ isn't updated yet right after `setOptions`). The progress bar and Stop work as f
 the archetype weights stay for Other picks, the Build Solver and guide builds.
 
 **Wynnbuilder link always visible.** The build header (next to the archetype and level) has **Wynnbuilder ↗**,
-**Copy link**, **Share link** and **Save**, also for Build Solver results (with the tree of the current class, like
+**Copy link**, **Share** (0.38; in 0.37 *Share link*) and **Save**, also for Build Solver results (with the tree of the current class, like
 the Tomes and Aspects tabs); on a phone they wrap under the title. The block under the cards stays; both use the same
 link (`useWynnbuilderLink`), also with *With the recommended tomes and aspects* checked.
 
@@ -369,6 +371,54 @@ behaviour). All 30 default builds pass, with no warnings.
 - **Time.** When the *Any* build doesn't fit, the default run takes a median 1.2-1.3× as long (0.6-4.7× on a
   2-core machine running both shards at once).
 
+### Share, Effective HP range and section headings (0.38.0)
+
+**Share.** The build header (Recommender, Build Solver results, shared builds, Creator and Optimizer) has **Share**,
+and so does every row of both *Saved builds* lists. It opens a panel with a preview of the message and:
+
+- **Copy message** – plain text that reads well anywhere (chats, forum posts, notes): the build's title, the short
+  link, then the nine item names in slot order, each on its own line after `> ` (powders in brackets, e.g.
+  `> Tisaun's Proof [2× Earth VII]`; `—` for an empty slot). Where `>` makes a quote (Discord, Slack, WhatsApp) the
+  list gets the grey bar known from the preview under a Wynnbuilder link; elsewhere it is just a list. No slot names,
+  no numbers line, no markup; at most 2000 characters (the lowest limit of the common chats).
+- **Copy link only** – the address of this build on this site, and **Send…** on phones (the system share menu).
+- **Include my generator settings** – off by default: the link is then just the build (`#b=<Wynnbuilder code>`,
+  about 95 characters, like a Wynnbuilder link). With it the link also has `&s=…`, so the other person can press
+  *Regenerate with these settings*.
+
+Why a message and not a link preview: the site is static (GitHub Pages) and the part after `#` never reaches a
+server, so a chat's link preview can't know which items a link holds; Wynnbuilder's page has no preview tags either.
+A build-specific preview would need a small server (for example a Cloudflare Worker) that reads the build from the
+address and answers with the item list.
+
+A build from the Creator (or a saved Creator build) gets its name into the link (`&n=<name>`, brackets encoded so
+a chat doesn't cut them off the link); a shared link shows that name in its title. **Edit in Creator ✎** on a shared build
+copies it into the Build Creator (your previous Creator build can be restored with Undo). Sharing needs a weapon:
+the link takes the class from it.
+
+**Shorter addresses.** The settings part `s=` is now format 2: only what differs from the default form (format 1
+wrote every setting, about 330 characters; a typical address is now about 130 in total). Missing keys mean the
+default; format 1 links (0.37) still open with the same settings.
+
+**Effective HP range.** Effective HP is a two-handle range slider like mana, life and walk speed: the minimum and an
+optional maximum, in 2% steps of the most EHP the level can reach (the left end = no minimum, the right end = no
+maximum; presets Any, Light 20%, Balanced 25% = the default, Sturdy 35%, Tank 50%). The form keeps EHP numbers
+(`minEhp`, `maxEhp`), so saved settings, links (`e`, `eh`) and the list of builds for every EHP step work as before.
+The maximum is handled like the other maximums: the first search runs without it; if its build is already under
+it, that is the result (a maximum never makes a build weaker than the same settings without it); otherwise a second
+search with both ends starts from it. Free skill points only raise EHP (Defence, Agility), so the shortcut "all free
+points" checks the maximum on the build without them. The setup guide's *Effective HP* step has the same slider
+and the named quick picks (Glass cannon … Wall) for the minimum.
+
+**Section headings.** In the left panel every section (Ability tree, Maximise, Must have, Mana: spell cycle, Items)
+is separated by a bar a little darker than the panel (`SectionBar`, class `wbr-sep`), and every subsection
+(Effective HP, Life recovery, Walk Speed, Mana balance, Items › Filters, How builds are counted, Weapon attack
+speed, Weapon powders) has a yellow heading like *ITEMS* (`SUB_HEAD`, class `wbr-sub`). Items is split into
+*Filters* and *How builds are counted*, like the setup guide. In the setup guide the sections (Filters, How builds
+are counted, Walk Speed, Weapon attack speed; Clicks per second, Mana balance, Life recovery, Spell cycle, Presets)
+have yellow uppercase headings like the step title and the same bars (`SECTION_HEAD`); the doubled "Walk speed /
+Walk Speed" label is gone. Both themes: the light theme uses a darker gold and a grey bar.
+
 ### Generating a build
 
 The generator asks *what is the strongest build that still survives and still pays for its spells?* (Until
@@ -389,9 +439,9 @@ The generator asks *what is the strongest build that still survives and still pa
    for spells that deal their damage over time (Multihit, Arrow Storm, totems): maximise the total spell damage of
    the cycle at an acceptable mana drain.
 4. **Must have** (pass/fail, never weights):
-   - **Effective HP** – a slider in 5% steps of the most EHP your level can reach (`src/ehp-range.json`).
-   - **Life sustain > 0** (optional) – life recovery (below) must stay above zero, so the build doesn't drain your
-     health.
+   - **Effective HP** – a range slider (minimum and optional maximum) in 2% steps of the most EHP your level can
+     reach (`src/ehp-range.json`); see *Share, Effective HP range and section headings (0.38.0)*.
+   - **Life recovery** and **Walk Speed** – range sliders (0.37).
    - **Mana: spell cycle** – spells (1-4) and main attacks (**M**) you do in a loop, clicks per second, Mana Steal
      and ability mana on/off. A spell is 3 clicks; M is one main attack, never faster than the weapon's attacks per
      second (after attack speed tiers). Income is `(Mana Regen + 25) / 5` plus Mana Steal **only from the cycle's M

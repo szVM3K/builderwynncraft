@@ -1,7 +1,7 @@
 {
   "name": "wynncraft-build-recommender",
   "private": true,
-  "version": "0.37.0",
+  "version": "0.38.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -23,6 +23,7 @@
     "test:discord": "vitest run tests/discord.test.js",
     "test:optimizer": "vitest run tests/optimizer.test.js",
     "test:feedback": "vitest run tests/feedback.test.js",
+    "test:share": "vitest run tests/share.test.js",
     "bench:optimizer": "vite-node scripts/bench-optimizer.mjs --",
     "test:deep": "vitest run --config vitest.deep.config.js",
     "test:soak": "vitest run --config vitest.soak.config.js"

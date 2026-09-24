@@ -49,6 +49,7 @@ export function archetypeCycles(playerClass, archetype, level, treeSettings) {
  *   goal       "first" (strongest spell, the UI default) | "main" | "random" | "multi" (two goals, their sum) | "cycle"
  *              (whole cycle DPS, needs a cycle) | spell id
  *   ehpPct     minimum EHP as % of the reachable maximum (the UI slider; 0 = off)
+ *   ehpMaxPct  maximum EHP as % of the reachable maximum (0.38 range slider; absent = Any)
  *   cycle      "none" | "first" | "random" | array of spell ids (0 = main attack, "M")
  *   cps, steal, gain, poison, drain, requireSustain, excludeEvents, tradeableOnly, options  as in the UI
  *   mana, life, spd   range sliders (0.37): { min, max } with null = Any; mana = the cycle's mana balance (mana/s),
@@ -73,6 +74,7 @@ export function makeScenario(s) {
   const ehpPct = s.ehpPct ?? 25;
   const step = Math.max(1, Math.round(ehpMax / 20)); // the UI slider moves in 5 % steps
   const minEhp = ehpPct > 0 ? step * Math.round(ehpPct / 5) : 0;
+  const maxEhp = s.ehpMaxPct > 0 ? Math.max(minEhp, Math.round((s.ehpMaxPct / 100) * ehpMax)) : null;
   let cycleIds = [];
   const cycles = archetypeCycles(playerClass, archetype, level, treeSettings);
   if (Array.isArray(s.cycle)) cycleIds = s.cycle;
@@ -94,6 +96,7 @@ export function makeScenario(s) {
     goal,
     cycle,
     minEhp,
+    ...(maxEhp !== null ? { maxEhp } : {}),
     requireSustain: Boolean(s.requireSustain),
     minSustain: s.lr ?? 0,
     ...(lifeRange !== undefined ? { lifeRange } : {}),
@@ -109,7 +112,7 @@ export function makeScenario(s) {
     const r = E.normalizeRange(range);
     return r ? ` ${name} ${r.min ?? "any"}..${r.max ?? "any"}` : "";
   };
-  const label = `${playerClass}/${archetype} L${level} ${goalName} EHP≥${ehpPct}%${cycleIds.length ? ` cycle ${E.cycleText(cycleIds)}@${cycle.cps}${cycle.mana !== undefined ? rangeText("mana", cycle.mana) : cycle.drain ? ` drain ${cycle.drain}` : ""}` : ""}${lifeRange !== undefined ? rangeText("life", lifeRange) : ""}${rangeText("walk", spdRange)}${cycle.poison ? " +poison" : ""}${params.rollPercent !== 100 ? ` rolls ${params.rollPercent}%` : ""}${params.requireSustain ? " sustain" : ""}${params.minSustain ? ` life≥${params.minSustain}` : ""}${params.tradeableOnly ? " tradeable" : ""}${params.excludeEvents ? "" : " +events"}${describeOptions(params.options)}`;
+  const label = `${playerClass}/${archetype} L${level} ${goalName} EHP≥${ehpPct}%${maxEhp !== null ? `≤${s.ehpMaxPct}%` : ""}${cycleIds.length ? ` cycle ${E.cycleText(cycleIds)}@${cycle.cps}${cycle.mana !== undefined ? rangeText("mana", cycle.mana) : cycle.drain ? ` drain ${cycle.drain}` : ""}` : ""}${lifeRange !== undefined ? rangeText("life", lifeRange) : ""}${rangeText("walk", spdRange)}${cycle.poison ? " +poison" : ""}${params.rollPercent !== 100 ? ` rolls ${params.rollPercent}%` : ""}${params.requireSustain ? " sustain" : ""}${params.minSustain ? ` life≥${params.minSustain}` : ""}${params.tradeableOnly ? " tradeable" : ""}${params.excludeEvents ? "" : " +events"}${describeOptions(params.options)}`;
   return { label, params, meta: { ehpMax, ehpPct, goals, cycles, treeIds: tree.ids } };
 }
 

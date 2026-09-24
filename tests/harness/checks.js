@@ -84,7 +84,8 @@ export function makeEvaluator(params) {
     const judge = (m, extra) => {
       const spent = sp.total + E.SKILLS.reduce((sum, skill) => sum + ((extra && extra[skill]) || 0), 0);
       const spOk = spent <= ctx.available && sp.capOverflow === 0 && E.SKILLS.every((skill) => (sp.assigned[skill] || 0) + ((extra && extra[skill]) || 0) <= E.MAX_ASSIGNED_PER_SKILL);
-      const ehpOk = params.minEhp <= 0 || m.ehp >= params.minEhp;
+      // EHP: minimum and (0.38) optional maximum
+      const ehpOk = (params.minEhp <= 0 || m.ehp >= params.minEhp) && !(Number(params.maxEhp) > 0 && m.ehp > Math.max(params.maxEhp, params.minEhp) + 1e-9);
       const manaOk = E.manaOk(m, cycle);
       // life: the 0.37 range (lifeRange) or the old minimum (minSustain); walk speed: spdRange (null = Any)
       const lifeRange = params.lifeRange !== undefined ? E.normalizeRange(params.lifeRange) : params.minSustain > 0 ? { min: params.minSustain, max: null } : null;
@@ -101,7 +102,7 @@ export function makeEvaluator(params) {
         const j = judge(metrics, null);
         if (j.feasible) return 1e15 + metrics.damage;
         let miss = 0;
-        if (!j.ehpOk) miss += 1 - metrics.ehp / params.minEhp;
+        if (!j.ehpOk) miss += params.minEhp > 0 && metrics.ehp < params.minEhp ? 1 - metrics.ehp / params.minEhp : Math.min(1, (metrics.ehp - params.maxEhp) / Math.max(1, params.maxEhp * 0.25));
         if (!j.manaOk) {
           const range = cycle.mana;
           const floor = range && range.min !== null ? range.min : null;
@@ -299,7 +300,7 @@ export async function checkBuild(scenario, build, { limits = DEFAULT_LIMITS, pai
 
   // 4. "passed" must mean every hard filter holds.
   if (build.passed && !asReported.feasible)
-    add("error", "PASSED_BUT_INFEASIBLE", `build says it passes, but: ${[!asReported.spOk && "skill points", !asReported.ehpOk && `EHP ${Math.round(asReported.ehp)} < ${params.minEhp}`, !asReported.manaOk && `mana ${asReported.manaNet.toFixed(2)}/s`, !asReported.sustainOk && `sustain ${asReported.sustain.toFixed(1)}`, !asReported.speedOk && `walk speed ${Math.round(asReported.walkSpeed)}%`, asReported.illegal && "illegal set", asReported.clash && "ring duplicate"].filter(Boolean).join(", ")}`);
+    add("error", "PASSED_BUT_INFEASIBLE", `build says it passes, but: ${[!asReported.spOk && "skill points", !asReported.ehpOk && `EHP ${Math.round(asReported.ehp)} outside ${params.minEhp}..${params.maxEhp || "any"}`, !asReported.manaOk && `mana ${asReported.manaNet.toFixed(2)}/s`, !asReported.sustainOk && `sustain ${asReported.sustain.toFixed(1)}`, !asReported.speedOk && `walk speed ${Math.round(asReported.walkSpeed)}%`, asReported.illegal && "illegal set", asReported.clash && "ring duplicate"].filter(Boolean).join(", ")}`);
   if (!build.passed && asReported.feasible) add("error", "FEASIBLE_BUT_FAILED", "build reports a failed filter although every filter holds");
 
   // 5. Local optimality: no single swap (any allowed item, any powder element on the weapon) may improve the
