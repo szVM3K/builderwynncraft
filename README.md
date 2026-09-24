@@ -137,6 +137,14 @@ once the text has been scrolled to the end; the page behind it doesn't scroll me
 in `localStorage` (`wbr-welcome-confirmed-v1`), so the popup doesn't come back; if the browser blocks storage it
 simply shows again on the next visit.
 
+### Info button
+
+**ⓘ Info** in the bottom-right corner (always there) opens a guide: how to use the Build Recommender step by step,
+what goes into the math (damage, rolls, skill points, EHP, mana and life formulas, and what is *not* counted -
+poison unless turned on, powder specials, tomes and aspects, spell durations, crafted items, enemies' resistances
+and team buffs) and how the search works. It starts and ends with the reminder that every build and number is a
+suggestion, a recommendation from a model of the game - not a guarantee.
+
 ### Generating a build
 
 The generator asks *what is the strongest build that still survives and still pays for its spells?* (Until
@@ -195,21 +203,26 @@ The generator asks *what is the strongest build that still survives and still pa
    - *Count poison in the goal* (off): adds Poison per second to the goal (spread over the casts for a spell). Off
      by default - how poison stacks and works on bosses isn't known, and counting it made the search pick
      poison-only items (Tarred Gem, Nightlock). The Poison DPS row in the Damage panel is always shown.
-   - *Start from my earlier builds* (off): also start from every build of the class generated in this session.
-     Off, the same settings always give the same build.
 
-**Setup guide**: after picking a class the main panel walks through the rest the same way - big clickable tiles for
+**Advanced** (folded, at the very bottom of the left panel): **Raid mana buff** - mana per second your raid team's
+buffs give, added to the cycle's mana income (mana filter, drain suggestion, list of builds, Why this build?). Off
+(0) by default: there is no single value for every raid and team.
+
+**Setup guide**: after picking a class the main panel walks through the rest the same way. While it is open the left
+panel is hidden and the guide uses the whole width; the panel comes back as soon as a build is generated. Big clickable tiles for
 the rank, the level, the ability tree (an archetype - the guide stays on this step and shows the loaded tree below
 the tiles, so you can compare archetypes and click abilities to adjust it, then **Use this tree ›**; a **guide
 tree**; or **Your own tree**: it opens the Ability tree tab, where a "Back to the setup guide" button returns with
 the tree you clicked together), what to maximise (one or several spells) (every spell of the tree and the main attack,
-with its damage using the best weapon for your level), how tanky (Glass cannon 0% … Wall 70% of the reachable EHP,
-with the numbers), the mana cycle (clicks per second 2-8 and Mana Steal / ability mana on or off; presets: no filter,
-the archetype's suggested cycles, a "spam" loop for every damage spell of the tree and - folded - the cycles of the
-class's other archetypes; or **Your own cycle**: type the spell numbers or click the spells to add them, with the
-steps and the Mana Regen / Mana Steal it needs shown live; M adds a main attack; allowed drain tiles, the Life
-recovery slider and "Maximise the whole cycle") and extras (life sustain, event items, tradeable only, negative
-defences, weapon attack speed, realistic rolls, poison, earlier builds), then a summary with Generate. **‹ Previous** and **Next ›** at the bottom of every step move one step back or on
+with its damage using the best weapon for your level), how tanky (every 5% step from 0% to 100% of the reachable
+EHP, with the numbers; the named steps Glass cannon, Fragile, Light, Balanced, Sturdy, Tank and Wall are labelled),
+the mana cycle (clicks per second typed in, 0.5-12; Mana Steal / ability mana on or off; allowed drain tiles, the
+Life recovery slider and "Maximise the whole cycle"; then **Your own cycle** first - type the spell numbers or click
+the spells to add them, M adds a main attack, with the steps and the Mana Regen / Mana Steal it needs shown live -
+and below it the presets: no filter, the archetype's suggested cycles, a "spam" loop for every damage spell of the
+tree and - folded - the cycles of the class's other archetypes) and extras (filters: life sustain, event items,
+tradeable only, negative defences; how builds are counted: free skill points, realistic rolls, poison; weapon attack
+speed), then a summary with Generate. **‹ Previous**, **Generate now** and **Next ›** sit at the top of the guide
 (Previous on the rank step returns to the class choice). A row of steps on top shows what is chosen and jumps back to any step; the left panel shows
 the same settings. On a phone the guide comes before the form.
 
@@ -307,10 +320,9 @@ third click (before: 24, and four got weaker); the one exception had nothing pas
 the tie-break on damage. The price is time: about 2-3 times longer than before, typically 5-30 s, up to ~1.5 min
 for level 100+ builds with a high EHP threshold and a mana cycle.
 
-With **Start from my earlier builds** (off by default), every build of the class generated in the same session (any
-goal, EHP threshold, cycle, level or filters) is fed into the next search as a starting point and re-checked
-against the current filters (and checked exactly "as is" at the end). It is off by default because it made results
-depend on what you generated before ("roulette builds"). A progress bar shows the stage and pass.
+Earlier builds of the session are not used as starting points (the option "Start from my earlier builds" was
+removed in 0.35.1): results depended on what you had generated before ("roulette builds"), and the converged search
+doesn't need it. A progress bar shows the stage and pass.
 
 **Background thread (Web Worker).** The search runs in a Web Worker, so the page never freezes while it works
 (before: frames froze for up to ~0.7 s at a time) and **Stop** (next to the progress bar) ends it at once and keeps
@@ -448,7 +460,7 @@ changed:
 | Intensity, Diamond Hydro/Static, Discharge… everywhere | IDs at 50% rolls, while 1005 items with fixed IDs always count 100% | max rolls by default, like Wynnbuilder; *Realistic rolls (50%)* optional |
 | "Assumes 20 cps and can cycle melees between spells" | full Mana Steal with no main attack in the cycle | Mana (and Life) Steal only from M hits in the cycle, per hit from attack speed |
 | "Can only build for 0 sustain or 0 drain" | mana filter was `≥ 0` | Allowed drain slider, Life recovery slider and a suggestion for both |
-| "Roulette builds" | every earlier build seeded the next search | off by default (*Start from my earlier builds*) |
+| "Roulette builds" | every earlier build seeded the next search | removed (0.35.1) |
 | "Trained on the build guide" | +15-30% for guide items, "Meta" label on the sliders | bonus off by default, label now says the marker is only where guide builds sit |
 | "Ability trees should be presets", "generalist" | trees only from weights | guide trees as named presets with search, Mastery swap tip |
 | "Multihit says total damage…" | no timing | Whole cycle goal, Spell timing table |

@@ -1934,6 +1934,8 @@ function normalizeCycle(cycle) {
     gain: cycle ? cycle.gain !== false : true,
     poison: Boolean(cycle && cycle.poison),
     drain: Math.max(0, Number(cycle && cycle.drain) || 0),
+    // mana z buffów w raidzie (Advanced, mana/s): dodatkowy dochód many cyklu
+    buff: Math.max(0, Number(cycle && cycle.buff) || 0),
   };
 }
 // Mana wystarcza, gdy bilans nie spada poniżej dopuszczalnego drenu.
@@ -2035,7 +2037,9 @@ function evaluateGoal(ctx, items, weapon, skillTotals, goal, cycle, altGoals = n
   // Mana: ten sam rachunek co Spell cycle calculator (koszt cyklu na sekundę vs regen + steal + mana z umiejętności).
   const ids = cycleIds;
   result.manaSteal = timing && cycle.steal ? stealPerSecond(statValue(stats, "ms"), timing, hps) : 0;
-  result.manaIncome = (statValue(stats, "mr") + BASE_MANA_REGEN) / 5 + result.manaSteal;
+  // buff many z raidu (Advanced) liczy się tylko z cyklem - bez cyklu nie ma filtra many
+  result.manaBuff = timing ? Math.max(0, Number(cycle.buff) || 0) : 0;
+  result.manaIncome = (statValue(stats, "mr") + BASE_MANA_REGEN) / 5 + result.manaSteal + result.manaBuff;
   if (ids.length > 0) {
     const seconds = Math.max(0.01, timing.seconds);
     let used = 0;
@@ -3372,6 +3376,7 @@ async function generateDamageBuild({ playerClass, level, archetype = null, treeS
       spendFreeSkillPoints,
       rollPercent,
       manaSteal: finalMetrics.manaSteal || 0,
+      manaBuff: finalMetrics.manaBuff || 0,
       manaDrain: finalMetrics.manaDrain || 0,
       healthGain: finalMetrics.healthGain || 0,
       poisonDps: finalMetrics.poisonDps || 0,
@@ -4102,6 +4107,12 @@ select.mc-input option{background:#000;color:#fff}
 .wbr-welcome-url{color:#8c8c8c;font-size:13px;overflow-wrap:anywhere}
 .wbr-welcome-muted{color:#a9a6b6}
 .wbr-welcome-ok{color:#55FF55}
+.wbr-mc .wbr-info-fab{position:fixed;right:16px;bottom:16px;z-index:55;display:inline-flex;align-items:center;gap:8px;padding:6px 12px 6px 7px;box-shadow:0 4px 14px rgba(0,0,0,.45)}
+.wbr-info-icon{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border:2px solid #000;border-radius:50%;background:#55FFFF;color:#101228;font:italic 700 15px/1 Georgia,"Times New Roman",serif;text-shadow:none}
+.wbr-info-note{border:2px solid #FFAA00;background:rgba(255,170,0,.08);padding:10px 12px}
+.wbr-info-list{counter-reset:wbrstep;display:flex;flex-direction:column;gap:6px}
+.wbr-info-list>li{position:relative;padding-left:30px;counter-increment:wbrstep}
+.wbr-info-list>li::before{content:counter(wbrstep);position:absolute;left:0;top:.1em;min-width:20px;height:20px;display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:#101228;background:#FFAA00;text-shadow:none}
 .wbr-welcome-source{padding-left:14px;position:relative}
 .wbr-welcome-source::before{content:"";position:absolute;left:0;top:.55em;width:6px;height:6px;background:#FFAA00;box-shadow:1px 1px 0 #000}
 .wbr-welcome-foot{border-top:3px solid #000;box-shadow:inset 0 2px 0 #3a3644;background:#0f0d14}
@@ -8161,15 +8172,15 @@ function toggleValue(list, value) {
   return list.includes(value) ? list.filter((entry) => entry !== value) : [...list, value];
 }
 
-function ToggleChip({ pressed, onClick, color, children, title = undefined }) {
+function ToggleChip({ pressed, onClick, color, children, title = undefined, className = "", style = undefined }) {
   return (
     <button
       type="button"
       aria-pressed={pressed}
       title={title}
       onClick={onClick}
-      className={`mc-btn mc-btn-sm ${pressed ? "mc-btn-on" : ""}`}
-      style={ts(color ? { color } : pressed ? { color: "#FFAA00" } : undefined)}
+      className={`mc-btn mc-btn-sm ${pressed ? "mc-btn-on" : ""} ${className}`}
+      style={{ ...(style || {}), ...ts(color ? { color } : pressed ? { color: "#FFAA00" } : undefined) }}
     >
       {children}
     </button>
@@ -8525,11 +8536,11 @@ function goalKey(goal) {
 }
 
 // poison: poison w celu obrażeń (domyślnie nie); rolls: "max" (100%, jak Wynnbuilder) albo "avg" (50%);
-// history: start od buildów z tej sesji (domyślnie nie - te same ustawienia = ten sam build); drain: dopuszczalny
-// dren many w mana/s (0 = pełny sustain)
-const DEFAULT_DAMAGE_FORM = { preset: "", goal: null, minEhp: null, cycle: "", cps: 3, steal: true, gain: true, sustain: false, noEvents: true, tradeable: false, freeSp: true, poison: false, rolls: "max", history: false, drain: 0, lr: 0 };
+// drain: dopuszczalny dren many w mana/s (0 = pełny sustain); lr: minimalne odnawianie życia w HP/s;
+// raidMana: mana/s z buffów w raidzie (Advanced, 0 = wyłączone)
+const DEFAULT_DAMAGE_FORM = { preset: "", goal: null, minEhp: null, cycle: "", cps: 3, steal: true, gain: true, sustain: false, noEvents: true, tradeable: false, freeSp: true, poison: false, rolls: "max", drain: 0, lr: 0, raidMana: 0 };
 function formCycleOf(form) {
-  return { ids: parseCycle(form.cycle), cps: form.cps, steal: form.steal, gain: form.gain, poison: Boolean(form.poison), drain: Math.max(0, Number(form.drain) || 0) };
+  return { ids: parseCycle(form.cycle), cps: form.cps, steal: form.steal, gain: form.gain, poison: Boolean(form.poison), drain: Math.max(0, Number(form.drain) || 0), buff: Math.max(0, Number(form.raidMana) || 0) };
 }
 
 // Suwak EHP chodzi co 5% tego, co da się osiągnąć na danym poziomie; domyślnie 25%.
@@ -8541,6 +8552,22 @@ function defaultMinEhp(ehpMax) {
 }
 
 // Formularz zakładki "New": klasa → ranga → poziom → drzewko → cel → próg EHP → cykl czarów (twardy filtr many).
+// Wiersz z polem wyboru w lewym panelu: pole przy pierwszej linii, opis i podpowiedź jako jeden tekst, który się
+// zawija - bez osobnych kolumn, żeby wszystkie wiersze wyglądały tak samo.
+function CheckRow({ id = undefined, checked, onChange, label, hint = null, title = undefined, disabled = false, style = undefined }) {
+  return (
+    <label className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-x-2 text-xs text-zinc-200" title={title} style={style}>
+      <input id={id} type="checkbox" className="mc-check mt-px" checked={checked} disabled={disabled} onChange={onChange} />
+      <span className="min-w-0">
+        {label}
+        {hint ? <span className="text-zinc-500"> · {hint}</span> : null}
+      </span>
+    </label>
+  );
+}
+// Suwaki w lewym panelu wyglądają jak suwak Effective HP: etykieta i wartość w jednej linii, pod nimi pełna szerokość.
+const SLIDER_HEAD = "flex items-baseline justify-between gap-2 text-xs";
+
 function DamageForm({
   restrictions,
   playerClass,
@@ -8657,9 +8684,9 @@ function DamageForm({
       {playerClass && level && (
         <fieldset className="wbr-fade flex flex-col gap-1.5">
           <legend className={`${label} mb-1.5`}>Ability tree</legend>
-          <div className="flex flex-wrap gap-1.5">
+          <div className="grid grid-cols-3 gap-1.5">
             {classConfig.archetypes.map((arch) => (
-              <button key={arch} type="button" onClick={() => onPreset(arch)} className={`mc-btn mc-btn-sm ${form.preset === arch ? "mc-btn-on" : ""}`} title={`Load the suggested ${arch} tree for level ${level}`}>
+              <button key={arch} type="button" onClick={() => onPreset(arch)} className={`mc-btn mc-btn-sm flex w-full items-center justify-center px-1 leading-tight ${form.preset === arch ? "mc-btn-on" : ""}`} title={`Load the suggested ${arch} tree for level ${level}`}>
                 {arch}
               </button>
             ))}
@@ -8742,9 +8769,7 @@ function DamageForm({
             <McRange id="new-ehp" min={0} max={ehpMax} step={step} value={minEhp} accent="#55FF55" onChange={(event) => set({ minEhp: Number(event.target.value) })} className="w-full" />
             {sweep && <p className="text-xs text-zinc-500">Builds for every EHP step: List of builds, at the bottom of this panel.</p>}
           </div>
-          <label className="flex items-center gap-2 text-xs text-zinc-200" title="Health Regen (per 4 s) plus Life Steal (per 3 s) must add up to more than zero per second. Builds that drain your health are thrown away.">
-            <input id="new-sustain" type="checkbox" className="mc-check" checked={Boolean(form.sustain)} onChange={() => set({ sustain: !form.sustain })} /> Life sustain &gt; 0 <span className="text-zinc-500">· regen + steal</span>
-          </label>
+          <CheckRow id="new-sustain" checked={Boolean(form.sustain)} onChange={() => set({ sustain: !form.sustain })} label="Life sustain > 0" hint="regen + steal" title="Health Regen (per 4 s) plus Life Steal (from main attack hits) must add up to more than zero per second. Builds that drain your health are thrown away." />
         </fieldset>
       )}
 
@@ -8785,32 +8810,31 @@ function DamageForm({
               </button>
             )}
           </div>
-          <div className="flex flex-wrap gap-x-4 gap-y-1">
-            <label className="flex items-center gap-1.5 text-xs text-zinc-200" title="Mana Steal works on main attack hits: add M to the cycle for every main attack between the spells. Mana per hit = Mana Steal ÷ 3 ÷ hits per second of the weapon (like Wynnbuilder).">
-              <input type="checkbox" className="mc-check" checked={form.steal} onChange={() => set({ steal: !form.steal })} /> Mana Steal <span className="text-zinc-500">· from M hits</span>
-            </label>
-            <label className="flex items-center gap-1.5 text-xs text-zinc-200">
-              <input type="checkbox" className="mc-check" checked={form.gain} onChange={() => set({ gain: !form.gain })} /> Mana from abilities
-            </label>
+          <CheckRow checked={form.steal} onChange={() => set({ steal: !form.steal })} label="Mana Steal" hint="from M hits" title="Mana Steal works on main attack hits: add M to the cycle for every main attack between the spells. Mana per hit = Mana Steal ÷ 3 ÷ hits per second of the weapon (like Wynnbuilder)." />
+          <CheckRow checked={form.gain} onChange={() => set({ gain: !form.gain })} label="Mana from abilities" title="Mana that abilities give back (e.g. from their hits) counts as income" />
+          <div className="flex flex-col gap-1" title="How much mana per second the cycle may lose. 0 = it must sustain itself; more = you accept draining your mana pool (e.g. for a burst). Raid buffs: Advanced, at the bottom of this panel.">
+            <div className={SLIDER_HEAD}>
+              <label htmlFor="new-drain" className="text-zinc-300">
+                Allowed drain
+              </label>
+              <span className="tabular-nums text-zinc-100">{(Number(form.drain) || 0) === 0 ? "none" : `${Number(form.drain).toFixed(1)} mana/s`}</span>
+            </div>
+            <McRange id="new-drain" min={0} max={20} step={0.5} value={Number(form.drain) || 0} accent="#55FFFF" onChange={(event) => set({ drain: Number(event.target.value) })} className="w-full" aria-label="Allowed mana drain per second" />
           </div>
-          <label className="flex items-center gap-2 text-xs text-zinc-300" title="How much mana per second the cycle may lose. 0 = it must sustain itself; more = you accept draining your mana pool (e.g. with raid buffs or for a burst).">
-            Allowed drain
-            <McRange id="new-drain" min={0} max={20} step={0.5} value={Number(form.drain) || 0} accent="#55FFFF" onChange={(event) => set({ drain: Number(event.target.value) })} className="min-w-0 flex-1" aria-label="Allowed mana drain per second" />
-            <span className="w-24 text-right tabular-nums">{(Number(form.drain) || 0) === 0 ? "none" : `${Number(form.drain).toFixed(1)} mana/s`}</span>
-          </label>
-          <label
-            className="flex items-center gap-2 text-xs text-zinc-300"
-            title="Minimum life recovery per second: Health Regen ÷ 4 s + Life Steal from the cycle's main attacks (M; without a cycle, constant main attacks). 0 = no minimum. Builds below it are thrown away."
-          >
-            Life recovery
-            <McRange id="new-lr" min={0} max={lifeRecoveryMax(level)} step={5} value={Math.min(lifeRecoveryMax(level), Number(form.lr) || 0)} accent="#FF5555" onChange={(event) => set({ lr: Number(event.target.value) })} className="min-w-0 flex-1" aria-label="Minimum life recovery per second" />
-            <span className="w-24 text-right tabular-nums">{(Number(form.lr) || 0) === 0 ? "any" : `≥ ${formatNumber(Number(form.lr))} HP/s`}</span>
-          </label>
+          <div className="flex flex-col gap-1" title="Minimum life recovery per second: Health Regen ÷ 4 s + Life Steal from the cycle's main attacks (M; without a cycle, constant main attacks). 0 = no minimum. Builds below it are thrown away.">
+            <div className={SLIDER_HEAD}>
+              <label htmlFor="new-lr" className="text-zinc-300">
+                Life recovery
+              </label>
+              <span className="tabular-nums text-zinc-100">{(Number(form.lr) || 0) === 0 ? "any" : `≥ ${formatNumber(Number(form.lr))} HP/s`}</span>
+            </div>
+            <McRange id="new-lr" min={0} max={lifeRecoveryMax(level)} step={5} value={Math.min(lifeRecoveryMax(level), Number(form.lr) || 0)} accent="#FF5555" onChange={(event) => set({ lr: Number(event.target.value) })} className="w-full" aria-label="Minimum life recovery per second" />
+          </div>
           {onTradeoff && <TradeoffSuggest tradeoff={tradeoff} hasCycle={cycleCasts > 0} running={running} form={form} onRun={onTradeoff} onUse={onTradeoffUse} onPick={onTradeoffPick} shownBuild={shownBuild} />}
           {cycleIds.length > 0 && <CycleSteps cycle={cycleText(cycleIds)} playerClass={playerClass} spells={goals.filter((entry) => entry.kind === "spell" && typeof entry.id === "number" && entry.id <= 4)} compact />}
           <p className={hint}>
             {cycleIds.length > 0
-              ? `${cycleCasts} spell${cycleCasts === 1 ? "" : "s"}${cycleMelee > 0 ? ` + ${cycleMelee} main attack${cycleMelee === 1 ? "" : "s"}` : ""} every ≈${((3 * cycleCasts) / Math.max(0.5, form.cps) + cycleMelee / Math.max(0.5, form.cps)).toFixed(1)} s must pay for themselves${(Number(form.drain) || 0) > 0 ? `, minus ${Number(form.drain).toFixed(1)} mana/s (100 mana last ≈${Math.round(100 / Number(form.drain))} s)` : ""}.${cycleMelee === 0 && form.steal ? " No M = no Mana Steal." : ""}`
+              ? `${cycleCasts} spell${cycleCasts === 1 ? "" : "s"}${cycleMelee > 0 ? ` + ${cycleMelee} main attack${cycleMelee === 1 ? "" : "s"}` : ""} every ≈${((3 * cycleCasts) / Math.max(0.5, form.cps) + cycleMelee / Math.max(0.5, form.cps)).toFixed(1)} s must pay for themselves${(Number(form.drain) || 0) > 0 ? `, minus ${Number(form.drain).toFixed(1)} mana/s (100 mana last ≈${Math.round(100 / Number(form.drain))} s)` : ""}.${cycleMelee === 0 && form.steal ? " No M = no Mana Steal." : ""}${Number(form.raidMana) > 0 ? ` Raid buff +${Number(form.raidMana)} mana/s counted (Advanced).` : ""}`
               : "Empty = no mana filter. 1-4 = spells, M = main attack (Mana Steal only works on hits)."}
           </p>
         </fieldset>
@@ -8819,24 +8843,13 @@ function DamageForm({
       {treeIds.length > 0 && (
         <fieldset className="wbr-fade flex flex-col gap-1">
           <legend className={`${label} mb-1`}>Items</legend>
-          <label className="flex items-center gap-2 text-xs text-zinc-200" title={`Skips the ${EVENT_ITEM_NAMES.size} items you can only get during a festival (Blizzard, Bonfire, Heroes, Spirits). Pinned items stay.`}>
-            <input id="new-no-events" type="checkbox" className="mc-check" checked={form.noEvents !== false} onChange={() => set({ noEvents: form.noEvents === false })} /> No limited-time event items
-          </label>
-          <label className="flex items-center gap-2 text-xs text-zinc-200" title="Only items that can be bought and sold on the Trade Market: no untradable or quest items. Pinned items stay.">
-            <input id="new-tradeable" type="checkbox" className="mc-check" checked={Boolean(form.tradeable)} onChange={() => set({ tradeable: !form.tradeable })} /> Tradeable only <span className="text-zinc-500">· Trade Market</span>
-          </label>
-          <label className="flex items-center gap-2 text-xs text-zinc-200" title="When the set needs fewer skill points than your level gives, spend the rest where they raise the goal most (or first where they get the build over the filters). Off: the rest stays unspent, like a fresh build in Wynnbuilder.">
-            <input id="new-free-sp" type="checkbox" className="mc-check" checked={form.freeSp !== false} onChange={() => set({ freeSp: form.freeSp === false })} /> Spend free skill points <span className="text-zinc-500">· shown as (+X)</span>
-          </label>
-          <label className="flex items-center gap-2 text-xs text-zinc-200" title="Off (default): identifications at their maximum roll, like Wynnbuilder. On: every rolled ID at 50% - then items with fixed IDs (mostly quest rewards) get an edge, because they always count at 100%.">
-            <input id="new-rolls" type="checkbox" className="mc-check" checked={form.rolls === "avg"} onChange={() => set({ rolls: form.rolls === "avg" ? "max" : "avg" })} /> Realistic rolls (50%) <span className="text-zinc-500">· default: max, like Wynnbuilder</span>
-          </label>
-          <label className="flex items-center gap-2 text-xs text-zinc-200" title="Adds Poison per second to the goal (spread over the casts for a spell). Off by default: how poison stacks and works on bosses isn't known, and counting it made the search pick poison-only items. The Poison DPS row in the Damage panel is always shown.">
-            <input id="new-poison" type="checkbox" className="mc-check" checked={Boolean(form.poison)} onChange={() => set({ poison: !form.poison })} /> Count poison in the goal
-          </label>
-          <label className="flex items-center gap-2 text-xs text-zinc-200" title="Also start from every build of this class generated in this session (other spells, EHP steps, filters). Can find a stronger build, but then the result depends on what you generated before. Off: the same settings always give the same build.">
-            <input id="new-history" type="checkbox" className="mc-check" checked={Boolean(form.history)} onChange={() => set({ history: !form.history })} /> Start from my earlier builds <span className="text-zinc-500">· this session</span>
-          </label>
+          <div className="flex flex-col gap-1.5">
+            <CheckRow id="new-no-events" checked={form.noEvents !== false} onChange={() => set({ noEvents: form.noEvents === false })} label="No limited-time event items" title={`Skips the ${EVENT_ITEM_NAMES.size} items you can only get during a festival (Blizzard, Bonfire, Heroes, Spirits). Pinned items stay.`} />
+            <CheckRow id="new-tradeable" checked={Boolean(form.tradeable)} onChange={() => set({ tradeable: !form.tradeable })} label="Tradeable only" hint="Trade Market" title="Only items that can be bought and sold on the Trade Market: no untradable or quest items. Pinned items stay." />
+            <CheckRow id="new-free-sp" checked={form.freeSp !== false} onChange={() => set({ freeSp: form.freeSp === false })} label="Spend free skill points" hint="shown as (+X)" title="When the set needs fewer skill points than your level gives, spend the rest where they raise the goal most (or first where they get the build over the filters). Off: the rest stays unspent, like a fresh build in Wynnbuilder." />
+            <CheckRow id="new-rolls" checked={form.rolls === "avg"} onChange={() => set({ rolls: form.rolls === "avg" ? "max" : "avg" })} label="Realistic rolls (50%)" hint="off = max, like Wynnbuilder" title="Off (default): identifications at their maximum roll, like Wynnbuilder. On: every rolled ID at 50% - then items with fixed IDs (mostly quest rewards) get an edge, because they always count at 100%." />
+            <CheckRow id="new-poison" checked={Boolean(form.poison)} onChange={() => set({ poison: !form.poison })} label="Count poison in the goal" title="Adds Poison per second to the goal (spread over the casts for a spell). Off by default: how poison stacks and works on bosses isn't known, and counting it made the search pick poison-only items. The Poison DPS row in the Damage panel is always shown." />
+          </div>
           <div className="mt-2">
             <ItemFilters options={options} onChange={onOptions} weaponType={classConfig ? classConfig.weapon : null} level={level || 120} onBrowse={onBrowse} />
           </div>
@@ -8892,6 +8905,36 @@ function DamageForm({
           </button>
           {sweepOpen && <EhpSweepList sweep={sweep} shownBuild={shownBuild} onPick={onSweepPick} />}
         </div>
+      )}
+      {treeIds.length > 0 && (
+        <details className="text-xs" open={Number(form.raidMana) > 0}>
+          <summary className="mc-link cursor-pointer">
+            Advanced{Number(form.raidMana) > 0 ? ` · raid buff +${Number(form.raidMana)} mana/s` : ""}
+          </summary>
+          <div className="mt-2 flex flex-col gap-1.5">
+            <label className="grid grid-cols-[minmax(0,1fr)_4.5rem_3.5rem] items-center gap-2 text-zinc-300" title="Extra mana per second from buffs in a raid (a support's mana aura, raid blessings), added to the cycle's mana income. 0 = off.">
+              <span>Raid mana buff</span>
+              <input
+                id="new-raid-mana"
+                type="number"
+                min={0}
+                max={30}
+                step={0.5}
+                value={Number(form.raidMana) || 0}
+                onChange={(event) => {
+                  const value = Number(String(event.target.value).replace(",", "."));
+                  set({ raidMana: Number.isFinite(value) ? Math.min(30, Math.max(0, value)) : 0 });
+                }}
+                className="mc-input w-full px-1 text-center tabular-nums"
+              />
+              <span className="text-zinc-500">mana/s</span>
+            </label>
+            <p className="text-zinc-500">
+              Optional. In raids your team's buffs give extra mana: type how much per second and the mana filter, the drain suggestion and the list of
+              builds count it as income. There is no single value for every raid and team, so it is off by default.
+            </p>
+          </div>
+        </details>
       )}
     </div>
   );
@@ -9080,6 +9123,11 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
     else setView(order[index - 1]);
   };
   const [treeShown, setTreeShown] = useState(true);
+  // kliknięcia/s wpisywane ręcznie (pole trzyma tekst, żeby dało się je wyczyścić i wpisać nową liczbę)
+  const [cpsText, setCpsText] = useState(String(form.cps));
+  useEffect(() => {
+    setCpsText(String(form.cps));
+  }, [form.cps]);
   const treeResolved = useMemo(() => (treeIds.length > 0 && TREE_INDEX[playerClass] ? resolveTree(TREE_INDEX[playerClass], treeIds) : null), [playerClass, treeIds]);
   const set = (patch) => onForm((current) => ({ ...current, ...patch }));
   const step = ehpStep(ehpMax);
@@ -9151,7 +9199,7 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
     goal: goal ? goal.name : null,
     ehp: treeIds.length > 0 ? `${Math.round((minEhp / Math.max(1, ehpMax)) * 100)}%` : null,
     mana: treeIds.length > 0 ? `${cycleDigits.length ? `${cycleDigits.join("")} · ${form.cps} cps${Number(form.drain) > 0 ? ` · −${form.drain}/s` : ""}` : "off"}${Number(form.lr) > 0 ? ` · life ≥ ${form.lr}` : ""}` : null,
-    extras: treeIds.length > 0 ? [form.sustain ? "sustain" : null, form.noEvents !== false ? "no events" : null, form.tradeable ? "tradeable" : null, normalized.avoidNegativeDefences ? "no -def" : null, form.rolls === "avg" ? "50% rolls" : null, form.poison ? "poison" : null, form.history ? "earlier builds" : null].filter(Boolean).join(", ") || "none" : null,
+    extras: treeIds.length > 0 ? [form.sustain ? "sustain" : null, form.noEvents !== false ? "no events" : null, form.tradeable ? "tradeable" : null, normalized.avoidNegativeDefences ? "no -def" : null, form.rolls === "avg" ? "50% rolls" : null, form.poison ? "poison" : null].filter(Boolean).join(", ") || "none" : null,
     generate: null,
   };
   const heading = {
@@ -9159,14 +9207,34 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
     level: ["Your level", "Items above it are left out; skill points and ability points come from it."],
     tree: ["Ability tree", `Pick an archetype - its suggested tree for ${apCap} AP is shown below, where you can compare archetypes and click abilities to change it. "Use this tree" or Next goes on.`],
     goal: ["What to maximise", "One spell (one cast, crits included), the main attack (damage per second) - or click several to maximise their sum. Numbers: with the best weapon for your level alone."],
-    ehp: ["How tanky", `Minimum effective HP, as a share of the most your level can reach (${formatNumber(ehpMax)}). Builds below it are thrown away.`],
-    mana: ["Mana: spell cycle", "The spells (1-4) and main attacks (M) you do in a loop must pay for themselves (Mana Regen, Mana Steal from M hits, ability mana), or lose at most the drain you allow. Pick a preset or type your own."],
+    ehp: ["How tanky", `Minimum effective HP in 5% steps of the most your level can reach (${formatNumber(ehpMax)}). Builds below it are thrown away.`],
+    mana: ["Mana: spell cycle", "The spells (1-4) and main attacks (M) you do in a loop must pay for themselves (Mana Regen, Mana Steal from M hits, ability mana), or lose at most the drain you allow. Type your own cycle or pick a preset."],
     extras: ["Extras", "Optional filters - click to toggle."],
     generate: ["Ready", "The search runs until a pass finds nothing better: usually 5-30 s, up to ~1.5 min at level 100+ with a high EHP threshold and a mana cycle. You can change anything later in the panel on the left."],
   }[active] || ["", ""];
 
   return (
     <section className="mc-panel wbr-fade flex flex-col gap-4 p-5">
+      <div className="flex items-center justify-between gap-2">
+        <button type="button" className="mc-btn min-w-[6.5rem] justify-center" onClick={() => previous(active)} title={active === "rank" ? "Back to the class choice" : `Back to: ${(WIZARD_STEPS[order.indexOf(active) - 1] || {}).label || ""}`}>
+          ‹ Previous
+        </button>
+        <span className="hidden text-xs text-zinc-500 sm:block">
+          Step {order.indexOf(active) + 1} of {order.length}
+        </span>
+        <div className="flex items-center gap-2">
+          {active !== "rank" && active !== "generate" && firstOpen === null && (
+            <button type="button" className="mc-btn min-w-[6.5rem] justify-center" onClick={onGenerate} disabled={running} title="Everything after the tree has a sensible default - you can generate right away.">
+              {running ? "Searching…" : "Generate now"}
+            </button>
+          )}
+          {active !== "generate" && (
+            <button type="button" className="mc-btn mc-btn-primary min-w-[6.5rem] justify-center" onClick={() => next(active)} disabled={!reachable(order.indexOf(active) + 1)}>
+              Next ›
+            </button>
+          )}
+        </div>
+      </div>
       <ol className="flex flex-wrap gap-1.5" aria-label="Setup steps">
         {WIZARD_STEPS.map((entry, index) => {
           const done = Boolean(summary[entry.id]);
@@ -9206,7 +9274,7 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
                 next("rank");
               }}
             >
-              <span className="text-lg font-bold text-zinc-100">{entry.label}</span>
+              <span className="text-base font-bold text-zinc-100">{entry.label}</span>
               <span className="text-xs text-zinc-400">{entry.loan ? `+${entry.loan} ability points` : "no AP loan"}</span>
             </WizardTile>
           ))}
@@ -9225,7 +9293,7 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
                   next("level");
                 }}
               >
-                <span className="text-xl font-bold text-zinc-100">{value}</span>
+                <span className="text-base font-bold text-zinc-100">{value}</span>
                 <span className="text-xs text-zinc-500">{availableSkillPoints(value)} SP</span>
               </WizardTile>
             ))}
@@ -9271,7 +9339,7 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
               title={ARCHETYPES[arch] ? ARCHETYPES[arch].focus : undefined}
             >
               {CLASS_PORTRAITS[playerClass] && <img src={CLASS_PORTRAITS[playerClass]} alt="" width={34} height={48} />}
-              <span className="text-lg font-bold text-zinc-100">{arch}</span>
+              <span className="text-base font-bold text-zinc-100">{arch}</span>
               <span className="text-xs text-zinc-400">{ARCHETYPE_TAGLINES[arch] || ""}</span>
               <span className="text-xs text-zinc-500">{ARCHETYPES[arch] ? ARCHETYPES[arch].focus : ""}</span>
             </WizardTile>
@@ -9284,7 +9352,7 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
             <span className="text-2xl" aria-hidden="true">
               ❋
             </span>
-            <span className="text-lg font-bold text-zinc-100">Your own tree</span>
+            <span className="text-base font-bold text-zinc-100">Your own tree</span>
             <span className="text-xs text-zinc-400">Custom - pick abilities yourself</span>
             <span className="text-xs text-zinc-500">{treeIds.length > 0 && !preset ? `${treeIds.length} abilities chosen` : "Opens the Ability tree tab; your tree is used as soon as you come back"}</span>
           </WizardTile>
@@ -9379,24 +9447,27 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
       )}
 
       {active === "ehp" && (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 xl:grid-cols-7">
-          {WIZARD_EHP.map((entry) => {
-            const value = step * Math.round(entry.pct / 5);
+        <div className="grid grid-cols-3 gap-2 sm:grid-cols-7">
+          {Array.from({ length: 21 }, (_, index) => index * 5).map((pct) => {
+            // co 5% osiągalnego EHP (jak suwak w panelu); nazwane progi zostają jako podpisy
+            const named = WIZARD_EHP.find((entry) => entry.pct === pct) || null;
+            const value = step * Math.round(pct / 5);
             return (
               <WizardTile
-                key={entry.pct}
+                key={pct}
                 selected={Math.round(minEhp) === Math.round(value)}
                 onClick={() => {
                   set({ minEhp: value });
                   next("ehp");
                 }}
-                title={entry.hint}
+                title={named ? named.hint : `${pct}% of the most EHP your level can reach`}
+                className="p-2"
               >
-                <span className="text-base font-bold text-zinc-100">{entry.label}</span>
+                <span className="text-base font-bold text-zinc-100">{pct}%</span>
                 <span className="text-sm tabular-nums" style={ts({ color: "#55FF55" })}>
-                  {entry.pct === 0 ? "any" : `≥ ${formatNumber(value)}`}
+                  {pct === 0 ? "any" : `≥ ${formatNumber(value)}`}
                 </span>
-                <span className="text-xs text-zinc-500">{entry.pct}% EHP</span>
+                <span className="text-xs text-zinc-500">{named ? named.label : "\u00a0"}</span>
               </WizardTile>
             );
           })}
@@ -9405,68 +9476,59 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
 
       {active === "mana" && (
         <div className="flex flex-col gap-4">
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-            <span className="text-sm text-zinc-300">Clicks per second</span>
-            <div className="flex flex-wrap gap-1.5">
-              {WIZARD_CPS.map((value) => (
-                <WizardTile key={value} selected={form.cps === value} onClick={() => set({ cps: value })} className="min-w-[2.75rem] px-2 py-1" title={`${value} clicks/s = one spell every ${(3 / value).toFixed(2)} s`}>
-                  <span className="text-sm font-bold text-zinc-100">{value}</span>
-                </WizardTile>
-              ))}
+          <div className="grid grid-cols-1 items-center gap-x-4 gap-y-3 sm:grid-cols-[11rem_minmax(0,1fr)]">
+            <label htmlFor="wizard-cps" className="text-sm text-zinc-300">
+              Clicks per second
+            </label>
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+              <span className="flex items-center gap-2">
+                <input
+                  id="wizard-cps"
+                  type="number"
+                  min={0.5}
+                  max={12}
+                  step={0.5}
+                  value={cpsText}
+                  onChange={(event) => {
+                    const text = event.target.value;
+                    setCpsText(text);
+                    const value = Number(text.replace(",", "."));
+                    if (text.trim() !== "" && Number.isFinite(value) && value >= 0.5 && value <= 12) set({ cps: value });
+                  }}
+                  onBlur={() => setCpsText(String(form.cps))}
+                  className="mc-input w-20 text-center tabular-nums"
+                  aria-label="Clicks per second"
+                />
+                <span className="text-xs text-zinc-500">a spell = 3 clicks · {(3 / Math.max(0.5, form.cps)).toFixed(2)} s</span>
+              </span>
+              <CheckRow checked={form.steal} onChange={() => set({ steal: !form.steal })} label="Mana Steal" hint="from M hits" title="Mana Steal only works on main attack hits - add M to the cycle" />
+              <CheckRow checked={form.gain} onChange={() => set({ gain: !form.gain })} label="Mana from abilities" />
             </div>
-            <label className="flex items-center gap-1.5 text-xs text-zinc-200" title="Mana Steal only works on main attack hits - add M to the cycle">
-              <input type="checkbox" className="mc-check" checked={form.steal} onChange={() => set({ steal: !form.steal })} /> Mana Steal <span className="text-zinc-500">· from M hits</span>
-            </label>
-            <label className="flex items-center gap-1.5 text-xs text-zinc-200">
-              <input type="checkbox" className="mc-check" checked={form.gain} onChange={() => set({ gain: !form.gain })} /> Mana from abilities
-            </label>
-          </div>
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
             <span className="text-sm text-zinc-300">Allowed mana drain</span>
-            <div className="flex flex-wrap gap-1.5">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
               {WIZARD_DRAIN.map(([value, name]) => (
-                <WizardTile key={value} selected={(Number(form.drain) || 0) === value} onClick={() => set({ drain: value })} className="px-2 py-1" title={value === 0 ? "The cycle must pay for itself" : `The cycle may lose ${value} mana/s: 100 mana last about ${Math.round(100 / value)} s`}>
-                  <span className="text-sm font-bold text-zinc-100">{name}</span>
+                <WizardTile key={value} selected={(Number(form.drain) || 0) === value} onClick={() => set({ drain: value })} className="p-2" title={value === 0 ? "The cycle must pay for itself" : `The cycle may lose ${value} mana/s: 100 mana last about ${Math.round(100 / value)} s`}>
+                  <span className="text-base font-bold text-zinc-100">{name}</span>
                   <span className="text-xs text-zinc-500">{value === 0 ? "0 mana/s" : `${value}/s · 100 mana ≈ ${Math.round(100 / value)} s`}</span>
                 </WizardTile>
               ))}
             </div>
-          </div>
-          <label className="flex max-w-xl items-center gap-3 text-sm text-zinc-300" title="Minimum life recovery per second: Health Regen ÷ 4 s + Life Steal from the cycle's main attacks (M). 0 = no minimum. After generating, the panel on the left can suggest drain and life recovery for the strongest build.">
-            Life recovery
-            <McRange id="wiz-lr" min={0} max={lifeRecoveryMax(level)} step={5} value={Math.min(lifeRecoveryMax(level), Number(form.lr) || 0)} accent="#FF5555" onChange={(event) => set({ lr: Number(event.target.value) })} className="min-w-0 flex-1" aria-label="Minimum life recovery per second" />
-            <span className="w-28 text-right text-xs tabular-nums">{(Number(form.lr) || 0) === 0 ? "any" : `≥ ${formatNumber(Number(form.lr))} HP/s`}</span>
-          </label>
-          {goals.some((entry) => entry.kind === "cycle") && (
-            <label className="flex items-center gap-2 text-sm text-zinc-200" title="Maximise the damage per second of the whole cycle (every spell once per cast + every main attack hit) instead of one spell - the players' compromise for spells that deal their damage over time.">
-              <input type="checkbox" className="mc-check" checked={selectedGoals.some((id) => isCycleGoal(id))} onChange={() => set({ goal: selectedGoals.some((id) => isCycleGoal(id)) ? null : DAMAGE_GOAL_CYCLE })} />
-              Maximise the whole cycle <span className="text-zinc-500">· DPS of {cycleDigits.join("")} instead of one spell</span>
+            <label htmlFor="wiz-lr" className="text-sm text-zinc-300" title="Minimum life recovery per second: Health Regen ÷ 4 s + Life Steal from the cycle's main attacks (M). 0 = no minimum.">
+              Life recovery
             </label>
-          )}
-
-          <div className="flex flex-col gap-1.5">
-            <span className="text-sm text-zinc-300">{preset && combos.length > 0 ? `Presets for ${preset}` : "Presets"}</span>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <WizardTile
-                selected={cycleDigits.length === 0}
-                onClick={() => {
-                  set({ cycle: "" });
-                  next("mana");
-                }}
-                className="items-start text-left"
-              >
-                <span className="text-base font-bold text-zinc-100">No mana filter</span>
-                <span className="text-xs text-zinc-500">Any build, whether or not it can keep casting.</span>
-              </WizardTile>
-              {cyclePresets.map(renderCyclePreset)}
+            <div className="grid grid-cols-[minmax(0,1fr)_7rem] items-center gap-3">
+              <McRange id="wiz-lr" min={0} max={lifeRecoveryMax(level)} step={5} value={Math.min(lifeRecoveryMax(level), Number(form.lr) || 0)} accent="#FF5555" onChange={(event) => set({ lr: Number(event.target.value) })} className="w-full min-w-0" aria-label="Minimum life recovery per second" />
+              <span className="text-right text-xs tabular-nums">{(Number(form.lr) || 0) === 0 ? "any" : `≥ ${formatNumber(Number(form.lr))} HP/s`}</span>
             </div>
           </div>
-
-          {otherCyclePresets.length > 0 && (
-            <details className="flex flex-col gap-1.5">
-              <summary className="mc-link cursor-pointer text-sm">Presets from other {playerClass} archetypes ({otherCyclePresets.length})</summary>
-              <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2">{otherCyclePresets.map(renderCyclePreset)}</div>
-            </details>
+          {goals.some((entry) => entry.kind === "cycle") && (
+            <CheckRow
+              checked={selectedGoals.some((id) => isCycleGoal(id))}
+              onChange={() => set({ goal: selectedGoals.some((id) => isCycleGoal(id)) ? null : DAMAGE_GOAL_CYCLE })}
+              label="Maximise the whole cycle"
+              hint={`DPS of ${cycleDigits.join("")} instead of one spell`}
+              title="Maximise the damage per second of the whole cycle (every spell once per cast + every main attack hit) instead of one spell - the players' compromise for spells that deal their damage over time."
+            />
           )}
 
           <div className={`mc-slot flex flex-col gap-2 p-3 ${customSelected ? "wbr-tile-on" : ""}`}>
@@ -9533,36 +9595,78 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
               Use this cycle ›
             </button>
           </div>
+
+          <div className="flex flex-col gap-1.5">
+            <span className="text-sm text-zinc-300">{preset && combos.length > 0 ? `Presets for ${preset}` : "Presets"}</span>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <WizardTile
+                selected={cycleDigits.length === 0}
+                onClick={() => {
+                  set({ cycle: "" });
+                  next("mana");
+                }}
+                className="items-start text-left"
+              >
+                <span className="text-base font-bold text-zinc-100">No mana filter</span>
+                <span className="text-xs text-zinc-500">Any build, whether or not it can keep casting.</span>
+              </WizardTile>
+              {cyclePresets.map(renderCyclePreset)}
+            </div>
+          </div>
+
+          {otherCyclePresets.length > 0 && (
+            <details className="flex flex-col gap-1.5">
+              <summary className="mc-link cursor-pointer text-sm">Presets from other {playerClass} archetypes ({otherCyclePresets.length})</summary>
+              <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2">{otherCyclePresets.map(renderCyclePreset)}</div>
+            </details>
+          )}
+
         </div>
       )}
 
       {active === "extras" && (
         <div className="flex flex-col gap-3">
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
-            {[
-              ["Life sustain > 0", "Health Regen + Life Steal must beat zero", Boolean(form.sustain), () => set({ sustain: !form.sustain })],
-              ["No event items", "Skip limited-time festival items", form.noEvents !== false, () => set({ noEvents: !(form.noEvents !== false) })],
-              ["Tradeable only", "Only items you can buy on the Trade Market", Boolean(form.tradeable), () => set({ tradeable: !form.tradeable })],
-              ["Spend free skill points", "Unneeded points go where they add most, shown as (+X)", form.freeSp !== false, () => set({ freeSp: form.freeSp === false })],
-              ["Realistic rolls (50%)", "Off: max rolls, like Wynnbuilder. On: every rolled ID at 50% (fixed-ID items then get an edge)", form.rolls === "avg", () => set({ rolls: form.rolls === "avg" ? "max" : "avg" })],
-              ["Count poison in the goal", "Adds Poison per second to the goal - off by default, it made the search pick poison-only items", Boolean(form.poison), () => set({ poison: !form.poison })],
-              ["Start from earlier builds", "Also start from builds you generated in this session (the result then depends on them)", Boolean(form.history), () => set({ history: !form.history })],
-              ["Avoid negative defences", "No item with a negative elemental defence", normalized.avoidNegativeDefences, () => onOptions({ ...options, avoidNegativeDefences: !normalized.avoidNegativeDefences })],
-            ].map(([label, hint, on, toggle]) => (
-              <WizardTile key={label} selected={on} onClick={toggle} title={hint}>
-                <span className="text-base font-bold text-zinc-100">{label}</span>
-                <span className="text-xs" style={ts({ color: on ? "#55FF55" : "#8c8c8c" })}>
-                  {on ? "✓ on" : "off"}
-                </span>
-                <span className="text-xs text-zinc-500">{hint}</span>
-              </WizardTile>
-            ))}
-          </div>
+          {[
+            [
+              "Filters",
+              "grid grid-cols-2 gap-3 sm:grid-cols-4",
+              [
+                ["Life sustain > 0", "Health Regen + Life Steal must beat zero", Boolean(form.sustain), () => set({ sustain: !form.sustain })],
+                ["No event items", "Skip limited-time festival items", form.noEvents !== false, () => set({ noEvents: !(form.noEvents !== false) })],
+                ["Tradeable only", "Only items you can buy on the Trade Market", Boolean(form.tradeable), () => set({ tradeable: !form.tradeable })],
+                ["Avoid negative defences", "No item with a negative elemental defence", normalized.avoidNegativeDefences, () => onOptions({ ...options, avoidNegativeDefences: !normalized.avoidNegativeDefences })],
+              ],
+            ],
+            [
+              "How builds are counted",
+              "grid grid-cols-1 gap-3 sm:grid-cols-3",
+              [
+                ["Spend free skill points", "Unneeded points go where they add most, shown as (+X)", form.freeSp !== false, () => set({ freeSp: form.freeSp === false })],
+                ["Realistic rolls (50%)", "Off: max rolls, like Wynnbuilder. On: every rolled ID at 50%", form.rolls === "avg", () => set({ rolls: form.rolls === "avg" ? "max" : "avg" })],
+                ["Count poison in the goal", "Adds Poison per second to the goal (off: it picked poison-only items)", Boolean(form.poison), () => set({ poison: !form.poison })],
+              ],
+            ],
+          ].map(([group, grid, tiles]) => (
+            <div key={group} className="flex flex-col gap-1.5">
+              <span className="text-sm text-zinc-300">{group}</span>
+              <div className={grid}>
+                {tiles.map(([label, hint, on, toggle]) => (
+                  <WizardTile key={label} selected={on} onClick={toggle} title={hint}>
+                    <span className="text-base font-bold text-zinc-100">{label}</span>
+                    <span className="text-xs" style={ts({ color: on ? "#55FF55" : "#8c8c8c" })}>
+                      {on ? "✓ on" : "off"}
+                    </span>
+                    <span className="text-xs text-zinc-500">{hint}</span>
+                  </WizardTile>
+                ))}
+              </div>
+            </div>
+          ))}
           <div className="flex flex-col gap-1.5">
             <span className="text-sm text-zinc-300">Weapon attack speed (none = any)</span>
-            <div className="grid grid-cols-3 gap-2 sm:grid-cols-7">
+            <div className="flex flex-wrap justify-center gap-2">
               {ATTACK_SPEEDS.map((speed) => (
-                <WizardTile key={speed} selected={normalized.attackSpeeds.includes(speed)} onClick={() => onOptions({ ...options, attackSpeeds: toggleValue(normalized.attackSpeeds, speed) })} className="p-2">
+                <WizardTile key={speed} selected={normalized.attackSpeeds.includes(speed)} onClick={() => onOptions({ ...options, attackSpeeds: toggleValue(normalized.attackSpeeds, speed) })} className="shrink-0 grow-0 basis-[calc(25%-0.375rem)] p-2 sm:basis-[calc(14.2857%-0.4286rem)]">
                   <span className="text-sm font-bold text-zinc-100">{ATTACK_SPEED_LABELS[speed]}</span>
                 </WizardTile>
               ))}
@@ -9600,26 +9704,6 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
         </div>
       )}
 
-      <div className="flex flex-col gap-2 border-t border-zinc-700 pt-3">
-        {active !== "rank" && active !== "generate" && firstOpen === null && (
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <span className="min-w-0 flex-1 text-xs text-zinc-500">Everything after the tree has a sensible default - you can generate right away.</span>
-            <button type="button" className="mc-btn" onClick={onGenerate} disabled={running}>
-              {running ? "Searching…" : "Generate now"}
-            </button>
-          </div>
-        )}
-        <div className="flex items-center justify-between gap-2">
-          <button type="button" className="mc-btn" onClick={() => previous(active)} title={active === "rank" ? "Back to the class choice" : `Back to: ${(WIZARD_STEPS[order.indexOf(active) - 1] || {}).label || ""}`}>
-            ‹ Previous
-          </button>
-          {active !== "generate" && (
-            <button type="button" className="mc-btn mc-btn-primary" onClick={() => next(active)} disabled={!reachable(order.indexOf(active) + 1)}>
-              Next ›
-            </button>
-          )}
-        </div>
-      </div>
     </section>
   );
 }
@@ -9868,7 +9952,7 @@ function DamageSummary({ build }) {
           `Cycle ${cycleText(cycle.ids)} @ ${cycle.cps}/s${cycle.drain ? `, drain ${drainLabel(cycle.drain)}` : ""}`,
           `${metrics.manaNet >= 0 ? "+" : ""}${metrics.manaNet.toFixed(1)} mana/s`,
           manaOk(metrics, cycle),
-          `${metrics.manaUsed.toFixed(1)} mana/s used, ${(metrics.manaIncome + metrics.manaGain).toFixed(1)} from regen${cycle.steal && metrics.manaSteal ? " + steal from main attacks" : ""}${cycle.gain ? " + abilities" : ""}${cycle.drain ? `; up to ${cycle.drain} mana/s drain allowed` : ""}`
+          `${metrics.manaUsed.toFixed(1)} mana/s used, ${(metrics.manaIncome + metrics.manaGain).toFixed(1)} from regen${cycle.steal && metrics.manaSteal ? " + steal from main attacks" : ""}${metrics.manaBuff ? ` + raid buff ${metrics.manaBuff}` : ""}${cycle.gain ? " + abilities" : ""}${cycle.drain ? `; up to ${cycle.drain} mana/s drain allowed` : ""}`
         )}
       {metrics.sustain !== undefined &&
         chip(
@@ -9963,28 +10047,33 @@ function ItemFilters({ options, onChange, weaponType, level, onBrowse }) {
     <div className="flex flex-col gap-2.5">
       <div className="flex flex-col gap-1.5">
         <span className="text-xs text-zinc-300">Weapon attack speed</span>
-        <div className="flex flex-wrap gap-1">
-          {ATTACK_SPEEDS.map((speed) => (
-            <ToggleChip key={speed} pressed={normalized.attackSpeeds.includes(speed)} onClick={() => onChange({ ...options, attackSpeeds: toggleValue(normalized.attackSpeeds, speed) })}>
+        {/* 3 + 3 + 1 przyciski równej szerokości, ostatni wyśrodkowany (siatka 6 kolumn, każdy przycisk na 2) */}
+        <div className="grid grid-cols-6 gap-1">
+          {ATTACK_SPEEDS.map((speed, index) => (
+            <ToggleChip
+              key={speed}
+              pressed={normalized.attackSpeeds.includes(speed)}
+              onClick={() => onChange({ ...options, attackSpeeds: toggleValue(normalized.attackSpeeds, speed) })}
+              className={`col-span-2 w-full whitespace-nowrap px-0.5 text-center ${index === ATTACK_SPEEDS.length - 1 && ATTACK_SPEEDS.length % 3 === 1 ? "col-start-3" : ""}`}
+              style={{ fontSize: "12px" }}
+            >
               {ATTACK_SPEED_LABELS[speed]}
             </ToggleChip>
           ))}
         </div>
         <span className="text-xs text-zinc-500">{normalized.attackSpeeds.length > 0 ? "Only weapons with the checked speeds." : "None checked = any speed."}</span>
       </div>
-      <label className="flex items-center gap-2 text-xs text-zinc-200" title="Skips armour, accessories and weapons with a negative elemental defence. Pinned items stay.">
-        <input id="new-no-negdef" type="checkbox" className="mc-check" checked={normalized.avoidNegativeDefences} onChange={() => onChange({ ...options, avoidNegativeDefences: !normalized.avoidNegativeDefences })} /> Avoid negative defences
-      </label>
-      <label
-        className="flex items-center gap-2 text-xs text-zinc-200"
+      <CheckRow id="new-no-negdef" checked={normalized.avoidNegativeDefences} onChange={() => onChange({ ...options, avoidNegativeDefences: !normalized.avoidNegativeDefences })} label="Avoid negative defences" title="Skips armour, accessories and weapons with a negative elemental defence. Pinned items stay." />
+      <CheckRow
+        id="new-live"
+        disabled={!live}
+        checked={live && normalized.onlyListed}
+        onChange={() => onChange({ ...options, onlyListed: !normalized.onlyListed })}
+        label="Live on the Trade Market"
+        hint={live ? formatClock(PRICE_DATA.liveAt) : "no data here"}
         style={ts(live ? undefined : { opacity: 0.55 })}
         title={live ? "Only items listed on the Trade Market right now (WynnVentory snapshot). Pinned items stay." : "Needs live Trade Market data: the GitHub Pages version fetches it from WynnVentory (WYNNVENTORY_KEY secret, see the README)."}
-      >
-        <input id="new-live" type="checkbox" className="mc-check" disabled={!live} checked={live && normalized.onlyListed} onChange={() => onChange({ ...options, onlyListed: !normalized.onlyListed })} />
-        <span>
-          Live on the Trade Market <span className="whitespace-nowrap text-zinc-500">{live ? `· ${formatClock(PRICE_DATA.liveAt)}` : "· no data here"}</span>
-        </span>
-      </label>
+      />
       <button type="button" className="mc-link self-start text-xs" aria-expanded={open} onClick={() => setOpen(!open)}>
         {open ? "▾" : "▸"} Pin items · rarities{market ? " · budget" : ""}
         {active > 0 ? ` (${active} set)` : ""}
@@ -11311,6 +11400,144 @@ function readWelcomeConfirmed() {
   }
 }
 
+// PORADNIK "Info" (przycisk w prawym dolnym rogu): jak używać generatora krok po kroku, co wchodzi do matematyki
+// i jak działa szukanie - oraz że wszystko to tylko sugestia/rekomendacja, nie gwarancja.
+function InfoButton() {
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (!open || typeof document === "undefined") return undefined;
+    const { body, documentElement } = document;
+    const previous = [body.style.overflow, documentElement.style.overflow];
+    body.style.overflow = "hidden";
+    documentElement.style.overflow = "hidden";
+    const onKey = (event) => event.key === "Escape" && setOpen(false);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      body.style.overflow = previous[0];
+      documentElement.style.overflow = previous[1];
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+  return (
+    <>
+      <button type="button" className="mc-btn wbr-info-fab" onClick={() => setOpen(true)} aria-haspopup="dialog" title="How to use the Build Recommender and how it calculates">
+        <span className="wbr-info-icon" aria-hidden="true">
+          i
+        </span>
+        Info
+      </button>
+      {open && <InfoDialog onClose={() => setOpen(false)} />}
+    </>
+  );
+}
+
+function InfoDialog({ onClose }) {
+  const hl = (text) => <b className="wbr-welcome-hl">{text}</b>;
+  return (
+    <div className="wbr-backdrop wbr-welcome-backdrop fixed inset-0 z-[60] flex items-center justify-center p-3 sm:p-6" role="dialog" aria-modal="true" aria-labelledby="wbr-info-title" onClick={(event) => event.target === event.currentTarget && onClose()}>
+      <div className="wbr-pop wbr-welcome flex max-h-full w-full max-w-3xl flex-col">
+        <div className="wbr-welcome-head flex items-center justify-between gap-3 px-5 pb-4 pt-5">
+          <div className="flex min-w-0 flex-col gap-1">
+            <span className="wbr-hero-kicker">Info</span>
+            <h2 id="wbr-info-title" className="wbr-hero-title wbr-welcome-title">
+              How to use it
+            </h2>
+          </div>
+          <button type="button" className="mc-btn mc-btn-sm" onClick={onClose} aria-label="Close">
+            ✕
+          </button>
+        </div>
+        <div className="wbr-welcome-body flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto px-5 py-4 text-base" tabIndex={0}>
+          <p className="wbr-info-note">
+            {hl("Everything here is a suggestion, a recommendation - not a guarantee.")} The builds and numbers come from a model of the game (Wynnbuilder's damage formulas
+            and item data {WYNNBUILDER_DATA.version}). Bosses, raid mechanics, positioning, ping, team buffs you didn't enter and game patches are not in it. Check a build
+            in Wynnbuilder (Open in Wynnbuilder) and in game before you spend emeralds on it.
+          </p>
+
+          <section className="flex flex-col gap-2">
+            <h3 className="wbr-welcome-sub">Step by step</h3>
+            <ol className="wbr-info-list">
+              <li>{hl("Class, rank, level.")} The rank lends ability points earlier; items above your level are left out, and skill and ability points come from the level.</li>
+              <li>
+                {hl("Ability tree.")} Pick an archetype (its suggested tree for your AP), a {hl("guide tree")} (the trees of The Ultimate Build Guide, named the way players
+                call them - Generalist, Bolt Hybrid, Upperbash; search by name or weapon) or your own tree in the Ability tree tab. Spells, their damage and mana costs come
+                from the tree.
+              </li>
+              <li>{hl("Maximise.")} One spell (one cast), the main attack (damage per second), several spells at once (their sum), or the whole cycle (its damage per second).</li>
+              <li>{hl("Effective HP.")} The minimum EHP, in 5% steps of the most your level can reach. Builds below it are thrown away.</li>
+              <li>
+                {hl("Mana.")} Type your spell cycle (1-4 = spells, M = main attack) and clicks per second, how much mana per second it may lose (Allowed drain) and the minimum
+                Life recovery. In raids you can add your team's mana buff under Advanced, at the bottom of the left panel.
+              </li>
+              <li>{hl("Extras.")} Event items, tradeable only, negative defences, life sustain, max or realistic rolls, poison, free skill points, weapon attack speed.</li>
+              <li>{hl("Generate.")} The left panel comes back: change anything and generate again. "Settings changed: regenerate" means the build shown is for older settings.</li>
+              <li>
+                {hl("Read the result.")} Item cards (other picks, rolls, pin or exclude an item), Why this build? (every number and what each item adds), Open in Wynnbuilder,
+                the list of builds for every EHP step and ✦ Suggest mana drain & life recovery at the bottom of the left panel, and the Tomes and Aspects tabs.
+              </li>
+            </ol>
+          </section>
+
+          <section className="flex flex-col gap-2">
+            <h3 className="wbr-welcome-sub">What goes into the math</h3>
+            <ul className="flex flex-col gap-2 text-sm">
+              <li className="wbr-welcome-source">
+                {hl("Damage")}: Wynnbuilder's formulas - the weapon's base damage with powders (the best element by default), the spell or main attack multipliers of your
+                tree, raw and % bonuses of every item, Strength and element skill points, crit chance from Dexterity (crits averaged in). The main attack counts attacks per
+                second after attack speed tiers.
+              </li>
+              <li className="wbr-welcome-source">{hl("Rolls")}: identifications at their max roll, like Wynnbuilder, unless you turn on Realistic rolls (50%).</li>
+              <li className="wbr-welcome-source">{hl("Skill points")}: in the game's equip order, nothing may fall off; points the set doesn't need go where they raise the goal (shown as +X).</li>
+              <li className="wbr-welcome-source">{hl("Effective HP")}: health reduced by Defence and Agility, class and ability tree resistances (Wynnbuilder's EHP; elemental defences are shown but not in it).</li>
+              <li className="wbr-welcome-source">
+                {hl("Mana")}: (Mana Regen + 25) ÷ 5 per second, Mana Steal only from M hits (Mana Steal ÷ 3 ÷ attacks per second each), mana from abilities and the raid buff you
+                entered, minus the spells' costs (a spell = 3 clicks, M = one attack). The balance must not fall below minus the allowed drain.
+              </li>
+              <li className="wbr-welcome-source">{hl("Life")}: Health Regen ÷ 4 per second plus Life Steal from main attack hits; effective health gain = that × EHP ÷ HP.</li>
+              <li className="wbr-welcome-source">
+                {hl("Not counted")}: poison (unless "Count poison in the goal"), powder specials (shown in the Damage panel only), tomes and aspects (their own tabs), how long
+                spells take to deal their damage (use Whole cycle), crafted items, enemies' resistances and your team's buffs.
+              </li>
+            </ul>
+          </section>
+
+          <section className="flex flex-col gap-2">
+            <h3 className="wbr-welcome-sub">How the search works</h3>
+            <ul className="flex flex-col gap-2 text-sm">
+              <li className="wbr-welcome-source">Every item that passes your filters is a candidate (level, class weapon, rarities, events, tradeable, pinned and excluded items).</li>
+              <li className="wbr-welcome-source">
+                Items are pre-scored with stat weights derived from your goal, then a beam search fills the slots for the strongest weapons (and the weapons with the most
+                potential, with every powder element), at your EHP and at +20% EHP. From level 100 the guide builds are extra starting points.
+              </li>
+              <li className="wbr-welcome-source">
+                The best sets then get exact checks: every single item swap, pair swaps, exact skill points - repeated until nothing improves, so the same settings always
+                give the same build.
+              </li>
+              <li className="wbr-welcome-source">
+                EHP, mana, life recovery and skill points are pass/fail filters, never weights. If nothing passes, the closest build is shown with a warning.
+              </li>
+              <li className="wbr-welcome-source">
+                The result is the strongest build the search found within this model and your filters - not proof that nothing better exists. The list of builds and the
+                drain suggestion use a quicker, slightly weaker search.
+              </li>
+            </ul>
+          </section>
+
+          <section className="flex flex-col gap-2">
+            <h3 className="wbr-welcome-sub">Tips</h3>
+            <ul className="flex flex-col gap-2 text-sm">
+              <li className="wbr-welcome-source">Generate a few variants (another spell, the whole cycle, more drain, more EHP) and compare them in the list of builds.</li>
+              <li className="wbr-welcome-source">Why this build? shows what each item adds and which filter a stronger item breaks.</li>
+              <li className="wbr-welcome-source">For endgame builds compare with The Ultimate Build Guide (the Guide builds tab).</li>
+            </ul>
+          </section>
+          <p className="wbr-welcome-muted text-sm">Once more: these are recommendations to start from. Your own judgement, the game and your team have the last word.</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function WelcomeDialog() {
   const [open, setOpen] = useState(() => !readWelcomeConfirmed());
   const [remaining, setRemaining] = useState(Math.ceil(WELCOME_WAIT_MS / 1000));
@@ -12010,7 +12237,7 @@ function WhyBuildDialog({ build, onClose }) {
                 <>
                   <WhyRow
                     label="Mana in"
-                    value={`(Mana Regen ${formatNumber(Math.round(stat("mr")))} + 25) ÷ 5${m.cycle.steal && m.manaSteal ? ` + Mana Steal ${formatNumber(Math.round(stat("ms")))} from main attacks ${m.manaSteal.toFixed(1)}` : m.cycle.steal && stat("ms") > 0 ? " (no M in the cycle, so no Mana Steal)" : ""}${m.manaGain > 0 ? ` + abilities ${m.manaGain.toFixed(1)}` : ""} = ${(m.manaIncome + m.manaGain).toFixed(1)}/s`}
+                    value={`(Mana Regen ${formatNumber(Math.round(stat("mr")))} + 25) ÷ 5${m.cycle.steal && m.manaSteal ? ` + Mana Steal ${formatNumber(Math.round(stat("ms")))} from main attacks ${m.manaSteal.toFixed(1)}` : m.cycle.steal && stat("ms") > 0 ? " (no M in the cycle, so no Mana Steal)" : ""}${m.manaBuff > 0 ? ` + raid buff ${m.manaBuff.toFixed(1)}` : ""}${m.manaGain > 0 ? ` + abilities ${m.manaGain.toFixed(1)}` : ""} = ${(m.manaIncome + m.manaGain).toFixed(1)}/s`}
                   />
                   <WhyRow label="Mana out" value={`cycle ${cycleText(m.cycle.ids)}: ${m.manaUsed.toFixed(1)}/s (3 clicks per spell ÷ ${m.cycle.cps} clicks/s${m.cycle.ids.includes(0) ? ", M = one main attack at the weapon's attack speed" : ""})`} />
                   <WhyRow label="Balance" value={`${m.manaNet >= 0 ? "+" : ""}${m.manaNet.toFixed(1)} mana/s${m.cycle && m.cycle.drain ? (m.cycle.drain >= 999 ? " (any drain allowed)" : ` (drain up to ${m.cycle.drain} allowed)`) : ""}`} good={manaOk(m, m.cycle)} />
@@ -14594,6 +14821,7 @@ export default function BuildRecommender() {
     damageForm.rolls || "max",
     Number(damageForm.drain) || 0,
     Number(damageForm.lr) || 0,
+    Number(damageForm.raidMana) || 0,
     Boolean(damageForm.sustain),
     damageForm.noEvents !== false,
     Boolean(damageForm.tradeable),
@@ -14612,6 +14840,7 @@ export default function BuildRecommender() {
     damageForm.gain,
     Boolean(damageForm.poison),
     damageForm.rolls || "max",
+    Number(damageForm.raidMana) || 0,
     Boolean(damageForm.sustain),
     damageForm.noEvents !== false,
     Boolean(damageForm.tradeable),
@@ -14657,6 +14886,7 @@ export default function BuildRecommender() {
           generated.metrics.cycle.cps !== damageForm.cps ||
           Boolean(generated.metrics.cycle.poison) !== Boolean(damageForm.poison) ||
           (generated.metrics.cycle.drain || 0) !== (Number(damageForm.drain) || 0) ||
+          (generated.metrics.cycle.buff || 0) !== (Number(damageForm.raidMana) || 0) ||
           (generated.metrics.rollPercent || 100) !== (damageForm.rolls === "avg" ? 50 : 100) ||
           Boolean(generated.metrics.requireSustain) !== Boolean(damageForm.sustain) ||
           (generated.metrics.minSustain || 0) !== (Number(damageForm.lr) || 0) ||
@@ -14668,6 +14898,8 @@ export default function BuildRecommender() {
         : generated.level !== level || generated.playerClass !== playerClass || generated.archetype !== archetype || !sameOptions(generated.options, options))
   );
   const customSummary = viewed || !build ? "" : describeOptions(build.options);
+  // kreator krok po kroku (klasa, ranga, poziom, drzewko...) zajmuje całą szerokość, dopóki nie ma buildu
+  const setupGuideOn = tab === "build" && !build && buildMode === "new";
 
   const weaponCounts = useMemo(() => {
     const counts = {};
@@ -14720,7 +14952,6 @@ export default function BuildRecommender() {
       goal: damageGoal.id,
       cycle: formCycleOf(damageForm),
       rollPercent: damageForm.rolls === "avg" ? 50 : 100,
-      useHistory: Boolean(damageForm.history),
       requireSustain: Boolean(damageForm.sustain),
       minSustain: Math.max(0, Number(damageForm.lr) || 0),
       excludeEvents: damageForm.noEvents !== false,
@@ -14816,11 +15047,10 @@ export default function BuildRecommender() {
     setDamageRunning(true);
     setDamageProgress({ label: "Starting", fraction: 0 });
     setBuildError(null);
-    // Portfel sesji (opcja "Start from my earlier builds", domyślnie wyłączona): każdy build tej klasy wygenerowany w tej
-    // sesji jest punktem startu dla następnego. Bez niej te same ustawienia zawsze dają ten sam build (feedback:
-    // "roulette builds" - wynik zależał od tego, co gracz generował wcześniej).
+    // Bez portfela sesji: te same ustawienia zawsze dają ten sam build (feedback "roulette builds"; opcja "Start from
+    // my earlier builds" usunięta w 0.35.1 jako niepotrzebna).
     const historyKey = playerClass;
-    const seeds = damageForm.history ? damageHistory.current.get(historyKey) || [] : [];
+    const seeds = [];
     // te same ustawienia (bez progu EHP) liczy potem lista buildów pod suwakiem
     const params = damageParams();
     const key = sweepKeyNow;
@@ -14918,7 +15148,7 @@ export default function BuildRecommender() {
         row.status = "running";
         publish(true);
         try {
-          const seeds = source.params.useHistory ? damageHistory.current.get(source.params.playerClass) || [] : [];
+          const seeds = [];
           const build = await runDamageGeneration({ ...source.params, seeds, minEhp: row.minEhp, effort: "quick" });
           if (sweepToken.current !== token) return;
           row.build = build;
@@ -15091,6 +15321,7 @@ export default function BuildRecommender() {
     <div className="wbr-mc min-h-screen px-4 py-6 sm:px-6" data-theme={theme}>
       <style>{MC_STYLES}</style>
       <WelcomeDialog />
+      <InfoButton />
       <div className="mx-auto flex max-w-[1720px] flex-col gap-4">
         <header className="wbr-hero">
           <div className="wbr-hero-inner flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
@@ -15118,6 +15349,8 @@ export default function BuildRecommender() {
         </header>
 
         <div className="flex flex-col gap-4 lg:grid lg:grid-cols-12 lg:items-start">
+          {/* w kreatorze (wybór klasy i kolejne kroki, zanim powstanie build) lewy panel znika; wraca po wygenerowaniu */}
+          {!setupGuideOn && (
           <aside className="flex flex-col gap-4 lg:col-span-4 xl:col-span-3">
             <section className="mc-panel flex flex-col gap-4 p-4">
                 <DamageForm
@@ -15171,8 +15404,9 @@ export default function BuildRecommender() {
               {hasWynnpoolData() ? " · Wynnpool weights" : ""}
             </p>
           </aside>
+          )}
 
-          <main className={`flex flex-col gap-4 lg:col-span-8 xl:col-span-9 ${tab === "build" && !build ? "order-first lg:order-none" : ""}`} aria-live="polite">
+          <main className={`flex flex-col gap-4 ${setupGuideOn ? "lg:col-span-12" : "lg:col-span-8 xl:col-span-9"} ${tab === "build" && !build ? "order-first lg:order-none" : ""}`} aria-live="polite">
             <div className="wbr-tabs" role="tablist" aria-label="Views">
               {[
                 ["build", guideView ? "Guide build" : solverView ? "Solver build" : "Build", null, "◈"],

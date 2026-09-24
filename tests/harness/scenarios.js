@@ -75,7 +75,7 @@ export function makeScenario(s) {
   if (Array.isArray(s.cycle)) cycleIds = s.cycle;
   else if (s.cycle === "first" && cycles.length) cycleIds = cycles[0].ids;
   else if (s.cycle === "random" && cycles.length) cycleIds = r.pick(cycles).ids;
-  const cycle = { ids: cycleIds, cps: s.cps ?? 3, steal: s.steal ?? true, gain: s.gain ?? true, poison: Boolean(s.poison), drain: s.drain ?? 0 };
+  const cycle = { ids: cycleIds, cps: s.cps ?? 3, steal: s.steal ?? true, gain: s.gain ?? true, poison: Boolean(s.poison), drain: s.drain ?? 0, buff: s.buff ?? 0 };
   if (s.goal === "cycle" && cycleIds.some((id) => id !== 0)) goal = E.DAMAGE_GOAL_CYCLE;
   const params = {
     playerClass,

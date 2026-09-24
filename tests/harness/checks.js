@@ -276,7 +276,7 @@ export async function checkBuild(scenario, build, { limits = DEFAULT_LIMITS, pai
       const used = spells.reduce((sum, spell) => sum + (spell.cost || 0), 0) / seconds;
       const gained = params.cycle.gain !== false ? spells.reduce((sum, spell) => sum + (spell.manaGained || 0), 0) / seconds : 0;
       const steal = params.cycle.steal !== false && melee > 0 ? ((melee / seconds) * (stats.manaSteal / 3)) / hps : 0;
-      const income = (stats.manaRegen + 25) / 5 + steal;
+      const income = (stats.manaRegen + 25) / 5 + steal + Math.max(0, Number(params.cycle.buff) || 0);
       const net = income + gained - used;
       if (Math.abs(net - build.metrics.manaNet) > 0.05 + 0.02 * Math.abs(net)) add("error", "MANA_MISMATCH", `generator mana ${build.metrics.manaNet.toFixed(2)}/s vs summary ${net.toFixed(2)}/s`);
     }

@@ -52,6 +52,20 @@ describe("Discord feedback fixes", () => {
     expect(evaluate(picks).feasible).toBe(true);
   }, 300000);
 
+  it("raid mana buff (Advanced) adds to the cycle's mana income and passes the QA checks", async () => {
+    const base = makeScenario({ playerClass: "Mage", archetype: "Riftwalker", level: 70, ehpPct: 15, cycle: "first", cps: 5 });
+    const ctx = E.damageGoalContext(base.params.playerClass, base.params.level, base.params.treeSettings);
+    const weapon = E.ITEM_DB.find((item) => item.type === "wand" && item.level <= 70);
+    const sp = E.computeSkillPoints([weapon], true);
+    const without = E.evaluateGoal(ctx, [weapon], weapon, sp.totals, base.params.goal, E.normalizeCycle(base.params.cycle));
+    const withBuff = E.evaluateGoal(ctx, [weapon], weapon, sp.totals, base.params.goal, E.normalizeCycle({ ...base.params.cycle, buff: 4 }));
+    expect(withBuff.manaIncome - without.manaIncome).toBeCloseTo(4, 9);
+    const sc = makeScenario({ playerClass: "Mage", archetype: "Riftwalker", level: 70, ehpPct: 15, cycle: "first", cps: 5, buff: 4 });
+    const build = await E.generateDamageBuild({ ...sc.params, effort: "quick" });
+    expect(build.metrics.manaBuff).toBe(4);
+    expect(await errorsOf(sc, build)).toEqual([]);
+  }, 300000);
+
   it("guide trees are presets with the players' names", () => {
     const presets = E.allTreePresets();
     expect(presets.length).toBeGreaterThan(10);
