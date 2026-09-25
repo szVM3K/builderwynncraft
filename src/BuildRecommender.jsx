@@ -10029,8 +10029,8 @@ function GuideTreePresets({ playerClass, archetype, apCap, selected, onPick, com
           type="search"
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="generalist, bolt hybrid, divzer…"
-          aria-label="Search guide trees by build name, variant or weapon"
+          placeholder="generalist, bolt hybrid, water…"
+          aria-label="Search guide trees by name, variant or element"
           className={compact ? "mc-input w-full min-w-0 text-xs" : "mc-input min-w-0 flex-1 text-xs"}
           style={{ maxWidth: compact ? undefined : "18rem" }}
         />
@@ -10041,12 +10041,17 @@ function GuideTreePresets({ playerClass, archetype, apCap, selected, onPick, com
         {shown.map((preset) => {
           const on = selected === preset.id;
           const trimmed = preset.points > apCap;
-          const title = `${preset.builds.join(", ")}. ${preset.points} AP${trimmed ? `; your ${apCap} AP keep the most useful part of it (the full tree comes back when you level up)` : ""}.${preset.cycle ? ` Guide cycle: ${preset.cycle.name} (${preset.cycle.cycle}).` : ""}`;
+          const title = `${preset.community ? `${preset.builds.join(", ")}. ` : ""}${preset.masteries.length > 0 ? `${preset.masteries.join(" / ")} Mastery. ` : ""}${preset.points} AP${trimmed ? `; your ${apCap} AP keep the most useful part of it (the full tree comes back when you level up)` : ""}.${preset.cycle ? ` Guide cycle: ${preset.cycle.name} (${preset.cycle.cycle}).` : ""}`;
           return compact ? (
             <button key={preset.id} type="button" onClick={() => onPick(preset)} title={title} className={`mc-btn mc-btn-sm w-full min-w-0 justify-start overflow-hidden text-left ${on ? "mc-btn-on" : ""}`} style={{ textAlign: "left" }}>
               <span className="block min-w-0 truncate">
                 {preset.name}
-                <span className="text-zinc-500"> · {preset.community ? `community${preset.author ? `, ${preset.author}` : ""}` : `${preset.weapons.slice(0, 2).join(", ")}${preset.weapons.length > 2 ? "…" : ""}`}{trimmed ? ` · trimmed to ${apCap} AP` : ""}</span>
+                {(preset.community || trimmed) && (
+                  <span className="text-zinc-500">
+                    {preset.community ? ` · community${preset.author ? `, ${preset.author}` : ""}` : ""}
+                    {trimmed ? ` · trimmed to ${apCap} AP` : ""}
+                  </span>
+                )}
               </span>
             </button>
           ) : (
@@ -10061,12 +10066,7 @@ function GuideTreePresets({ playerClass, archetype, apCap, selected, onPick, com
                   Community tree{preset.author ? ` by ${preset.author}` : ""}
                   {preset.description ? ` · ${preset.description.slice(0, 90)}${preset.description.length > 90 ? "…" : ""}` : ""}
                 </span>
-              ) : (
-                <span className="text-xs text-zinc-400">
-                  with {preset.weapons.slice(0, 4).join(", ")}
-                  {preset.weapons.length > 4 ? ` +${preset.weapons.length - 4}` : ""}
-                </span>
-              )}
+              ) : null}
               <span className="text-xs text-zinc-500">
                 {preset.masteries.length > 0 ? `${preset.masteries.join(" / ")} Mastery · ` : ""}
                 {trimmed ? `${preset.points} AP → your ${apCap} AP` : `${preset.points} AP`}
@@ -14024,19 +14024,25 @@ function allTreePresets() {
     if (!preset.weapons.includes(weapon)) preset.weapons.push(weapon);
     preset.builds.push(entry.name);
   });
+  const usedNames = new Map();
   presets.forEach((preset) => {
+    const tree = TREE_INDEX[preset.playerClass];
+    preset.masteries = preset.ids.map((id) => tree.byId.get(id)).filter((node) => node && / Mastery$/.test(node.name)).map((node) => node.name.replace(" Mastery", ""));
     // nazwa: podarchetyp z największą liczbą broni (przy remisie dłuższa, bardziej opisowa nazwa)
     const aliases = [...preset.aliasWeapons.entries()].sort((a, b) => b[1].size - a[1].size || b[0].length - a[0].length).map(([name]) => name);
     const named = aliases.filter((name) => name !== "Standard");
-    // bez nazwy podarchetypu: archetyp + broń z poradnika ("Shadestepper · Grimtrap")
-    preset.name = named[0] || `${preset.archetype} · ${preset.weapons[0]}${preset.weapons.length > 1 ? ` +${preset.weapons.length - 1}` : ""}`;
-    preset.aliases = aliases.filter((name) => name !== preset.name && name !== "Standard");
+    // bez nazwy podarchetypu: archetyp + żywioły z Mastery drzewka ("Riftwalker · Water + Air"). 0.40.1: bez nazw broni
+    // z poradnika - generator dobiera broń sam, więc "Riftwalker · Singularity" obiecywało broń, której build nie miał.
+    let name = named[0] || `${preset.archetype} · ${preset.masteries.length > 0 ? preset.masteries.join(" + ") : "Guide tree"}`;
+    const key = `${preset.playerClass}|${name}`;
+    usedNames.set(key, (usedNames.get(key) || 0) + 1);
+    if (usedNames.get(key) > 1) name = `${name} #${usedNames.get(key)}`;
+    preset.name = name;
+    preset.aliases = aliases.filter((alias) => alias !== preset.name && alias !== "Standard");
     // podpowiedź cyklu: combo archetypu o tej samej nazwie (np. "Upperbash" -> 4311)
     const combos = ARCHETYPE_COMBOS[preset.archetype] ? ARCHETYPE_COMBOS[preset.archetype].combos : [];
     const combo = combos.find((entry) => [preset.name, ...preset.aliases].some((name) => entry.name.toLowerCase().includes(name.toLowerCase()) || name.toLowerCase().includes(entry.name.toLowerCase().replace(/ fallen| paladin/g, ""))));
     preset.cycle = combo ? { name: combo.name, cycle: combo.cycle } : null;
-    const tree = TREE_INDEX[preset.playerClass];
-    preset.masteries = preset.ids.map((id) => tree.byId.get(id)).filter((node) => node && / Mastery$/.test(node.name)).map((node) => node.name.replace(" Mastery", ""));
   });
   // drzewka graczy (po przeglądzie, z serwera strony) na końcu listy
   presets.push(...communityTreePresets());
@@ -14046,11 +14052,12 @@ function allTreePresets() {
 function treePresetsFor(playerClass, archetype = null) {
   return allTreePresets().filter((preset) => preset.playerClass === playerClass && (!archetype || preset.archetype === archetype));
 }
-// wyszukiwanie po nazwach graczy: podarchetyp, inne nazwy, broń, archetyp ("generalist", "bolt hybrid", "divzer")
+// wyszukiwanie po nazwach graczy: podarchetyp, inne nazwy, archetyp, żywioły ("generalist", "bolt hybrid", "water");
+// 0.40.1: bez broni z poradnika (drzewko nie wybiera broni); drzewka graczy - też po nazwie i autorze
 function presetMatches(preset, query) {
   const text = String(query || "").trim().toLowerCase();
   if (!text) return true;
-  const haystack = [preset.name, ...preset.aliases, ...preset.weapons, preset.archetype, ...preset.builds].join(" | ").toLowerCase();
+  const haystack = [preset.name, ...preset.aliases, preset.archetype, ...(preset.masteries || []), ...(preset.community ? preset.builds : [])].join(" | ").toLowerCase();
   return text.split(/\s+/).every((word) => haystack.includes(word));
 }
 

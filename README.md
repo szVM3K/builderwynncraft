@@ -374,6 +374,14 @@ behaviour). All 30 default builds pass, with no warnings.
 - **Time.** When the *Any* build doesn't fit, the default run takes a median 1.2-1.3× as long (0.6-4.7× on a
   2-core machine running both shards at once).
 
+### Guide trees without weapon names (0.40.1)
+
+A guide tree is only the ability tree: the generator picks the weapon itself, so a preset called "Riftwalker ·
+Singularity" promised a weapon the build didn't get. Presets without a players' name (Generalist, Upperbash, Bolt
+Hybrid...) are now named after the tree's element masteries ("Riftwalker · Air + Fire", "#2" when two trees share it),
+and the weapon lists are gone from the buttons, the tiles and the tooltips. The search finds names, variants,
+archetypes and elements (community trees also by their name and author), not weapons.
+
 ### Major IDs, walk speed in the score, build attack speed (0.40.0)
 
 **Major IDs: descriptions.** `src/major-ids.json` (`npm run update-major-ids`, from Wynnbuilder's `majid.json` for the
