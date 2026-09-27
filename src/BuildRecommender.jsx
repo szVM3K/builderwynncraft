@@ -14,6 +14,7 @@ import TOMES_ASPECTS from "./tomes-aspects.json";
 import WB_IDS from "./wynnbuilder-ids.json";
 import PACKAGE_INFO from "../package.json";
 import MAJOR_ID_DATA from "./major-ids.json";
+import ADS_CONFIG from "./ads-config.json";
 
 // Wersja strony (package.json) - w oknie Info i w podpowiedzi przycisku Info (0.39.2)
 const APP_VERSION = PACKAGE_INFO.version;
@@ -4153,6 +4154,9 @@ const MC_STYLES = `
 .wbr-mc .mc-title,.wbr-mc h1,.wbr-mc h2,.wbr-mc h3{font-weight:700}
 .wbr-mc .mc-btn{font-weight:600}
 .wbr-mc fieldset{min-width:0}
+.wbr-ad .wbr-ad-label{display:none}
+.wbr-ad:has(ins[data-ad-status="filled"]) .wbr-ad-label{display:block}
+.wbr-ad:has(ins[data-ad-status="unfilled"]){display:none}
 .wbr-mc .tabular-nums{font-variant-numeric:tabular-nums}
 .wbr-mc .text-zinc-50,.wbr-mc .text-zinc-100{color:#fff}
 .wbr-mc .text-zinc-200,.wbr-mc .text-zinc-300{color:#e0e0e0}
@@ -12494,8 +12498,19 @@ function InfoDialogBody({ onClose }) {
           </section>
           <p className="wbr-welcome-muted text-sm">Once more: these are recommendations to start from. Your own judgement, the game and your team have the last word.</p>
           <p className="wbr-welcome-muted text-xs">
-            Privacy: the site counts anonymously how it's used (builds generated, visitors) to improve it - no cookies, no accounts, no personal data; the server keeps
+            Privacy: the site counts anonymously how it's used (builds generated, visitors) to improve it - no accounts, no personal data; the server keeps
             only a code that changes every day instead of your address.
+            {adsEnabled() ? (
+              <>
+                {" "}Ads come from Google AdSense, which uses cookies (in the EU you are asked first).{" "}
+                <a href="privacy.html" target="_blank" rel="noopener" className="mc-link">
+                  Privacy details
+                </a>
+                .
+              </>
+            ) : (
+              " No cookies."
+            )}
           </p>
         </div>
       </div>
@@ -20165,6 +20180,7 @@ function ManualWorkspace({ mode, ws, onWs, tab, onTab, onSendToOptimizer = null,
                   ))}
                 </div>
                 {filled > 0 && <WynnbuilderExport build={build} treeSettings={build.treeSettings} fixedExtras={extras} />}
+                <AdSlot name="side" className="mt-2 hidden xl:flex" />
               </div>
               <div className="flex flex-col gap-3 xl:sticky xl:top-4 xl:max-h-[calc(100vh-2rem)] xl:overflow-y-auto xl:pr-1">
                 <DamagePanel build={build} stats={stats} onOpenTree={() => onTab("tree")} />
@@ -20331,6 +20347,51 @@ function apiBase() {
 }
 function apiReady() {
   return Boolean(apiBase());
+}
+
+// REKLAMY (0.41, opcjonalne, "nie inwazyjnie"): Google AdSense, najwyżej 2 bloki - na dole strony i pod kartami
+// przedmiotów (tylko ekrany xl; nigdy w przyklejonej kolumnie paneli). Blok nie rezerwuje miejsca: podpis
+// "Advertisement" pojawia się dopiero z reklamą, a bez reklamy (bloker, brak reklamy) blok znika. Bez ID wydawcy w src/ads-config.json nic się nie ładuje; nigdy w artifakcie
+// (window.WBR_NO_ADS), z pliku ani z localhost. Bez okienek, reklam przyklejonych ani pełnoekranowych: tylko te bloki
+// (Auto ads w panelu AdSense zostają wyłączone - README). Zgodę w EOG/UK/Szwajcarii zbiera komunikat Google (CMP).
+const ADS_CLIENT = /^ca-pub-\d{10,20}$/.test(String((ADS_CONFIG && ADS_CONFIG.client) || "")) ? ADS_CONFIG.client : "";
+function adsEnabled() {
+  if (!ADS_CLIENT || typeof window === "undefined" || typeof document === "undefined" || window.WBR_NO_ADS) return false;
+  return /^https?:$/.test(window.location.protocol) && !/^(localhost|127\.|\[::1\])/.test(window.location.hostname);
+}
+function adSlotId(name) {
+  const slots = (ADS_CONFIG && ADS_CONFIG.slots) || {};
+  return /^\d{6,20}$/.test(String(slots[name] || "")) ? String(slots[name]) : "";
+}
+function ensureAdScript() {
+  if (document.querySelector('script[src*="pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"]')) return;
+  const script = document.createElement("script");
+  script.async = true;
+  script.crossOrigin = "anonymous";
+  script.src = `https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=${ADS_CLIENT}`;
+  document.head.appendChild(script);
+}
+function AdSlot({ name, className = "", format = "auto" }) {
+  const ref = useRef(null);
+  const slot = adSlotId(name);
+  const on = adsEnabled() && Boolean(slot);
+  useEffect(() => {
+    if (!on || !ref.current) return;
+    ensureAdScript();
+    if (ref.current.getAttribute("data-adsbygoogle-status")) return;
+    try {
+      (window.adsbygoogle = window.adsbygoogle || []).push({});
+    } catch (error) {
+      // bloker reklam albo brak zgody: blok zostaje pusty
+    }
+  }, [on]);
+  if (!on) return null;
+  return (
+    <aside className={`wbr-ad flex-col gap-1 ${className || "flex"}`} aria-label="Advertisement">
+      <span className="wbr-ad-label text-[10px] uppercase tracking-wide text-zinc-500">Advertisement</span>
+      <ins ref={ref} className="adsbygoogle" style={{ display: "block" }} data-ad-client={ADS_CLIENT} data-ad-slot={slot} data-ad-format={format} data-full-width-responsive="true" />
+    </aside>
+  );
 }
 async function apiCall(path, { method = "GET", body = undefined, token = null, keepalive = false } = {}) {
   const base = apiBase();
@@ -23003,6 +23064,7 @@ export default function BuildRecommender() {
                   </button>
                 )}
                 {whyOpen && build.mode === "damage" && <WhyBuildDialog build={build} onClose={() => setWhyOpen(false)} />}
+                <AdSlot name="side" className="mt-2 hidden xl:flex" />
               </div>
 
               <div className="flex flex-col gap-3 xl:sticky xl:top-4 xl:max-h-[calc(100vh-2rem)] xl:overflow-y-auto xl:pr-1">
@@ -23048,6 +23110,18 @@ export default function BuildRecommender() {
           </main>
         </div>
         )}
+        {/* 0.41: reklama na samym dole (jeśli włączona) i link do polityki prywatności na stronie z serwerem */}
+        <footer className="flex flex-col gap-3 pt-2">
+          <AdSlot name="footer" format="horizontal" />
+          {(adsEnabled() || apiReady()) && (
+            <p className="text-center text-xs text-zinc-500">
+              <a href="privacy.html" className="mc-link">
+                Privacy
+              </a>{" "}
+              · fan-made, not affiliated with Wynncraft
+            </p>
+          )}
+        </footer>
       </div>
       {introFor && <ModeIntroDialog mode={introFor} onClose={closeIntro} />}
       {reviewOpen && <ReviewPanel onClose={() => setReviewOpen(false)} />}

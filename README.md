@@ -138,6 +138,29 @@ snapshot from the last build (the time is in the tooltip) – a listing may have
 Locally: `WYNNVENTORY_KEY=... npm run update-prices` (optionally `-- 14` for 14 days). Without prices the budget
 field is disabled and everything else works as before.
 
+## Ads (Google AdSense, optional)
+
+The site can show at most two Google AdSense ads: one at the bottom of the page and, on wide screens (1280 px and
+more), one under a build's item cards. No pop-ups, no anchor, sticky or full-screen ads, nothing in the sticky
+stat column, and never an ad in the Claude artifact, a `file://` page or on localhost. A block reserves no space:
+the "Advertisement" label appears only together with an ad, and a block that gets no ad (or is blocked) disappears.
+
+Settings are in `src/ads-config.json`:
+
+1. `"client"`: your AdSense publisher ID (`ca-pub-…`). With it, `vite.config.js` puts the `google-adsense-account`
+   meta tag and the AdSense script into the page head (what AdSense looks for when you add a site), and the footer
+   shows a Privacy link to `public/privacy.html`.
+2. AdSense only accepts the root of a domain. For `https://<user>.github.io/<repo>/` that is `<user>.github.io`,
+   so it needs a `<user>.github.io` repository with GitHub Pages: an `ads.txt` file
+   (`google.com, pub-…, DIRECT, f08c47fec0942fa0`) and a start page with the same AdSense script in its head.
+3. Once AdSense approves the site: Ads → By ad unit → Display ads, create two responsive units (for example "side"
+   and "footer") and put their numbers (`data-ad-slot`) into `"slots"`. An empty slot means no ad in that place.
+4. Keep **Auto ads off** for the site (Ads → By site), so Google doesn't add its own anchor or full-screen ads.
+5. Privacy & messaging → European regulations: create and publish the consent message for the site (required
+   for visitors from the EEA, the UK and Switzerland).
+
+To remove ads, empty `"client"`: the page is then exactly as it was without them.
+
 ## Features
 
 ### Welcome popup
@@ -373,6 +396,14 @@ behaviour). All 30 default builds pass, with no warnings.
   damage-first search; what is left over is left over because it was free.
 - **Time.** When the *Any* build doesn't fit, the default run takes a median 1.2-1.3× as long (0.6-4.7× on a
   2-core machine running both shards at once).
+
+### Non-invasive ads, privacy page (0.41.0)
+
+- Optional Google AdSense (see "Ads" above): at most two blocks, at the bottom of the page and under the item cards
+  on wide screens, never over or between the controls. Off until the ad units are set in `src/ads-config.json`.
+- `public/privacy.html`: what stays in your browser, the anonymous usage counts, what publishing a build or tree
+  sends, and the AdSense part (cookies, how to opt out of personalised ads, the EU consent message). Linked from
+  the page footer and from the Info window.
 
 ### Guide trees without weapon names (0.40.1)
 
@@ -991,6 +1022,8 @@ tomes need level 60, so one threshold covers both tabs.
   link in the address (`encodeShareSettings`, `decodeShareSettings`, `parseBuildHash`, `buildFromShare`,
   `decodeWynnbuilderHash`), `SavedBuildsPanel`, `BuildLinkBar`.
 - `src/api-config.json`: the address of the site's server (empty = its features off).
+- `src/ads-config.json`: the AdSense publisher ID and ad unit numbers (empty = no ads); `vite.config.js` adds the
+  AdSense tags to the page head. `public/privacy.html`: the privacy page.
 - `worker/`: the site's server (Cloudflare Worker + D1): `src/index.js`, `schema.sql`, `wrangler.toml`,
   `scripts/api-test.mjs` (API test against `wrangler dev --local`).
 - `scripts/compare-defaults.mjs`: the new default ranges vs Any on the matrix scenarios.

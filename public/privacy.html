@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Privacy · Wynncraft Build Recommender</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0e0c13;
+        --panel: #1e1b26;
+        --text: #e8e6ee;
+        --muted: #a9aac9;
+        --gold: #ffaa00;
+        --line: #3a3644;
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          color-scheme: light;
+          --bg: #f4f2f8;
+          --panel: #ffffff;
+          --text: #1c1a24;
+          --muted: #5a5670;
+          --gold: #9a6400;
+          --line: #d8d5de;
+        }
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+      main { max-width: 760px; margin: 0 auto; padding: 32px 16px 64px; }
+      h1 { margin: 0 0 4px; font-size: 1.8rem; color: var(--gold); }
+      h2 { margin: 28px 0 8px; font-size: 1.15rem; color: var(--gold); }
+      p, li { color: var(--text); }
+      .muted { color: var(--muted); font-size: 0.9rem; }
+      section { background: var(--panel); border: 1px solid var(--line); padding: 4px 20px 12px; margin-top: 16px; }
+      a { color: var(--gold); }
+      ul { padding-left: 20px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Privacy</h1>
+      <p class="muted">Wynncraft Build Recommender · a fan-made tool, not affiliated with Wynncraft · last updated 27 September 2026</p>
+
+      <section>
+        <h2>What stays in your browser</h2>
+        <p>Your settings, saved builds, Creator and Optimizer workspaces, the theme and whether you have seen the welcome window are kept in your browser's local storage. They never leave your device unless you share a build link yourself. Clearing the site's data in your browser removes them.</p>
+      </section>
+
+      <section>
+        <h2>Anonymous usage counts</h2>
+        <p>To see which features are used, the site sends anonymous events to its own small server (a Cloudflare Worker): for example "a build was generated" with the class, archetype, level range and main skill, and a ping every two minutes while the page is open (to count active visitors).</p>
+        <ul>
+          <li>No accounts, no names, no email addresses.</li>
+          <li>Your IP address is not stored. The server keeps a code made from a random value that changes every day, your IP address and your browser name; the random values are deleted after two days, so the code can't be linked to you or across days.</li>
+          <li>Counts are kept per day. Active-visitor entries are deleted after two days.</li>
+        </ul>
+      </section>
+
+      <section>
+        <h2>Builds and ability trees you publish</h2>
+        <p>When you press Publish (Build Library) or Add a guide tree, the build or tree code, the name, the optional author name and description you type are sent to the site's server for review. After approval they are public on the site. The day's visitor code is stored with it to limit how many you can send per day; once that day's random value is deleted it can't be linked to you.</p>
+      </section>
+
+      <section>
+        <h2>Advertising (Google AdSense)</h2>
+        <p>The site may show up to two ads from Google AdSense: one at the bottom of the page and one at the end of the build column on wide screens. No pop-ups, full-screen or sticky ads.</p>
+        <ul>
+          <li>Third-party vendors, including Google, use cookies to serve ads based on your prior visits to this website or other websites.</li>
+          <li>Google's use of advertising cookies enables it and its partners to serve ads based on your visits to this site and/or other sites on the Internet.</li>
+          <li>You can opt out of personalised advertising in <a href="https://myadcenter.google.com/" rel="noopener">Google's My Ad Center</a> (Ads Settings), or opt out of some third-party vendors' cookies at <a href="https://www.aboutads.info/choices/" rel="noopener">aboutads.info</a>.</li>
+          <li>In the European Economic Area, the United Kingdom and Switzerland you are asked for consent first (Google's consent message); you can change your choice at any time with the "Privacy and cookie settings" link it shows.</li>
+          <li>How Google uses data from sites that use its services: <a href="https://policies.google.com/technologies/partner-sites" rel="noopener">policies.google.com/technologies/partner-sites</a>.</li>
+        </ul>
+      </section>
+
+      <section>
+        <h2>Other data</h2>
+        <p>Item data and formulas come from Wynnbuilder; Trade Market prices from WynnVentory are downloaded when the site is built on GitHub, not by your browser. No other third parties get data about you.</p>
+      </section>
+
+      <section>
+        <h2>Contact</h2>
+        <p>Questions or requests: <a href="https://github.com/szVM3K/builderwynncraft/issues" rel="noopener">github.com/szVM3K/builderwynncraft/issues</a>.</p>
+      </section>
+
+      <p class="muted"><a href="./">← Back to the Build Recommender</a></p>
+    </main>
+  </body>
+</html>
