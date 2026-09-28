@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>How damage is calculated · Builder Wynncraft</title>
+    <meta name="description" content="Weapon base damage, spell multipliers, % and raw bonuses, Strength, critical hits and attack speed." />
+    <link rel="canonical" href="https://szvm3k.github.io/builderwynncraft/guides/damage.html" />
+    <link rel="icon" href="../favicon.ico" sizes="16x16 32x32 48x48" />
+    <link rel="apple-touch-icon" href="../apple-touch-icon.png" />
+    <link rel="stylesheet" href="guides.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="wrap">
+        <a class="brand" href="../"><img src="../favicon.png" width="32" height="32" alt="" /> Builder Wynncraft</a>
+        <nav aria-label="Site"><a href="../">Build Recommender</a><a href="./" aria-current="page">Guides</a><a href="classes.html">Classes</a><a href="../about.html">About</a></nav>
+      </div>
+    </header>
+    <main class="wrap">
+
+      <h1>How damage is calculated</h1>
+      <p class="lead">Every damage number on the site comes from the same formula Wynnbuilder uses. Knowing its shape explains why some stats are worth so much more than others.</p>
+      <div class="toc"><p>On this page</p><ul>
+        <li><a href="#base">Base damage: the weapon</a></li>
+        <li><a href="#multipliers">Spell and main attack multipliers</a></li>
+        <li><a href="#bonuses">Percent bonuses</a></li>
+        <li><a href="#raw">Raw bonuses</a></li>
+        <li><a href="#strcrit">Strength and critical hits</a></li>
+        <li><a href="#example">A worked example</a></li>
+        <li><a href="#speed">Attack speed</a></li>
+        <li><a href="#notcounted">What isn't counted</a></li>
+      </ul></div>
+
+      <h2 id="base">Base damage: the weapon</h2>
+      <p>All damage starts from your weapon. A weapon lists damage ranges per element - neutral, earth, thunder, water, fire and air - and the build's damage keeps that split all the way to the end. Powders add elemental damage to the weapon and convert part of its neutral damage into their element, which is why a mostly neutral weapon can be turned into a strong fire or air weapon. By default the site picks the powder element that helps your goal most.</p>
+
+      <h2 id="multipliers">Spell and main attack multipliers</h2>
+      <p>The ability tree turns base damage into attacks. A spell has a multiplier per element - for example 150% neutral and 50% fire - applied to the weapon's damage, and upgrades in the tree raise or add to those numbers. For spells, the weapon's <em>base</em> attack speed also scales the damage: slow weapons hit harder per spell, fast weapons less (see <a href="speed.html">attack speed</a>). The main attack uses the weapon's damage per hit, multiplied by how many hits you land per second.</p>
+
+      <h2 id="bonuses">Percent bonuses</h2>
+      <p>For each element, the damage is multiplied by one sum of percentages:</p>
+      <code class="formula">element damage = base × (1 + skill bonus + Spell or Main Attack Damage % + Damage % + element Damage % + Elemental Damage %)</code>
+      <p>The skill bonus is the one of the element's skill (Strength for earth, Dexterity for thunder, and so on; see <a href="skill-points.html">skill points</a>). "Elemental Damage %" boosts every element except neutral. Because everything inside the bracket is added, one more +10% is worth less the more percent bonuses you already stack - and a raw bonus can become the better pick.</p>
+
+      <h2 id="raw">Raw bonuses</h2>
+      <p>Raw bonuses ("+120 Spell Damage", "+60 Thunder Damage") are added after the percentages. A raw bonus that isn't tied to an element is split over the elements in proportion to the weapon's damage, so it keeps your element split. Raw bonuses matter most for spells with high multipliers and for fast weapons, where the base damage per hit is small.</p>
+
+      <h2 id="strcrit">Strength and critical hits</h2>
+      <p>Two things act on the whole sum. Strength multiplies all damage by (1 + its bonus), whatever the element. Dexterity sets the chance to land a critical hit, and a critical hit adds another (1 + Critical Damage %) of the damage before Strength:</p>
+      <code class="formula">normal hit   = D × (1 + str)
+critical hit = D × (1 + str + 1 + Critical Damage %)
+average      = (1 - crit chance) × normal + crit chance × critical</code>
+      <p>The site always shows the average - crits "averaged in" - because over a fight that is what you actually deal.</p>
+
+      <h2 id="example">A worked example</h2>
+      <p>A spell deals 1,000 thunder base damage. The build has 40 Dexterity (33.3% bonus and crit chance), 30 Strength (26.1%), +20% Spell Damage, +15% Thunder Damage and +30% Critical Damage.</p>
+      <ul>
+        <li>Percent bonuses: 1,000 × (1 + 0.333 + 0.20 + 0.15) = <strong>1,683</strong></li>
+        <li>Normal hit with Strength: 1,683 × 1.261 = <strong>2,122</strong></li>
+        <li>Critical hit: 1,683 × (1.261 + 1.30) = <strong>4,309</strong></li>
+        <li>Average: 66.7% × 2,122 + 33.3% × 4,309 = <strong>2,850</strong></li>
+      </ul>
+      <p>Dexterity shows up twice here - in the thunder bonus and in the crit chance - which is why thunder builds lean on it so heavily.</p>
+
+      <h2 id="speed">Attack speed</h2>
+      <p>The main attack's damage per second is damage per hit × hits per second, and hits per second come from the weapon's attack speed after any Attack Speed bonus tiers. Spells don't care about those bonus tiers. The details are in <a href="speed.html">walk speed and attack speed</a>.</p>
+
+      <h2 id="notcounted">What isn't counted</h2>
+      <ul>
+        <li>Poison, unless you turn on "count poison in the goal".</li>
+        <li>Powder specials - shown in the Damage panel, not added to the goal.</li>
+        <li>How long a spell takes to deal all its hits; the whole-cycle goal is the fair comparison for that.</li>
+        <li>Enemy elemental resistances and your team's buffs.</li>
+      </ul>
+
+      <p class="cta-row"><a class="cta" href="../">Open the Build Recommender →</a></p>
+      <aside class="more" aria-label="More guides">
+        <div><h2>Game mechanics</h2><ul><li><a href="how-it-works.html">How the recommender picks a build</a></li><li><a href="skill-points.html">Skill points explained</a></li><li><a href="effective-hp.html">Effective HP (EHP)</a></li><li><a href="mana-and-sustain.html">Mana and life sustain</a></li><li><a href="speed.html">Walk speed and attack speed</a></li><li><a href="major-ids.html">Major IDs</a></li></ul></div>
+        <div><h2>Classes</h2><ul><li><a href="warrior.html">Warrior</a></li><li><a href="mage.html">Mage</a></li><li><a href="archer.html">Archer</a></li><li><a href="assassin.html">Assassin</a></li><li><a href="shaman.html">Shaman</a></li></ul></div>
+      </aside>
+    </main>
+    <footer class="wrap foot">
+      <p>Builder Wynncraft is a fan-made project, not affiliated with Wynncraft. Numbers follow Wynnbuilder's formulas and item data (game version 2.2.4); results are suggestions, not guarantees. Last updated 28 September 2026.</p>
+      <p><a href="../about.html">About</a> · <a href="../privacy.html">Privacy</a> · <a href="https://github.com/szVM3K/builderwynncraft">Source and feedback on GitHub</a></p>
+    </footer>
+  </body>
+</html>

@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mana and life sustain · Builder Wynncraft</title>
+    <meta name="description" content="Mana Regen, Mana Steal, spell cycles, Health Regen, Life Steal and the mana balance range." />
+    <link rel="canonical" href="https://szvm3k.github.io/builderwynncraft/guides/mana-and-sustain.html" />
+    <link rel="icon" href="../favicon.ico" sizes="16x16 32x32 48x48" />
+    <link rel="apple-touch-icon" href="../apple-touch-icon.png" />
+    <link rel="stylesheet" href="guides.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="wrap">
+        <a class="brand" href="../"><img src="../favicon.png" width="32" height="32" alt="" /> Builder Wynncraft</a>
+        <nav aria-label="Site"><a href="../">Build Recommender</a><a href="./" aria-current="page">Guides</a><a href="classes.html">Classes</a><a href="../about.html">About</a></nav>
+      </div>
+    </header>
+    <main class="wrap">
+
+      <h1>Mana and life sustain</h1>
+      <p class="lead">A build that can cast its best spell three times and then stands empty isn't a good build. The mana balance tells you whether a spell cycle can keep going, and life recovery whether you can.</p>
+      <div class="toc"><p>On this page</p><ul>
+        <li><a href="#regen">Mana Regen</a></li>
+        <li><a href="#cycle">Spell cycles</a></li>
+        <li><a href="#steal">Mana Steal</a></li>
+        <li><a href="#example">A worked example</a></li>
+        <li><a href="#range">The mana balance range</a></li>
+        <li><a href="#life">Life recovery</a></li>
+      </ul></div>
+
+      <h2 id="regen">Mana Regen</h2>
+      <p>The calculator counts mana regeneration as</p>
+      <code class="formula">mana per second = (Mana Regen + 25) ÷ 5</code>
+      <p>So with no Mana Regen at all you get 5 mana per second, and every +5 Mana Regen on your items adds 1 mana per second. Mana from ability tree nodes and a raid mana buff you entered are added on top.</p>
+
+      <h2 id="cycle">Spell cycles</h2>
+      <p>A spell cycle is written with the digits 1-4 for your spells and M for a main attack, for example <code>3M3M</code> or <code>1 3 M M</code>. Casting a spell takes three clicks; at the default of 9 clicks per second that is a third of a second per spell. A main attack takes as long as your weapon's attack speed allows. The cycle's mana balance is what you regenerate and steal during one pass, minus what its spells cost, per second.</p>
+
+      <h2 id="steal">Mana Steal</h2>
+      <p>Mana Steal only works on main attack hits. The stat is per three seconds of attacking, so each hit gives</p>
+      <code class="formula">mana per hit = Mana Steal ÷ 3 ÷ hits per second</code>
+      <p>A cycle with no M in it gets nothing from Mana Steal, however much the items have. That's also why Mana Steal is worth more on builds that weave main attacks between spells.</p>
+
+      <h2 id="example">A worked example</h2>
+      <p>Cycle <code>3 M M M</code> with a 35-mana spell, a normal-speed weapon (2.05 hits per second), 10 Mana Regen and 15 Mana Steal:</p>
+      <ul>
+        <li>Time for one pass: 3 clicks ÷ 9 + 3 hits ÷ 2.05 = <strong>1.80 s</strong></li>
+        <li>Cost: 35 mana ÷ 1.80 s = <strong>19.5 mana/s</strong></li>
+        <li>Regeneration: (10 + 25) ÷ 5 = <strong>7 mana/s</strong></li>
+        <li>Mana Steal: 1.67 hits/s × 15 ÷ 3 ÷ 2.05 = <strong>4.1 mana/s</strong></li>
+        <li>Balance: 7 + 4.1 - 19.5 = <strong>-8.4 mana/s</strong> - this cycle slowly drains you.</li>
+      </ul>
+      <p>To make it sustainable you would need more Mana Regen or Mana Steal, cheaper spells from the tree, mana-giving abilities - or a slower cycle.</p>
+
+      <h2 id="range">The mana balance range</h2>
+      <p>On the recommender the mana balance is a range. The default, 0 to +1 mana per second, means "fully sustainable without wasting stats on surplus". Lower the minimum when a short burst is fine and you rest between fights (the "Burst" preset allows -8 mana/s), or use the "Raid buffs" preset when your team provides mana. <strong>✦ Suggest mana drain</strong> at the bottom of the left panel shows how much damage each extra point of allowed drain buys.</p>
+
+      <h2 id="life">Life recovery</h2>
+      <p>Life works the same way:</p>
+      <code class="formula">HP per second = Health Regen ÷ 4 + Life Steal from main attack hits</code>
+      <p>Health Regen ticks every four seconds; Life Steal, like Mana Steal, only comes from main attack hits in your cycle. What that healing is worth depends on your damage reduction, so the site also shows it as effective health gained per second (HP per second × EHP ÷ HP). Builds such as the Shaman Acolyte, whose spells cost health, need this range more than anyone.</p>
+
+      <p class="cta-row"><a class="cta" href="../">Open the Build Recommender →</a></p>
+      <aside class="more" aria-label="More guides">
+        <div><h2>Game mechanics</h2><ul><li><a href="how-it-works.html">How the recommender picks a build</a></li><li><a href="skill-points.html">Skill points explained</a></li><li><a href="effective-hp.html">Effective HP (EHP)</a></li><li><a href="damage.html">How damage is calculated</a></li><li><a href="speed.html">Walk speed and attack speed</a></li><li><a href="major-ids.html">Major IDs</a></li></ul></div>
+        <div><h2>Classes</h2><ul><li><a href="warrior.html">Warrior</a></li><li><a href="mage.html">Mage</a></li><li><a href="archer.html">Archer</a></li><li><a href="assassin.html">Assassin</a></li><li><a href="shaman.html">Shaman</a></li></ul></div>
+      </aside>
+    </main>
+    <footer class="wrap foot">
+      <p>Builder Wynncraft is a fan-made project, not affiliated with Wynncraft. Numbers follow Wynnbuilder's formulas and item data (game version 2.2.4); results are suggestions, not guarantees. Last updated 28 September 2026.</p>
+      <p><a href="../about.html">About</a> · <a href="../privacy.html">Privacy</a> · <a href="https://github.com/szVM3K/builderwynncraft">Source and feedback on GitHub</a></p>
+    </footer>
+  </body>
+</html>

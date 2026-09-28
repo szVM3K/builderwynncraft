@@ -397,6 +397,17 @@ behaviour). All 30 default builds pass, with no warnings.
 - **Time.** When the *Any* build doesn't fit, the default run takes a median 1.2-1.3× as long (0.6-4.7× on a
   2-core machine running both shards at once).
 
+### Guides and About pages (0.41.1)
+
+- `public/guides/`: static guide pages - how the recommender picks a build, skill points, effective HP, damage, mana
+  and life sustain, walk and attack speed, Major IDs, the classes overview and one page per class (archetypes, usual
+  skills and elements, the guide builds with their authors). Every number on them comes from the calculator
+  (skill point curve, EHP examples, the damage and mana worked examples). Plain HTML with one shared `guides.css`;
+  edit them directly.
+- `public/about.html`: what the site is, where the numbers come from, contact.
+- `index.html` has a short static "About the Build Recommender" section under the app with links to all guides, so
+  the page has readable text without JavaScript (search engines and the AdSense review read it).
+
 ### Non-invasive ads, privacy page (0.41.0)
 
 - Optional Google AdSense (see "Ads" above): at most two blocks, at the bottom of the page and under the item cards
@@ -1024,6 +1035,7 @@ tomes need level 60, so one threshold covers both tabs.
 - `src/api-config.json`: the address of the site's server (empty = its features off).
 - `src/ads-config.json`: the AdSense publisher ID and ad unit numbers (empty = no ads); `vite.config.js` adds the
   AdSense tags to the page head. `public/privacy.html`: the privacy page.
+- `public/guides/` (guide pages + `guides.css`) and `public/about.html`: static pages, copied as they are by Vite.
 - `worker/`: the site's server (Cloudflare Worker + D1): `src/index.js`, `schema.sql`, `wrangler.toml`,
   `scripts/api-test.mjs` (API test against `wrangler dev --local`).
 - `scripts/compare-defaults.mjs`: the new default ranges vs Any on the matrix scenarios.

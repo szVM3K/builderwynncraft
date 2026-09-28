@@ -7,9 +7,43 @@
     <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48" />
     <link rel="icon" type="image/png" href="/favicon.png" sizes="64x64" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="description" content="Free Wynncraft build recommender: pick your class, level and ability tree and get a full nine-slot build that fits your skill points and effective HP. Plus an optimizer, a build creator and guides." />
+    <style>
+      .wbr-static { max-width: 960px; margin: 0 auto; padding: 28px 16px 56px; color: #c9c6dc; font: 16px/1.65 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+      .wbr-static h2 { margin: 0 0 10px; font-size: 1.35rem; color: #ffaa00; }
+      .wbr-static h3 { margin: 22px 0 8px; font-size: 1.05rem; color: #ffcf66; }
+      .wbr-static p { margin: 0 0 12px; }
+      .wbr-static a { color: #ffaa00; }
+      .wbr-static ul { margin: 0 0 12px; padding-left: 20px; columns: 2 240px; column-gap: 28px; }
+      .wbr-static li { margin-bottom: 4px; break-inside: avoid; }
+      .wbr-static .wbr-static-links { border-top: 1px solid #3a3644; padding-top: 12px; font-size: 0.92rem; color: #a9aac9; }
+    </style>
   </head>
   <body>
     <div id="root"></div>
+    <section class="wbr-static" aria-labelledby="wbr-static-title">
+      <h2 id="wbr-static-title">About the Build Recommender</h2>
+      <p>Builder Wynncraft picks a complete Wynncraft build for you: helmet, chestplate, leggings, boots, two rings, a bracelet, a necklace and a weapon for your class. Choose your class, rank and level, an ability tree (an archetype, a guide tree or your own), what to maximise - a spell, the main attack or a whole spell cycle - and the effective HP you need. The recommender searches all 5,414 items for the strongest build that you can actually wear with your skill points and that meets your survivability, mana and walk speed limits.</p>
+      <p>Every number follows Wynnbuilder's formulas and item data for game version 2.2.4 and is checked against Wynnbuilder: spell and main attack damage with crits averaged in, effective HP from Defence, Agility and your tree, mana and life balance of your spell cycle, and the Major IDs the model can simulate. The Build Optimizer keeps the items you already chose and fills the rest; the Build Creator is a manual editor with the same live numbers and Wynnbuilder import and export.</p>
+      <h3>Guides</h3>
+      <ul>
+        <li><a href="guides/how-it-works.html">How the recommender picks a build</a></li>
+        <li><a href="guides/skill-points.html">Skill points explained</a></li>
+        <li><a href="guides/effective-hp.html">Effective HP (EHP)</a></li>
+        <li><a href="guides/damage.html">How damage is calculated</a></li>
+        <li><a href="guides/mana-and-sustain.html">Mana and life sustain</a></li>
+        <li><a href="guides/speed.html">Walk speed and attack speed</a></li>
+        <li><a href="guides/major-ids.html">Major IDs</a></li>
+        <li><a href="guides/classes.html">Classes and archetypes</a></li>
+        <li><a href="guides/warrior.html">Warrior builds</a></li>
+        <li><a href="guides/mage.html">Mage builds</a></li>
+        <li><a href="guides/archer.html">Archer builds</a></li>
+        <li><a href="guides/assassin.html">Assassin builds</a></li>
+        <li><a href="guides/shaman.html">Shaman builds</a></li>
+      </ul>
+      <p class="wbr-static-links"><a href="guides/">All guides</a> · <a href="about.html">About</a> · <a href="privacy.html">Privacy</a> · <a href="https://github.com/szVM3K/builderwynncraft">GitHub</a> · A fan-made project, not affiliated with Wynncraft.</p>
+    </section>
+    <noscript><p class="wbr-static">The Build Recommender runs in your browser and needs JavaScript. The guides above work without it.</p></noscript>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

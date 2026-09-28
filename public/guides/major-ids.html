@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Major IDs · Builder Wynncraft</title>
+    <meta name="description" content="Unique item effects: which ones change numbers, which ones don&#x27;t, and how the calculator treats them." />
+    <link rel="canonical" href="https://szvm3k.github.io/builderwynncraft/guides/major-ids.html" />
+    <link rel="icon" href="../favicon.ico" sizes="16x16 32x32 48x48" />
+    <link rel="apple-touch-icon" href="../apple-touch-icon.png" />
+    <link rel="stylesheet" href="guides.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="wrap">
+        <a class="brand" href="../"><img src="../favicon.png" width="32" height="32" alt="" /> Builder Wynncraft</a>
+        <nav aria-label="Site"><a href="../">Build Recommender</a><a href="./" aria-current="page">Guides</a><a href="classes.html">Classes</a><a href="../about.html">About</a></nav>
+      </div>
+    </header>
+    <main class="wrap">
+
+      <h1>Major IDs</h1>
+      <p class="lead">Some items carry a Major ID - a named effect that changes how an ability works instead of adding a plain stat. They are among the strongest things in the game, and among the hardest to put into numbers.</p>
+      <div class="toc"><p>On this page</p><ul>
+        <li><a href="#what">What a Major ID is</a></li>
+        <li><a href="#kinds">Four kinds of effects</a></li>
+        <li><a href="#rules">Rules worth knowing</a></li>
+        <li><a href="#site">How the site shows and counts them</a></li>
+      </ul></div>
+
+      <h2 id="what">What a Major ID is</h2>
+      <p>A Major ID is a fixed effect printed on an item (mostly Fabled and Mythic items, plus a few Legendary and Rare ones) or granted by a full item set. The data the site uses has 172 of them: 165 found on items and 7 that come from set bonuses. Each has a name as the game shows it and a description.</p>
+
+      <h2 id="kinds">Four kinds of effects</h2>
+      <h3>1. Spell changes</h3>
+      <p>Many Major IDs rework one ability: its area, its damage per element, the number of hits, sometimes a drawback. <em>Fallout</em> makes an Archer's bomb arrow bigger and adds fire damage, at the cost of extra recoil and some self-damage; <em>Hawkeye</em> turns Arrow Hurricane into a condensed stream of arrows with different multipliers. These change the damage formula directly and are counted.</p>
+      <h3>2. Flat bonuses</h3>
+      <p>Some simply add or change stats under a condition that is almost always met. These are counted like item stats.</p>
+      <h3>3. Effects that grow during a fight</h3>
+      <p><em>Manic Edge</em> (Assassin) drains mana while you are vanished and raises Surprise Strike's damage by 3% per mana lost, up to +70%. Effects like this depend on how you play, so the site represents them with a slider - "Mana Lost" here - that you set in the ability tree effects. A setting in the recommender decides whether the search assumes the slider at zero, half or maximum.</p>
+      <h3>4. Effects the model can't simulate</h3>
+      <p>Poison spreading between mobs (<em>Plague</em>) or pulling dropped items towards you (<em>Magnet</em>) have real value but no place in a damage or EHP number. Effects like these show their description and are marked "Not counted" on the item.</p>
+
+      <h2 id="rules">Rules worth knowing</h2>
+      <ul>
+        <li><strong>One of each.</strong> The same Major ID from two items counts once.</li>
+        <li><strong>Class-bound effects.</strong> Most Major IDs change one class's ability. A Major ID that reworks an Assassin spell does nothing on a Mage - the item can still be good for its stats, but not for its effect.</li>
+        <li><strong>The tree has to have the ability.</strong> A Major ID that upgrades an ability you haven't taken changes nothing until you take it.</li>
+      </ul>
+
+      <h2 id="site">How the site shows and counts them</h2>
+      <p>Items with a Major ID get a ★ badge on their card, in the item browser and in set bonuses, with the name and the description as the game writes them. Of the 172, 107 change numbers the calculator can model; for those, the damage and survivability panels include the effect, and the numbers are checked against Wynnbuilder's own implementation. The recommender and optimizer consider Major ID items in every search, so an item like that is picked when its effect wins - not only when its stats do.</p>
+      <p>Toggle-style effects - on only in certain situations, like <em>Saviour's Sacrifice</em>, which buffs nearby allies while you are under half health - are off until you turn them on in Ability tree effects; sliders follow your setting. If you rely on an effect that is marked "Not counted", judge the item yourself - the model will undervalue it.</p>
+
+      <p class="cta-row"><a class="cta" href="../">Open the Build Recommender →</a></p>
+      <aside class="more" aria-label="More guides">
+        <div><h2>Game mechanics</h2><ul><li><a href="how-it-works.html">How the recommender picks a build</a></li><li><a href="skill-points.html">Skill points explained</a></li><li><a href="effective-hp.html">Effective HP (EHP)</a></li><li><a href="damage.html">How damage is calculated</a></li><li><a href="mana-and-sustain.html">Mana and life sustain</a></li><li><a href="speed.html">Walk speed and attack speed</a></li></ul></div>
+        <div><h2>Classes</h2><ul><li><a href="warrior.html">Warrior</a></li><li><a href="mage.html">Mage</a></li><li><a href="archer.html">Archer</a></li><li><a href="assassin.html">Assassin</a></li><li><a href="shaman.html">Shaman</a></li></ul></div>
+      </aside>
+    </main>
+    <footer class="wrap foot">
+      <p>Builder Wynncraft is a fan-made project, not affiliated with Wynncraft. Numbers follow Wynnbuilder's formulas and item data (game version 2.2.4); results are suggestions, not guarantees. Last updated 28 September 2026.</p>
+      <p><a href="../about.html">About</a> · <a href="../privacy.html">Privacy</a> · <a href="https://github.com/szVM3K/builderwynncraft">Source and feedback on GitHub</a></p>
+    </footer>
+  </body>
+</html>

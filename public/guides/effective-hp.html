@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Effective HP (EHP) · Builder Wynncraft</title>
+    <meta name="description" content="How health, Defence, Agility, class and tree resistances turn into one survivability number." />
+    <link rel="canonical" href="https://szvm3k.github.io/builderwynncraft/guides/effective-hp.html" />
+    <link rel="icon" href="../favicon.ico" sizes="16x16 32x32 48x48" />
+    <link rel="apple-touch-icon" href="../apple-touch-icon.png" />
+    <link rel="stylesheet" href="guides.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="wrap">
+        <a class="brand" href="../"><img src="../favicon.png" width="32" height="32" alt="" /> Builder Wynncraft</a>
+        <nav aria-label="Site"><a href="../">Build Recommender</a><a href="./" aria-current="page">Guides</a><a href="classes.html">Classes</a><a href="../about.html">About</a></nav>
+      </div>
+    </header>
+    <main class="wrap">
+
+      <h1>Effective HP (EHP)</h1>
+      <p class="lead">Two builds with the same health bar can die at very different speeds. Effective HP folds health and every damage reduction into one number: how much incoming damage the build can absorb before it dies.</p>
+      <div class="toc"><p>On this page</p><ul>
+        <li><a href="#formula">The formula</a></li>
+        <li><a href="#health">Health</a></li>
+        <li><a href="#defagi">Defence and Agility</a></li>
+        <li><a href="#class">Class and ability tree</a></li>
+        <li><a href="#examples">Worked examples</a></li>
+        <li><a href="#elemental">What about elemental defences?</a></li>
+        <li><a href="#target">Picking an EHP target</a></li>
+      </ul></div>
+
+      <h2 id="formula">The formula</h2>
+      <p>The site uses Wynnbuilder's EHP:</p>
+      <code class="formula">EHP = HP ÷ ( 0.1 × agi + (1 - agi) × (1 - def) ) ÷ class factor ÷ tree reductions</code>
+      <p>Here <code>def</code> and <code>agi</code> are the reductions from your Defence and Agility skill points (see below). The bracket is the share of an average hit that actually reaches you; dividing by it turns your health into the raw damage you can take.</p>
+
+      <h2 id="health">Health</h2>
+      <p>Base health is 5 × level + 5 - only 535 at level 106. Nearly all of your health comes from items: the Health stat on armour and accessories, set bonuses and a few ability tree nodes. Negative Health on an item lowers it the same way.</p>
+
+      <h2 id="defagi">Defence and Agility</h2>
+      <p>Skill points follow the curve from the <a href="skill-points.html">skill points guide</a>. Defence uses 86.7% of that bonus as a damage reduction; Agility uses 95.1% of it as the share of each hit it covers, and that share only deals 10% of its damage. In other words, Agility behaves like a chance to avoid most of a hit, averaged out over many hits.</p>
+      <div class="table-wrap"><table>
+        <tr><th>Points</th><th class="num">50</th><th class="num">100</th><th class="num">150</th></tr>
+        <tr><td>Defence: damage reduction</td><td class="num">34.6%</td><td class="num">56.3%</td><td class="num">70.0%</td></tr>
+        <tr><td>Agility: share of a hit covered</td><td class="num">37.9%</td><td class="num">61.8%</td><td class="num">76.8%</td></tr>
+      </table></div>
+      <p>The two don't add up; they overlap. Defence reduces what Agility didn't cover, so the first 50 points in either give much more than the next 50 in the same skill.</p>
+
+      <h2 id="class">Class and ability tree</h2>
+      <p>The model divides EHP by a class factor tied to the weapon type: 1.0 for Warrior and Assassin, 1.2 for Mage, 1.3 for Archer and 1.4 for Shaman. A Shaman with the same items as a Warrior therefore shows about 29% less EHP. Ability tree nodes that reduce damage taken (for example defensive stances and auras) multiply on top.</p>
+
+      <h2 id="examples">Worked examples</h2>
+      <p>All with 10,000 HP on a Warrior (class factor 1.0):</p>
+      <div class="table-wrap"><table>
+        <tr><th>Skill points</th><th class="num">EHP</th></tr>
+        <tr><td>0 Defence, 0 Agility</td><td class="num">10,000</td></tr>
+        <tr><td>50 Defence</td><td class="num">15,280</td></tr>
+        <tr><td>50 Agility</td><td class="num">15,177</td></tr>
+        <tr><td>50 Defence and 50 Agility</td><td class="num">22,506</td></tr>
+        <tr><td>100 Defence</td><td class="num">22,894</td></tr>
+        <tr><td>100 Agility</td><td class="num">22,522</td></tr>
+      </table></div>
+      <p>50 points in each is worth almost exactly as much as 100 in one - and costs the same 100 points. Which one you pick usually depends on what else the skill gives: Defence also boosts fire damage, Agility air damage. The same 50 Defence on a Shaman gives 10,914 EHP, because of the class factor.</p>
+
+      <h2 id="elemental">What about elemental defences?</h2>
+      <p>Items also carry elemental defences (Earth Defence, Fire Defence and so on). They reduce damage of that element from enemies and are shown in the Survivability panel, but they are not part of the EHP number: how much they help depends on what is hitting you. A build with large negative defences in one element can die much faster to that element than its EHP suggests; the "avoid negative defences" option keeps such items out.</p>
+
+      <h2 id="target">Picking an EHP target</h2>
+      <p>On the recommender the EHP range is set in 2% steps of the most your level can reach. Some rules of thumb:</p>
+      <ul>
+        <li>Levelling and questing: a minimum in the lower part of the slider keeps you alive while damage stays high.</li>
+        <li>Harder content, dungeons and raids: raise it until you stop dying, then generate again - damage usually falls slowly at first and faster near the top.</li>
+        <li>Use the <strong>list of builds</strong> to see the strongest build at every EHP step side by side and pick the trade-off you like.</li>
+      </ul>
+
+      <p class="cta-row"><a class="cta" href="../">Open the Build Recommender →</a></p>
+      <aside class="more" aria-label="More guides">
+        <div><h2>Game mechanics</h2><ul><li><a href="how-it-works.html">How the recommender picks a build</a></li><li><a href="skill-points.html">Skill points explained</a></li><li><a href="damage.html">How damage is calculated</a></li><li><a href="mana-and-sustain.html">Mana and life sustain</a></li><li><a href="speed.html">Walk speed and attack speed</a></li><li><a href="major-ids.html">Major IDs</a></li></ul></div>
+        <div><h2>Classes</h2><ul><li><a href="warrior.html">Warrior</a></li><li><a href="mage.html">Mage</a></li><li><a href="archer.html">Archer</a></li><li><a href="assassin.html">Assassin</a></li><li><a href="shaman.html">Shaman</a></li></ul></div>
+      </aside>
+    </main>
+    <footer class="wrap foot">
+      <p>Builder Wynncraft is a fan-made project, not affiliated with Wynncraft. Numbers follow Wynnbuilder's formulas and item data (game version 2.2.4); results are suggestions, not guarantees. Last updated 28 September 2026.</p>
+      <p><a href="../about.html">About</a> · <a href="../privacy.html">Privacy</a> · <a href="https://github.com/szVM3K/builderwynncraft">Source and feedback on GitHub</a></p>
+    </footer>
+  </body>
+</html>

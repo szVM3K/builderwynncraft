@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Skill points explained · Builder Wynncraft</title>
+    <meta name="description" content="The five skills, the 200-point budget, the diminishing curve, item requirements and equip order." />
+    <link rel="canonical" href="https://szvm3k.github.io/builderwynncraft/guides/skill-points.html" />
+    <link rel="icon" href="../favicon.ico" sizes="16x16 32x32 48x48" />
+    <link rel="apple-touch-icon" href="../apple-touch-icon.png" />
+    <link rel="stylesheet" href="guides.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="wrap">
+        <a class="brand" href="../"><img src="../favicon.png" width="32" height="32" alt="" /> Builder Wynncraft</a>
+        <nav aria-label="Site"><a href="../">Build Recommender</a><a href="./" aria-current="page">Guides</a><a href="classes.html">Classes</a><a href="../about.html">About</a></nav>
+      </div>
+    </header>
+    <main class="wrap">
+
+      <h1>Skill points explained</h1>
+      <p class="lead">Skill points decide which items you can wear and how hard your elements hit. Most "this build doesn't work" problems are skill point problems, so it is worth knowing exactly how they add up.</p>
+      <div class="toc"><p>On this page</p><ul>
+        <li><a href="#five">The five skills</a></li>
+        <li><a href="#budget">How many points you have</a></li>
+        <li><a href="#curve">What a point is worth: the curve</a></li>
+        <li><a href="#requirements">Requirements and item bonuses</a></li>
+        <li><a href="#order">Equip order</a></li>
+        <li><a href="#site">How the site handles them</a></li>
+      </ul></div>
+
+      <h2 id="five">The five skills</h2>
+      <p>Each skill belongs to one element. In the damage model a skill raises its element's damage; three of them also do something more:</p>
+      <div class="table-wrap"><table>
+        <tr><th>Skill</th><th>Element</th><th>Also</th></tr>
+        <tr><td>Strength</td><td>Earth</td><td>multiplies <em>all</em> of your damage, not only earth</td></tr>
+        <tr><td>Dexterity</td><td>Thunder</td><td>gives the chance of a critical hit</td></tr>
+        <tr><td>Intelligence</td><td>Water</td><td>-</td></tr>
+        <tr><td>Defence</td><td>Fire</td><td>reduces the damage you take</td></tr>
+        <tr><td>Agility</td><td>Air</td><td>lets part of each hit mostly miss you (counted as an average)</td></tr>
+      </table></div>
+      <p>That is why so many builds put points into Strength and Dexterity even when their main element is something else: both of them improve every hit.</p>
+
+      <h2 id="budget">How many points you have</h2>
+      <p>You get 2 skill points per level from level 2 onwards, which caps at 200 points at level 101. After that, levels no longer add skill points.</p>
+      <div class="table-wrap"><table>
+        <tr><th class="num">Level</th><th class="num">10</th><th class="num">30</th><th class="num">50</th><th class="num">80</th><th class="num">100</th><th class="num">101+</th></tr>
+        <tr><th>Skill points</th><td class="num">18</td><td class="num">58</td><td class="num">98</td><td class="num">158</td><td class="num">198</td><td class="num">200</td></tr>
+      </table></div>
+      <p>You can put at most 100 of your own points into one skill. Bonuses from items (for example "+7 Strength") come on top of that and can take a skill above 100.</p>
+
+      <h2 id="curve">What a point is worth: the curve</h2>
+      <p>Skill points have diminishing returns. The bonus from <em>n</em> points is</p>
+      <code class="formula">bonus(n) = r / (1 - r) × (1 - r^n) %,   r = 0.9908,   n counted up to 150</code>
+      <p>The first point is worth almost 1%, the hundredth only about 0.4%, and past 150 points nothing more is added:</p>
+      <div class="table-wrap"><table>
+        <tr><th class="num">Points</th><th class="num">10</th><th class="num">20</th><th class="num">50</th><th class="num">80</th><th class="num">100</th><th class="num">120</th><th class="num">150</th></tr>
+        <tr><th>Bonus</th><td class="num">9.5%</td><td class="num">18.2%</td><td class="num">39.9%</td><td class="num">56.3%</td><td class="num">65.0%</td><td class="num">72.2%</td><td class="num">80.8%</td></tr>
+      </table></div>
+      <p>Strength, Dexterity and Intelligence use this bonus as it is. Defence uses 86.7% of it and Agility 95.1% of it, so 100 Defence reduces damage by about 56% and 100 Agility covers about 62% of a hit. The practical lesson: going from 0 to 50 points in a skill buys far more than going from 100 to 150, so spreading points over two or three skills is often stronger than maxing one.</p>
+
+      <h2 id="requirements">Requirements and item bonuses</h2>
+      <p>Most items above the early levels have skill requirements, for example "Strength Min: 45". Your assigned points plus the bonuses of the other items you wear have to meet it. Bonuses therefore do two jobs: they add damage (a +10 Dexterity ring is +10 Dexterity for the curve above) and they pay part of the requirements of other items, which frees your own points for something else.</p>
+      <p>Negative bonuses work the other way: an item with "-15 Agility" raises what you have to assign to keep your Agility items working. A build can look fine on paper and still be impossible because of two or three negative bonuses stacked together.</p>
+
+      <h2 id="order">Equip order</h2>
+      <p>In the game you put items on one at a time, and the requirement of each item is checked with what you have at that moment. An item that gives the Strength another item needs has to go on first. Wynnbuilder - and this site - search for an order in which all nine items can be equipped and none of them stops meeting its requirement once the rest are on. If no such order exists, the build doesn't fit, however many free points it seems to leave.</p>
+
+      <h2 id="site">How the site handles them</h2>
+      <ul>
+        <li>Every generated build is validated in the game's equip order. A build that doesn't fit your level's points is never presented as valid.</li>
+        <li>Points the items don't need are spent where they raise your goal the most, and shown as <strong>+X</strong> next to the skill. You can turn that off if you prefer to spend them yourself.</li>
+        <li>In the Build Creator you assign points by hand; going over your budget, or over 100 in one skill, shows a warning instead of blocking you.</li>
+        <li>Guild tomes that give skill points are counted as bonuses, like item bonuses.</li>
+      </ul>
+
+      <p class="cta-row"><a class="cta" href="../">Open the Build Recommender →</a></p>
+      <aside class="more" aria-label="More guides">
+        <div><h2>Game mechanics</h2><ul><li><a href="how-it-works.html">How the recommender picks a build</a></li><li><a href="effective-hp.html">Effective HP (EHP)</a></li><li><a href="damage.html">How damage is calculated</a></li><li><a href="mana-and-sustain.html">Mana and life sustain</a></li><li><a href="speed.html">Walk speed and attack speed</a></li><li><a href="major-ids.html">Major IDs</a></li></ul></div>
+        <div><h2>Classes</h2><ul><li><a href="warrior.html">Warrior</a></li><li><a href="mage.html">Mage</a></li><li><a href="archer.html">Archer</a></li><li><a href="assassin.html">Assassin</a></li><li><a href="shaman.html">Shaman</a></li></ul></div>
+      </aside>
+    </main>
+    <footer class="wrap foot">
+      <p>Builder Wynncraft is a fan-made project, not affiliated with Wynncraft. Numbers follow Wynnbuilder's formulas and item data (game version 2.2.4); results are suggestions, not guarantees. Last updated 28 September 2026.</p>
+      <p><a href="../about.html">About</a> · <a href="../privacy.html">Privacy</a> · <a href="https://github.com/szVM3K/builderwynncraft">Source and feedback on GitHub</a></p>
+    </footer>
+  </body>
+</html>

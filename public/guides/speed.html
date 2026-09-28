@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Walk speed and attack speed · Builder Wynncraft</title>
+    <meta name="description" content="Attack speed tiers, why they don&#x27;t touch spells, and how walk speed is weighed against damage." />
+    <link rel="canonical" href="https://szvm3k.github.io/builderwynncraft/guides/speed.html" />
+    <link rel="icon" href="../favicon.ico" sizes="16x16 32x32 48x48" />
+    <link rel="apple-touch-icon" href="../apple-touch-icon.png" />
+    <link rel="stylesheet" href="guides.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="wrap">
+        <a class="brand" href="../"><img src="../favicon.png" width="32" height="32" alt="" /> Builder Wynncraft</a>
+        <nav aria-label="Site"><a href="../">Build Recommender</a><a href="./" aria-current="page">Guides</a><a href="classes.html">Classes</a><a href="../about.html">About</a></nav>
+      </div>
+    </header>
+    <main class="wrap">
+
+      <h1>Walk speed and attack speed</h1>
+      <p class="lead">Two different speeds, two different effects: attack speed decides how often your main attack hits, walk speed how fast you cross the map and dodge. Neither shows up in a damage number directly, which is why both are easy to get wrong.</p>
+      <div class="toc"><p>On this page</p><ul>
+        <li><a href="#tiers">Attack speed tiers</a></li>
+        <li><a href="#spells">Why spells ignore attack speed bonuses</a></li>
+        <li><a href="#checked">Filtering by attack speed</a></li>
+        <li><a href="#walk">Walk speed</a></li>
+        <li><a href="#worth">How much walk speed is worth</a></li>
+      </ul></div>
+
+      <h2 id="tiers">Attack speed tiers</h2>
+      <p>Every weapon has one of seven attack speeds. Items with an "Attack Speed" bonus move the main attack up (or down) by whole tiers:</p>
+      <div class="table-wrap"><table>
+        <tr><th>Tier</th><th class="num">Hits per second</th></tr>
+        <tr><td>Super Slow</td><td class="num">0.51</td></tr>
+        <tr><td>Very Slow</td><td class="num">0.83</td></tr>
+        <tr><td>Slow</td><td class="num">1.5</td></tr>
+        <tr><td>Normal</td><td class="num">2.05</td></tr>
+        <tr><td>Fast</td><td class="num">2.5</td></tr>
+        <tr><td>Very Fast</td><td class="num">3.1</td></tr>
+        <tr><td>Super Fast</td><td class="num">4.3</td></tr>
+      </table></div>
+      <p>Main attack damage per second is damage per hit × these hits per second, so +1 tier on a Normal weapon is worth about 22% more main attack DPS. Builds that live on the main attack - and Shaman puppets, which scale with it - value tiers highly.</p>
+
+      <h2 id="spells">Why spells ignore attack speed bonuses</h2>
+      <p>Spells use the same numbers as a damage multiplier, but only from the weapon's <em>base</em> attack speed: a Super Slow weapon's spells hit with a 0.51 multiplier on a much larger base damage, a Super Fast weapon's with 4.3 on a small one. Attack Speed bonus tiers from items change the main attack only, never spell damage. A spell build gains nothing from them.</p>
+
+      <h2 id="checked">Filtering by attack speed</h2>
+      <p>Under Weapon attack speed you can check the speeds you like to play with; the recommender then only picks weapons with those base speeds. Because some items add or remove tiers, the weapon's base speed and the build's final speed can differ. Check <strong>Only builds with the checked speeds</strong> to require the <em>final</em> speed, after every item's tiers, to be one of the checked ones.</p>
+
+      <h2 id="walk">Walk speed</h2>
+      <p>Walk Speed on items is a percentage, and the build's total is simply the sum of all items (and a few tree nodes). Many strong items carry negative walk speed, so a build that maximises damage alone can easily end up 20-30% slower than normal. Nobody enjoys crossing a raid arena at a crawl, and slower movement also means more hits taken.</p>
+      <p>The recommender has a walk speed range for that. The default is at least 0% - never slower than a character with no items. The presets: Any, Slow ok (at least -20%), Default (at least 0%), Mobile (at least +20%) and Fast (at least +40%).</p>
+
+      <h2 id="worth">How much walk speed is worth</h2>
+      <p>A range is pass or fail, but speed also has a value. The setting "walk speed is worth" turns it into damage terms: by default every +10% walk speed counts like +1% damage, up to +50% walk speed (and -10% costs 1%). With that, a build with 4% less damage but 68% more walk speed can win over the slightly stronger slow one. The damage you see is always the real number; only the comparison between builds uses the speed-adjusted value. Set it to 0 if you want pure damage.</p>
+
+      <p class="cta-row"><a class="cta" href="../">Open the Build Recommender →</a></p>
+      <aside class="more" aria-label="More guides">
+        <div><h2>Game mechanics</h2><ul><li><a href="how-it-works.html">How the recommender picks a build</a></li><li><a href="skill-points.html">Skill points explained</a></li><li><a href="effective-hp.html">Effective HP (EHP)</a></li><li><a href="damage.html">How damage is calculated</a></li><li><a href="mana-and-sustain.html">Mana and life sustain</a></li><li><a href="major-ids.html">Major IDs</a></li></ul></div>
+        <div><h2>Classes</h2><ul><li><a href="warrior.html">Warrior</a></li><li><a href="mage.html">Mage</a></li><li><a href="archer.html">Archer</a></li><li><a href="assassin.html">Assassin</a></li><li><a href="shaman.html">Shaman</a></li></ul></div>
+      </aside>
+    </main>
+    <footer class="wrap foot">
+      <p>Builder Wynncraft is a fan-made project, not affiliated with Wynncraft. Numbers follow Wynnbuilder's formulas and item data (game version 2.2.4); results are suggestions, not guarantees. Last updated 28 September 2026.</p>
+      <p><a href="../about.html">About</a> · <a href="../privacy.html">Privacy</a> · <a href="https://github.com/szVM3K/builderwynncraft">Source and feedback on GitHub</a></p>
+    </footer>
+  </body>
+</html>

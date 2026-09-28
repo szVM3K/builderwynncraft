@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>How the recommender picks a build · Builder Wynncraft</title>
+    <meta name="description" content="What you tell it, how items are filtered and scored, and how the search settles on one build." />
+    <link rel="canonical" href="https://szvm3k.github.io/builderwynncraft/guides/how-it-works.html" />
+    <link rel="icon" href="../favicon.ico" sizes="16x16 32x32 48x48" />
+    <link rel="apple-touch-icon" href="../apple-touch-icon.png" />
+    <link rel="stylesheet" href="guides.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="wrap">
+        <a class="brand" href="../"><img src="../favicon.png" width="32" height="32" alt="" /> Builder Wynncraft</a>
+        <nav aria-label="Site"><a href="../">Build Recommender</a><a href="./" aria-current="page">Guides</a><a href="classes.html">Classes</a><a href="../about.html">About</a></nav>
+      </div>
+    </header>
+    <main class="wrap">
+
+      <h1>How the Build Recommender picks a build</h1>
+      <p class="lead">You answer a handful of questions; the recommender goes through every item in the game and returns one complete nine-slot build. This page explains what happens in between, so you know what the result means and when to trust it.</p>
+      <div class="toc"><p>On this page</p><ul>
+        <li><a href="#inputs">What you tell it</a></li>
+        <li><a href="#candidates">Step 1: the candidate items</a></li>
+        <li><a href="#score">Step 2: scoring items for your goal</a></li>
+        <li><a href="#search">Step 3: the search</a></li>
+        <li><a href="#polish">Step 4: exact checks</a></li>
+        <li><a href="#filters">Filters are not weights</a></li>
+        <li><a href="#limits">What the model leaves out</a></li>
+        <li><a href="#tips">Getting the most out of it</a></li>
+      </ul></div>
+
+      <h2 id="inputs">What you tell it</h2>
+      <p>A build in Wynncraft is nine items: helmet, chestplate, leggings, boots, two rings, a bracelet, a necklace and a weapon of your class. Which nine are "best" depends on who is asking, so the recommender starts from your answers:</p>
+      <ul>
+        <li><strong>Class, rank and level.</strong> The level decides which items you can wear, how many skill points you have (2 per level from level 2, up to 200 at level 101) and how many ability points the tree gets. A rank lends a few ability points earlier.</li>
+        <li><strong>Ability tree.</strong> Pick an archetype and the site suggests a tree for your ability points, or pick one of the named guide trees, or click your own. Spells, their damage multipliers and their mana costs all come from the tree, so the tree changes which items are good.</li>
+        <li><strong>What to maximise.</strong> One spell, the main attack, several spells at once, or a whole spell cycle measured in damage per second.</li>
+        <li><strong>Effective HP.</strong> A minimum (and optionally a maximum) survivability. See <a href="effective-hp.html">Effective HP</a>.</li>
+        <li><strong>Mana and life.</strong> Your spell cycle and the mana balance you accept, plus an optional life recovery range. See <a href="mana-and-sustain.html">Mana and life sustain</a>.</li>
+        <li><strong>Extras.</strong> Rarity and event filters, tradeable items only, walk speed range and how much walk speed is worth, weapon attack speeds, realistic or maximum rolls.</li>
+      </ul>
+
+      <h2 id="candidates">Step 1: the candidate items</h2>
+      <p>The item database has 5,414 items. Everything above your level is removed, weapons are limited to your class (spears for Warrior, wands for Mage, bows for Archer, daggers for Assassin, reliks for Shaman), and your filters take out the rest: rarities you unchecked, limited-time festival items, untradeable items, items you excluded. Items you pinned are fixed in their slot before anything else happens.</p>
+      <p>Identifications are counted at their maximum roll by default, the same as Wynnbuilder. Turn on realistic rolls if you want every rolled stat at 50% instead - useful when you buy items from the Trade Market and can't pick perfect copies.</p>
+
+      <h2 id="score">Step 2: scoring items for your goal</h2>
+      <p>Trying every combination of nine slots is impossible: with a few hundred candidates per slot, a full build has somewhere between 10<sup>14</sup> and 10<sup>21</sup> combinations - years of computing even at millions per second. So each candidate first gets a quick score from stat weights. The weights are not fixed: they are derived from your goal on your actual tree. If your goal is a thunder spell, Thunder Damage %, Spell Damage and Dexterity weigh a lot and Main Attack Damage weighs nothing; switch the goal to the main attack and the picture flips.</p>
+      <p>Weapons are handled first, because the weapon decides the element split of all your damage. The recommender keeps the strongest weapons for the goal and, separately, the weapons with the most potential once powders are added - each with every powder element, since a neutral weapon can become a fire or an air weapon.</p>
+
+      <h2 id="search">Step 3: the search</h2>
+      <p>For each promising weapon, a <em>beam search</em> fills the remaining slots one at a time - chestplate, leggings, helmet, boots, necklace, bracelet and finally the two rings - keeping only a couple of dozen of the strongest partial builds after every slot. The search runs at your minimum effective HP and again at 20% more EHP, because a slightly tankier start often leaves room for stronger damage items later. From level 100 the builds of The Ultimate Build Guide are added as extra starting points.</p>
+      <p>The search runs in a background worker, so the page stays responsive, a progress bar shows how far it is, and you can stop it at any time. (The Build Optimizer's full search, which checks every combination for a few empty slots, uses one worker per processor core, up to eight.)</p>
+
+      <h2 id="polish">Step 4: exact checks</h2>
+      <p>The best sets from the search are then checked properly instead of by weights: the full damage formula of your goal, the exact skill point assignment in the game's equip order, the mana and life balance. Every single-item swap and every pair swap is tried; whenever one improves the goal without breaking a filter, it is taken and the checks start again. This repeats until nothing improves.</p>
+      <p>Because every step is deterministic, the same settings always give the same build. A different build only appears when you change something - the level, the goal, a filter, a pinned or excluded item.</p>
+
+      <h2 id="filters">Filters are not weights</h2>
+      <p>Effective HP, mana balance, life recovery and skill points are <strong>pass or fail</strong>. A build either reaches your minimum EHP and fits your skill points or it doesn't count, no matter how much damage it does. This is deliberate: a weight would let a glass cannon win by trading "a little" survivability for damage, which is exactly what the minimum is there to prevent. If nothing passes all filters, the closest build is shown with a warning that tells you which filter it misses.</p>
+      <p>Walk speed is the one exception: besides its range, you can say how much it is worth. By default +10% walk speed counts like +1% damage, up to +50% walk speed, so between two nearly equal builds the faster one wins. See <a href="speed.html">Walk speed and attack speed</a>.</p>
+
+      <h2 id="limits">What the model leaves out</h2>
+      <p>The numbers follow Wynnbuilder's formulas, and they are checked against Wynnbuilder build by build. Still, a formula is not a fight. Not counted: poison (unless you turn it on), powder specials, how long a spell takes to deal its damage (use the whole-cycle goal for that), crafted items, enemies' elemental resistances, boss mechanics, positioning and your team's buffs. Treat the result as a strong starting point and check it in game before spending emeralds on it.</p>
+
+      <h2 id="tips">Getting the most out of it</h2>
+      <ul>
+        <li>Generate a few variants - another spell, the whole cycle, more mana drain, more EHP - and compare them in the list of builds.</li>
+        <li><strong>Why this build?</strong> under the result shows what each item adds and which filter a stronger item would break.</li>
+        <li>Pin an item you already own and generate again: the rest of the build is chosen around it.</li>
+        <li>At endgame, compare with the guide builds for your archetype; they are hand-tuned for situations the model can't see.</li>
+      </ul>
+
+      <p class="cta-row"><a class="cta" href="../">Open the Build Recommender →</a></p>
+      <aside class="more" aria-label="More guides">
+        <div><h2>Game mechanics</h2><ul><li><a href="skill-points.html">Skill points explained</a></li><li><a href="effective-hp.html">Effective HP (EHP)</a></li><li><a href="damage.html">How damage is calculated</a></li><li><a href="mana-and-sustain.html">Mana and life sustain</a></li><li><a href="speed.html">Walk speed and attack speed</a></li><li><a href="major-ids.html">Major IDs</a></li></ul></div>
+        <div><h2>Classes</h2><ul><li><a href="warrior.html">Warrior</a></li><li><a href="mage.html">Mage</a></li><li><a href="archer.html">Archer</a></li><li><a href="assassin.html">Assassin</a></li><li><a href="shaman.html">Shaman</a></li></ul></div>
+      </aside>
+    </main>
+    <footer class="wrap foot">
+      <p>Builder Wynncraft is a fan-made project, not affiliated with Wynncraft. Numbers follow Wynnbuilder's formulas and item data (game version 2.2.4); results are suggestions, not guarantees. Last updated 28 September 2026.</p>
+      <p><a href="../about.html">About</a> · <a href="../privacy.html">Privacy</a> · <a href="https://github.com/szVM3K/builderwynncraft">Source and feedback on GitHub</a></p>
+    </footer>
+  </body>
+</html>
