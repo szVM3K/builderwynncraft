@@ -19,7 +19,8 @@ describe("major IDs", () => {
   it("every major ID on an item or a set has a name and a description", () => {
     const used = new Set();
     E.ITEM_DB.forEach((item) => (item.majorIds || []).forEach((key) => used.add(key)));
-    expect(used.size).toBe(165);
+    // 0.42: game data 2.2.5.0 (2.2.4.0: 165 major IDs on items, 107 counted)
+    expect(used.size).toBe(175);
     used.forEach((key) => {
       expect(E.MAJOR_IDS[key]).toBeTruthy();
       expect(E.majorIdDescription(key).length).toBeGreaterThan(10);
@@ -27,7 +28,7 @@ describe("major IDs", () => {
     expect(E.majorIdName("HERO")).toBe("Saviour's Sacrifice");
     expect(E.majorIdDescription("FALLOUT")).toMatch(/Fire \+50%/); // [fire] marker -> element name
     const counted = Object.keys(E.MAJOR_IDS).filter((key) => E.majorIdStatus(key).counted);
-    expect(counted.length).toBe(107); // 97 with effects + 10 that only change ability properties (hits, beams...)
+    expect(counted.length).toBe(125); // with effects + those that only change ability properties (hits, beams...); 107 on 2.2.4.0
     expect(E.majorIdStatus("PLAGUE").counted).toBe(false);
   });
 

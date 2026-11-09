@@ -442,7 +442,12 @@ a new script rebuilds the tree layout itself (nodes, positions, costs, requireme
 In 2.2.5 Shaman got Totemic Hammer and Zealot's Bolts (Hymn of Hate is gone) and Mage got Runic Searing and Frost
 Dragon's Breath (Seance and Arctic Snake are gone). The rebuild also picked up Wynnbuilder's later fixes to 2.2.4
 (Blood Pact, Malediction, Pool of Rejuvenation, Ritualist descriptions) - Wynnbuilder corrects old versions in place.
-18 guide trees from The Ultimate Build Guide no longer fit the 2.2.5 trees and are no longer offered (46 remain).
+18 guide trees from The Ultimate Build Guide no longer fit the 2.2.5 trees and are no longer offered (46 remain):
+all guide presets of Riftwalker (9, several use the removed Seance / Arctic Snake), Fallen (6, Brink of Madness moved
+into Fallen with new requirements), Paladin (2) and Acolyte (1). The site's own suggested tree still covers every
+archetype. Three tests held numbers of the 2.2.4 data and were updated: major IDs on items 165 → 175 (counted 107 →
+125, every one still has a name and a description), the poison test picks the strongest poison helmet (2.2.5 nerfed
+Plague Mask), the preset test checks Shadestepper "Heavy Melee" instead of the Fallen "generalist" tree.
 Not refreshed here: the limited-time event item list and the Wynnpool item weights (their sites weren't reachable
 from the build machine) - run `npm run update-event-items` and `npm run update-item-weights` locally.
 
