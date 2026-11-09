@@ -30,7 +30,8 @@ describe("Discord feedback fixes", () => {
     const sc = makeScenario({ playerClass: "Assassin", archetype: "Shadestepper", level: 90, ehpPct: 0 });
     const ctx = E.damageGoalContext(sc.params.playerClass, sc.params.level, sc.params.treeSettings);
     const weapon = E.ITEM_DB.find((item) => item.type === "dagger" && item.level <= 90 && item.slots > 0);
-    const poisonItem = E.ITEM_DB.find((item) => item.type === "helmet" && (item.stats.poison || 0) > 2000 && item.level <= 90);
+    // the strongest poison helmet up to level 90 (2.2.5.0 rebalanced Plague Mask, the old pick with > 2000 poison)
+    const poisonItem = E.ITEM_DB.filter((item) => item.type === "helmet" && (item.stats.poison || 0) > 0 && item.level <= 90).sort((a, b) => b.stats.poison - a.stats.poison)[0];
     const items = [poisonItem, weapon];
     const sp = E.computeSkillPoints(items, true);
     const off = E.evaluateGoal(ctx, items, weapon, sp.totals, sc.params.goal, { ids: [], cps: 3 });
@@ -70,7 +71,8 @@ describe("Discord feedback fixes", () => {
     const presets = E.allTreePresets();
     expect(presets.length).toBeGreaterThan(10);
     expect(presets.some((preset) => E.presetMatches(preset, "bolt hybrid"))).toBe(true);
-    expect(presets.some((preset) => E.presetMatches(preset, "generalist") && preset.archetype === "Fallen")).toBe(true);
+    // 2.2.5.0 changed Fallen nodes (Brink of Madness), so the guide's Fallen trees are no longer offered; another named preset instead
+    expect(presets.some((preset) => E.presetMatches(preset, "heavy melee") && preset.archetype === "Shadestepper")).toBe(true);
     presets.forEach((preset) => expect(preset.ids.length).toBeGreaterThan(0));
   });
 });
