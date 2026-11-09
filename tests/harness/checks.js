@@ -37,7 +37,7 @@ export function isEligible(params, item, slotId) {
   if ((options.excludedTiers || []).includes(item.tier)) return false;
   if (params.excludeEvents && E.eventOf(item)) return false;
   if (params.tradeableOnly && E.isUntradable(item)) return false;
-  if (options.avoidNegativeDefences && E.hasNegativeDefence(item)) return false;
+  // 0.42: "Avoid negative defences" no longer filters items - it is a whole-build check (judge -> statOk)
   return true;
 }
 
@@ -67,6 +67,9 @@ export function eligiblePool(params, slotId) {
 // point solver. Returns metrics + feasibility against the scenario's hard filters.
 export function makeEvaluator(params) {
   const ctx = E.damageGoalContext(params.playerClass, params.level, params.treeSettings);
+  // 0.42: stat ranges of the whole build (Custom stats, Total Mana, totals of "Avoid negative defences")
+  const statRanges = E.combineStatRanges(params.statRanges, Boolean(params.options && params.options.avoidNegativeDefences));
+  if (statRanges.length > 0) ctx.rangeKeys = statRanges.map((range) => range.key);
   const cycle = E.normalizeCycle({ ...params.cycle, cps: params.cycle.cps || 9 });
   const cache = new Map();
   // extraSkills: undefined = free skill points spent like the generator does (allocateFreeSkillPoints: first to
@@ -92,7 +95,8 @@ export function makeEvaluator(params) {
       const inRange = (value, range) => !range || ((range.min === null || value >= range.min - 1e-9) && (range.max === null || value <= range.max + 1e-9));
       const sustainOk = (!params.requireSustain || m.sustain > 0) && inRange(m.sustain, lifeRange);
       const speedOk = inRange(m.walkSpeed, E.normalizeRange(params.spdRange));
-      return { spOk, ehpOk, manaOk, sustainOk, speedOk, feasible: spOk && !illegal && !clash && ehpOk && manaOk && sustainOk && speedOk };
+      const statOk = E.statRangesOk(m.rangeVals, statRanges);
+      return { spOk, ehpOk, manaOk, sustainOk, speedOk, statOk, feasible: spOk && !illegal && !clash && ehpOk && manaOk && sustainOk && speedOk && statOk };
     };
     let extra = auto ? null : extraSkills;
     let m;
@@ -111,6 +115,7 @@ export function makeEvaluator(params) {
         }
         if (!j.sustainOk) miss += 0.5;
         if (!j.speedOk) miss += 0.5;
+        if (!j.statOk) miss += 0.5;
         return -miss;
       };
       const allocated = E.allocateFreeSkillPoints(ctx, items, weapon, sp, params.goal, cycle, rank);
