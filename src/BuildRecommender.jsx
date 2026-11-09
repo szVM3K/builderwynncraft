@@ -2249,12 +2249,14 @@ function goalStatWeights(ctx, baseItems, weapon, skillTotals, goal, cycle) {
   });
   // 0.42: staty z "optimize" (XP Bonus, Loot Bonus, obrony...) - bez tej próby liniowa ocena kandydatów ich nie widzi
   (ctx.extraProbes || []).forEach(({ key, step, base: onBase }) => {
-    if (damage[key] !== undefined) return;
+    if (damage[onBase ? `base:${key}` : key] !== undefined) return;
     const ghost = { name: "__probe", category: "accessory", type: "ring", level: 0, tier: "Normal", ids: onBase ? {} : { [key]: step }, base: onBase ? { [key]: step } : {}, stats: {}, reqs: { str: 0, dex: 0, int: 0, def: 0, agi: 0 }, elements: [], slots: 0, majorIds: [], baseIds: {}, staticIds: [] };
     const probe = evaluateGoal(ctx, [...baseItems, ghost], weapon, skillTotals, goal, cycle);
-    damage[key] = (probe.damage - base.damage) / step;
-    ehp[key] = (probe.ehp - base.ehp) / step;
-    mana[key] = (probe.manaNet - base.manaNet) / step;
+    // bazowa obrona przedmiotu ma osobny klucz ("base:eDef"), żeby nie mieszała się z wagami "eDef" innych trybów
+    const name = onBase ? `base:${key}` : key;
+    damage[name] = (probe.damage - base.damage) / step;
+    ehp[name] = (probe.ehp - base.ehp) / step;
+    mana[name] = (probe.manaNet - base.manaNet) / step;
   });
   return { base, damage, ehp, mana };
 }
@@ -2273,8 +2275,8 @@ function proxyScore(item, weights) {
     const key = `${element.charAt(0)}Def`;
     const pct = `${element.charAt(0)}DefPct`;
     if (weights[pct] && item.base && item.base[key]) value += 0;
-    // 0.42: bazowa obrona ma wagę tylko przy obronie w "optimize" (próba w goalStatWeights)
-    if (weights[key] && item.base && item.base[key] && !(item.ids && item.ids[key])) value += weights[key] * item.base[key];
+    // 0.42: bazowa obrona ma wagę tylko przy obronie w "optimize" (próba "base:eDef" w goalStatWeights)
+    if (weights[`base:${key}`] && item.base && item.base[key]) value += weights[`base:${key}`] * item.base[key];
   });
   return value;
 }
