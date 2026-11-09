@@ -41,7 +41,7 @@ const APP_VERSION = PACKAGE_INFO.version;
  *    - preferGuideItems: przedmioty z buildów "The Ultimate Build Guide" dla archetypu dostają premię (GUIDE_ITEM_BONUS).
  * 5. Wagi archetypów są skalibrowane na 126 buildach z poradnika (szczegóły nad ARCHETYPES), a guide-builds.json
  *    pozwala podejrzeć każdy z tych buildów w siatce ("Guide builds").
- * 6. ability-trees.json: drzewka umiejętności wszystkich klas (gra 2.2.4.0), zakładka "Ability tree" z walidacją
+ * 6. ability-trees.json: drzewka umiejętności wszystkich klas (gra 2.2.5.0), zakładka "Ability tree" z walidacją
  *    odblokowań i limitem AP (poziom + AP pożyczone przez rangę); dominujący archetyp drzewka można przenieść do buildu.
  * 7. Preferencje obron (defences, avoidNegativeDefences) dodają wagi dla obron żywiołów albo karzą ujemne obrony.
  * 8. focus (suwaki Main attack DPS / Spell DPS / EHP & sustain, 0-100%): domyślna pozycja to udział grupy w wagach
@@ -768,7 +768,8 @@ function getArchetypeProfile(archetype, rawOptions = DEFAULT_OPTIONS) {
     tuning,
     guideCounts,
     guideMax,
-    negativeDefenceWeight: options.avoidNegativeDefences ? defenceWeight : 0,
+    // 0.42: "Avoid negative defences" pilnuje sumy obron całego buildu (zakresy statystyk), a nie karze przedmiotów
+    negativeDefenceWeight: 0,
     topWeight,
     focusSliders: {
       defaults: Object.fromEntries(FOCUS_GROUPS.map(({ id }) => [id, Math.round(defaultFocus[id])])),
@@ -1834,6 +1835,192 @@ function formatRange(range, unit, digits = 0, signed = false) {
   if (range.min !== null) return `≥ ${text(range.min)}${unit}`;
   return `≤ ${text(range.max)}${unit}`;
 }
+
+// ZAKRESY STATYSTYK (0.42, feedback graczy z Discorda): dowolna statystyka CAŁEGO buildu w zakresie { min, max },
+// tak jak Walk Speed. Jeden mechanizm dla trzech próśb:
+// 1. "Avoid negative defences" liczone z sumy obron buildu (każda obrona żywiołu ≥ 0), a nie "zero przedmiotów
+//    z ujemną obroną" - -100 Thunder na jednym przedmiocie jest OK, gdy reszta zestawu daje +500 Thunder.
+// 2. Total Mana (Arcanist bez cyklu dostawał build z 78 many, bo nic jej nie pilnowało).
+// 3. Pole "Custom stats": dowolne staty z min/max i opcją "optimize" (np. zestaw XP na levelowanie).
+// Wartość statystyki = to samo, co pokazuje podsumowanie buildu (statystyki po drzewku i skill pointach).
+// Lista zakresów: [{ key, min, max, optimize, weight }]; min/max null = bez granicy z tej strony.
+const RANGE_DEFENCE_KEYS = ["e", "t", "w", "f", "a"].map((prefix) => `${prefix}DefTotal`);
+const DERIVED_RANGE_STATS = {
+  totalMana: {
+    label: "Total Mana",
+    unit: "",
+    scale: 20,
+    // jak "➜ Total Mana" w panelu Damage: 100 bazowo + Max Mana z przedmiotów + bonus z Intelligence
+    value: (stats) => 100 + statValue(stats, "maxMana") + Math.floor(skillPercent(statValue(stats, "int")) * 100),
+    item: (item) => (item.ids.maxMana || 0) + (item.ids.int || 0),
+    probes: [{ key: "maxMana", step: 20 }],
+  },
+  health: {
+    label: "Health (total)",
+    unit: "",
+    scale: 1000,
+    value: (stats) => statValue(stats, "hp") + statValue(stats, "hpBonus"),
+    item: (item) => ((item.base && item.base.hp) || 0) + (item.ids.hpBonus || 0),
+    probes: [],
+  },
+};
+["e", "t", "w", "f", "a"].forEach((prefix) => {
+  // jak tabela obron w podsumowaniu (elementalDefences): baza + |baza| × (% żywiołu + % Elemental)
+  DERIVED_RANGE_STATS[`${prefix}DefTotal`] = {
+    label: `${ID_ELEMENT_NAMES[prefix]} Defence (total)`,
+    unit: "",
+    scale: 100,
+    value: (stats) => {
+      const raw = statValue(stats, `${prefix}Def`);
+      const pct = statValue(stats, `${prefix}DefPct`) + statValue(stats, "rDefPct");
+      return raw + (Math.abs(raw) * pct) / 100;
+    },
+    item: (item) => (item.base && item.base[`${prefix}Def`]) || 0,
+    probes: [{ key: `${prefix}Def`, step: 100, base: true }],
+  };
+});
+// Katalog do pola "Custom stats": najpierw staty wyliczane, potem identyfikacje z karty przedmiotu.
+const RANGE_STAT_CATALOG = [
+  ...Object.entries(DERIVED_RANGE_STATS).map(([key, entry]) => ({ key, label: entry.label, unit: entry.unit, scale: entry.scale, derived: true })),
+  ...ID_DISPLAY.filter((entry) => entry.key !== "hpBonus").map((entry) => ({
+    key: entry.key,
+    label: SKILLS.includes(entry.key) ? `${entry.label} (total points)` : entry.label,
+    unit: entry.unit,
+    scale: (STAT_META[entry.key] && STAT_META[entry.key].scale) || (entry.unit === "%" ? 10 : 10),
+    invert: entry.invert,
+    derived: false,
+  })),
+];
+const RANGE_STAT_BY_KEY = new Map(RANGE_STAT_CATALOG.map((entry) => [entry.key, entry]));
+function rangeStatLabel(key) {
+  const entry = RANGE_STAT_BY_KEY.get(key);
+  return entry ? entry.label : key;
+}
+function rangeStatScale(key) {
+  const entry = RANGE_STAT_BY_KEY.get(key);
+  return entry && entry.scale > 0 ? entry.scale : 10;
+}
+function rangeStatValue(stats, key) {
+  const derived = DERIVED_RANGE_STATS[key];
+  return derived ? derived.value(stats) : statValue(stats, key);
+}
+// Wkład jednego przedmiotu (tylko do wyboru kandydatów; ostateczna ocena liczy cały build dokładnie).
+function itemRangeValue(item, key) {
+  if (!item) return 0;
+  const derived = DERIVED_RANGE_STATS[key];
+  if (derived) return derived.item(item);
+  return (item.ids && item.ids[key]) || 0;
+}
+// Części statu z jednego przedmiotu, z których każda "więcej = więcej statu" (dla odrzucania zdominowanych
+// przedmiotów w pełnym przeszukaniu Optimizera; Intelligence z Total Mana liczy się tam jako skill point).
+function itemRangeParts(item, key) {
+  if (!item) return [];
+  const ids = item.ids || {};
+  const base = item.base || {};
+  const defence = key.match(/^([etwfa])DefTotal$/);
+  if (defence) return [base[`${defence[1]}Def`] || 0, ids[`${defence[1]}DefPct`] || 0, ids.rDefPct || 0];
+  if (key === "totalMana") return [ids.maxMana || 0];
+  if (key === "health") return [base.hp || 0, ids.hpBonus || 0];
+  return [ids[key] || 0];
+}
+function normalizeStatRanges(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  const seen = new Set();
+  list.forEach((entry) => {
+    if (!entry || typeof entry.key !== "string" || !RANGE_STAT_BY_KEY.has(entry.key) || seen.has(entry.key)) return;
+    const range = normalizeRange(entry);
+    const optimize = Boolean(entry.optimize);
+    if (!range && !optimize) return;
+    seen.add(entry.key);
+    const weight = Number(entry.weight);
+    out.push({ key: entry.key, min: range ? range.min : null, max: range ? range.max : null, optimize, weight: Number.isFinite(weight) && weight > 0 ? weight : 1 });
+  });
+  return out;
+}
+// Zakresy gracza + "Avoid negative defences" (każda obrona żywiołu ≥ 0). Własny zakres gracza na tę samą obronę
+// zostaje, tylko jego minimum nie może być ujemne.
+function combineStatRanges(statRanges, avoidNegativeDefences = false) {
+  const list = normalizeStatRanges(statRanges);
+  if (!avoidNegativeDefences) return list;
+  RANGE_DEFENCE_KEYS.forEach((key) => {
+    const own = list.find((entry) => entry.key === key);
+    if (own) own.min = own.min === null ? 0 : Math.max(0, own.min);
+    else list.push({ key, min: 0, max: null, optimize: false, weight: 1, auto: true });
+  });
+  return list;
+}
+function rangeStatValues(stats, keys) {
+  const out = {};
+  keys.forEach((key) => {
+    out[key] = rangeStatValue(stats, key);
+  });
+  return out;
+}
+const rangeValOf = (vals, key) => (vals && Number.isFinite(vals[key]) ? vals[key] : 0);
+// Brak policzonej wartości (szukanie bez tego statu, np. pierwsze szukanie bez górnych granic) = zakres NIE jest
+// spełniony - wcześniej brak liczył się jak 0, więc "Walk Speed ≤ 0" przechodziło przy +28%.
+const rangeValKnown = (vals, key) => Boolean(vals) && Number.isFinite(vals[key]);
+function statRangesOk(vals, ranges) {
+  return !ranges || ranges.every((range) => rangeValKnown(vals, range.key) && inRange(vals[range.key], range));
+}
+function statRangesLowerOk(vals, ranges) {
+  return !ranges || ranges.every((range) => range.min === null || rangeValOf(vals, range.key) >= range.min - 1e-9);
+}
+function statRangesUpperOk(vals, ranges) {
+  return !ranges || ranges.every((range) => range.max === null || rangeValOf(vals, range.key) <= range.max + 1e-9);
+}
+// Odległość od zakresów (0 = mieści się), każdy zakres najwyżej 2 - jak rangesMiss.
+function statRangesMiss(vals, ranges, side = "both") {
+  if (!ranges) return 0;
+  let miss = 0;
+  ranges.forEach((range) => {
+    const value = rangeValOf(vals, range.key);
+    if (side === "lower" && !(range.min !== null && value < range.min - 1e-9)) return;
+    if (side === "upper" && !(range.max !== null && value > range.max + 1e-9)) return;
+    miss += Math.min(2, rangeMiss(value, range, rangeStatScale(range.key)));
+  });
+  return miss;
+}
+// Zakresy z minimum, do którego zestaw jeszcze nie dobił (albo jest tuż nad nim) - jak spdNear dla Walk Speed:
+// pule kandydatów dostają wtedy przedmioty, które najbardziej podnoszą ten stat.
+function statRangesNear(vals, ranges) {
+  if (!ranges) return [];
+  return ranges.filter((range) => range.min !== null && rangeValOf(vals, range.key) < range.min + rangeStatScale(range.key) / 2);
+}
+// Cel "optimize": ważona suma wybranych statów (w jednostkach skali), zamieniona na liczbę dodatnią, żeby kary
+// za progi (mnożniki) działały jak przy obrażeniach. Obrażenia rozstrzygają tylko remisy (najwyżej +1%).
+function statObjective(vals, optimizeRanges, damage) {
+  let score = 0;
+  optimizeRanges.forEach((range) => {
+    const entry = RANGE_STAT_BY_KEY.get(range.key);
+    const sign = entry && entry.invert ? -1 : 1;
+    score += (sign * range.weight * rangeValOf(vals, range.key)) / rangeStatScale(range.key);
+  });
+  const tie = damage > 0 ? damage / (damage + 1000) : 0;
+  return Math.exp(Math.max(-600, Math.min(600, score * 0.5))) * (1 + 0.01 * tie);
+}
+function statRangeText(range) {
+  const entry = RANGE_STAT_BY_KEY.get(range.key);
+  const unit = entry ? entry.unit : "";
+  const bounds = normalizeRange(range) ? formatRange(normalizeRange(range), unit, 0, true) : "any";
+  return `${rangeStatLabel(range.key)} ${bounds}${range.optimize ? " (optimized)" : ""}`;
+}
+// Zakresy statystyk zapisane w buildzie (starsze buildy i linki: tylko "Avoid negative defences" z opcji).
+function buildStatRanges(build) {
+  if (build && build.metrics && Array.isArray(build.metrics.statRanges)) return build.metrics.statRanges;
+  return combineStatRanges([], Boolean(build && build.options && build.options.avoidNegativeDefences));
+}
+// Kontekst oceny z kluczami zakresów buildu (żeby evaluateGoal policzył rangeVals do sprawdzeń podmian).
+function withRangeKeys(ctx, ranges) {
+  if (ranges && ranges.length > 0) ctx.rangeKeys = ranges.map((range) => range.key);
+  return ctx;
+}
+function statRangeFails(vals, ranges) {
+  return (ranges || [])
+    .filter((range) => !inRange(rangeValOf(vals, range.key), range))
+    .map((range) => `${rangeStatLabel(range.key)} ${formatNumber(Math.round(rangeValOf(vals, range.key)))}${(RANGE_STAT_BY_KEY.get(range.key) || {}).unit || ""}`);
+}
 // Ustawienia cyklu w jednym miejscu: czary + M, kliknięcia/s, kradzież many, mana z umiejętności, poison w celu,
 // zakres bilansu many (cycle.mana, mana/s; stary zapis: dopuszczalny dren "drain").
 function normalizeCycle(cycle) {
@@ -1881,12 +2068,12 @@ function speedPasses(metrics) {
   return inRange(metrics.walkSpeed, normalizeRange(metrics.spdRange));
 }
 // Wszystkie filtry zakresów naraz (mana, życie, Walk Speed) - Optimizer, Other picks, podmiany.
-function rangesOk(metrics, cycle, lifeRange, spdRange, requireSustain = false) {
-  return manaOk(metrics, cycle) && (!requireSustain || metrics.sustain > 0) && inRange(metrics.sustain, lifeRange) && inRange(metrics.walkSpeed, spdRange);
+function rangesOk(metrics, cycle, lifeRange, spdRange, requireSustain = false, statRanges = null) {
+  return manaOk(metrics, cycle) && (!requireSustain || metrics.sustain > 0) && inRange(metrics.sustain, lifeRange) && inRange(metrics.walkSpeed, spdRange) && statRangesOk(metrics.rangeVals, statRanges);
 }
 // Jak daleko do zakresów (0 = mieści się): do rozdziału wolnych punktów i porównań buildów, które nie przechodzą.
-function rangesMiss(metrics, cycle, lifeRange, spdRange, requireSustain = false) {
-  let miss = 0;
+function rangesMiss(metrics, cycle, lifeRange, spdRange, requireSustain = false, statRanges = null) {
+  let miss = statRangesMiss(metrics.rangeVals, statRanges);
   if (cycle && cycle.ids && cycle.ids.length > 0) {
     if (!metrics.cycleOk) miss += 1;
     miss += Math.min(2, rangeMiss(metrics.manaNet, manaRangeOf(cycle), RANGE_SCALE.mana));
@@ -1934,7 +2121,9 @@ function evaluateGoal(ctx, items, weapon, skillTotals, goal, cycle, altGoals = n
   // 0.40: szybkość ataku buildu po tierach z przedmiotów (filtr "Only builds with the checked speeds")
   const attackSpeed = weapon ? attackSpeedAfterTier(weapon, statValue(stats, "atkTier")) : null;
   const result = { damage: 0, ehp, hp, hpr, lifeSteal, sustain, walkSpeed, attackSpeed, healthGain: (sustain * ehp) / hp, manaIncome: 0, manaUsed: 0, manaGain: 0, manaSteal: 0, manaNet: 0, cycleOk: true, goalName: "", stats };
-  if (!weapon) return result;
+  // 0.42: wartości statów z zakresów (Custom stats, Total Mana, obrony z "Avoid negative defences") - tylko gdy szukanie je ma
+  if (ctx.rangeKeys && ctx.rangeKeys.length > 0) result.rangeVals = rangeStatValues(stats, ctx.rangeKeys);
+  if (!weapon) return withStatObjective(ctx, result);
   let spells = ctx.spellCache ? ctx.spellCache.get(spellKey) : null;
   if (!spells) {
     spells = collectTreeSpells(scaled.edited, scaled.translate);
@@ -2028,6 +2217,14 @@ function evaluateGoal(ctx, items, weapon, skillTotals, goal, cycle, altGoals = n
     result.damage *= factor;
     if (result.alt) result.alt = result.alt.map((value) => value * factor);
   }
+  return withStatObjective(ctx, result);
+}
+// 0.42: "optimize" w Custom stats - szukanie porównuje wybrane staty zamiast obrażeń (prawdziwe obrażenia w rawDamage,
+// jak przy Walk Speed w celu). Ustawia to tylko generator (ctx.optimizeRanges).
+function withStatObjective(ctx, result) {
+  if (!ctx.optimizeRanges || ctx.optimizeRanges.length === 0) return result;
+  if (result.rawDamage === undefined) result.rawDamage = result.damage;
+  result.damage = statObjective(result.rangeVals, ctx.optimizeRanges, result.rawDamage);
   return result;
 }
 
@@ -2050,6 +2247,17 @@ function goalStatWeights(ctx, baseItems, weapon, skillTotals, goal, cycle) {
     ehp[key] = (probe.ehp - base.ehp) / step;
     mana[key] = (probe.manaNet - base.manaNet) / step;
   });
+  // 0.42: staty z "optimize" (XP Bonus, Loot Bonus, obrony...) - bez tej próby liniowa ocena kandydatów ich nie widzi
+  (ctx.extraProbes || []).forEach(({ key, step, base: onBase }) => {
+    if (damage[onBase ? `base:${key}` : key] !== undefined) return;
+    const ghost = { name: "__probe", category: "accessory", type: "ring", level: 0, tier: "Normal", ids: onBase ? {} : { [key]: step }, base: onBase ? { [key]: step } : {}, stats: {}, reqs: { str: 0, dex: 0, int: 0, def: 0, agi: 0 }, elements: [], slots: 0, majorIds: [], baseIds: {}, staticIds: [] };
+    const probe = evaluateGoal(ctx, [...baseItems, ghost], weapon, skillTotals, goal, cycle);
+    // bazowa obrona przedmiotu ma osobny klucz ("base:eDef"), żeby nie mieszała się z wagami "eDef" innych trybów
+    const name = onBase ? `base:${key}` : key;
+    damage[name] = (probe.damage - base.damage) / step;
+    ehp[name] = (probe.ehp - base.ehp) / step;
+    mana[name] = (probe.manaNet - base.manaNet) / step;
+  });
   return { base, damage, ehp, mana };
 }
 
@@ -2067,6 +2275,8 @@ function proxyScore(item, weights) {
     const key = `${element.charAt(0)}Def`;
     const pct = `${element.charAt(0)}DefPct`;
     if (weights[pct] && item.base && item.base[key]) value += 0;
+    // 0.42: bazowa obrona ma wagę tylko przy obronie w "optimize" (próba "base:eDef" w goalStatWeights)
+    if (weights[`base:${key}`] && item.base && item.base[key]) value += weights[`base:${key}`] * item.base[key];
   });
   return value;
 }
@@ -2154,7 +2364,10 @@ async function generateDamageBuild(args) {
   const life = args.lifeRange !== undefined ? normalizeRange(args.lifeRange) : rangeFromMinimum(args.minSustain);
   const spd = normalizeRange(args.spdRange);
   const ehpMaxArg = Number(args.maxEhp) > 0 ? Math.max(Number(args.maxEhp), Number(args.minEhp) || 0) : null;
-  if (!(mana && mana.max !== null) && !(life && life.max !== null) && !(spd && spd.max !== null) && ehpMaxArg === null) return generateDamageBuildOnce(args);
+  // 0.42: zakresy statystyk (Custom stats, Total Mana) - górne granice jak inne: najpierw szukanie bez nich
+  const statList = normalizeStatRanges(args.statRanges);
+  const statUpper = statList.some((range) => range.max !== null);
+  if (!(mana && mana.max !== null) && !(life && life.max !== null) && !(spd && spd.max !== null) && ehpMaxArg === null && !statUpper) return generateDamageBuildOnce(args);
   const relaxed = await generateDamageBuildOnce({
     ...args,
     maxEhp: null,
@@ -2162,14 +2375,16 @@ async function generateDamageBuild(args) {
     lifeRange: life ? normalizeRange({ min: life.min, max: null }) : null,
     minSustain: 0,
     spdRange: spd ? normalizeRange({ min: spd.min, max: null }) : null,
+    statRanges: statList.map((range) => ({ ...range, max: null })),
     rangesExact: true,
   });
   const m = relaxed.metrics;
   const fullCycle = normalizeCycle(cycleIn);
-  const fits = relaxed.passed && (!hasCycle || manaOk(m, fullCycle)) && inRange(m.sustain, life) && inRange(m.walkSpeed, spd) && (ehpMaxArg === null || m.ehp <= ehpMaxArg + 1e-9);
+  const fits = relaxed.passed && (!hasCycle || manaOk(m, fullCycle)) && inRange(m.sustain, life) && inRange(m.walkSpeed, spd) && (ehpMaxArg === null || m.ehp <= ehpMaxArg + 1e-9) && statRangesOk(m.rangeVals, statList);
   if (fits) {
     // ten sam build, opisany zakresami gracza (podsumowanie, Why this build?, link)
-    return { ...relaxed, metrics: { ...m, cycle: fullCycle, lifeRange: life, spdRange: spd, minSustain: life && life.min !== null ? Math.max(0, life.min) : 0, maxEhp: ehpMaxArg }, stats: { ...relaxed.stats, ranges: "fit on the first search" } };
+    const statRangesOut = combineStatRanges(statList, relaxed.options && relaxed.options.avoidNegativeDefences);
+    return { ...relaxed, metrics: { ...m, cycle: fullCycle, lifeRange: life, spdRange: spd, minSustain: life && life.min !== null ? Math.max(0, life.min) : 0, maxEhp: ehpMaxArg, statRanges: statRangesOut }, stats: { ...relaxed.stats, ranges: "fit on the first search" } };
   }
   const seed = { picks: Object.fromEntries(relaxed.slots.filter((slot) => slot.item && slot.id !== "weapon").map((slot) => [slot.id, slot.item])), weapon: relaxed.slots.find((slot) => slot.id === "weapon").item };
   const onProgress = args.onProgress ? (progress) => args.onProgress({ ...progress, label: `Fitting the ranges: ${String(progress.label || "").charAt(0).toLowerCase()}${String(progress.label || "").slice(1)}` }) : null;
@@ -2178,7 +2393,7 @@ async function generateDamageBuild(args) {
   return { ...constrained, stats: { ...constrained.stats, ranges: "second search with the ranges" } };
 }
 
-async function generateDamageBuildOnce({ playerClass, level, archetype = null, treeSettings, goal, cycle, minEhp = 0, maxEhp = null, requireSustain = false, minSustain = 0, lifeRange = undefined, spdRange = null, secondSearch = false, options = DEFAULT_OPTIONS, items = ITEM_DB, powders = "auto", objective = "damage", onProgress = null, seeds = [], excludeEvents = true, tradeableOnly = false, effort = "full", spendFreeSkillPoints = true, task = null, parallel = null, caches = null, rollPercent = 100, spReserve = 0 }) {
+async function generateDamageBuildOnce({ playerClass, level, archetype = null, treeSettings, goal, cycle, minEhp = 0, maxEhp = null, requireSustain = false, minSustain = 0, lifeRange = undefined, spdRange = null, statRanges = null, secondSearch = false, options = DEFAULT_OPTIONS, items = ITEM_DB, powders = "auto", objective = "damage", onProgress = null, seeds = [], excludeEvents = true, tradeableOnly = false, effort = "full", spendFreeSkillPoints = true, task = null, parallel = null, caches = null, rollPercent = 100, spReserve = 0 }) {
   // "Realistic rolls": wszystkie losowane ID przy podanym rollu (np. 50%) zamiast maksymalnych
   if (rollPercent < 100) items = rolledItems(items, rollPercent);
   // effort "quick" (lista buildów dla każdego progu EHP): bez wiązki z zapasem EHP i wiązek pod inne czary,
@@ -2199,6 +2414,18 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
   const normalized = normalizeOptions(options);
   // 0.40: Walk Speed w porównaniu buildów (tylko w szukaniu; wynik pokazuje prawdziwe obrażenia)
   if (objective === "damage" && normalized.speedValue > 0) ctx.speedValue = normalized.speedValue;
+  // 0.42: zakresy statystyk buildu (Custom stats, Total Mana) + "Avoid negative defences" jako obrony całego buildu ≥ 0.
+  // Wartości liczy evaluateGoal (ctx.rangeKeys); "optimize" zmienia cel szukania na wybrane staty (ctx.optimizeRanges).
+  const rangeList = combineStatRanges(statRanges, normalized.avoidNegativeDefences);
+  const optimizeList = objective === "damage" ? rangeList.filter((range) => range.optimize) : [];
+  const customObjective = optimizeList.length > 0;
+  if (rangeList.length > 0) ctx.rangeKeys = rangeList.map((range) => range.key);
+  if (customObjective) {
+    ctx.optimizeRanges = optimizeList;
+    ctx.extraProbes = optimizeList.flatMap((range) => (DERIVED_RANGE_STATS[range.key] ? DERIVED_RANGE_STATS[range.key].probes : [{ key: range.key, step: rangeStatScale(range.key) }]));
+  }
+  const rangeLower = rangeList.filter((range) => range.min !== null);
+  const rangePoolKeys = [...new Set([...rangeLower, ...optimizeList].map((range) => range.key))];
   // 0.40: suwaki major ID liczone przy ustawieniu "Major ID sliders" (domyślnie 0 = bez bonusu, którego gracz może nie utrzymać)
   ctx.scaleSettings = { ...ctx.treeSettings, majorSliders: normalized.majorSliders };
   const lockedNames = new Set(Object.values(normalized.locked || {}));
@@ -2212,7 +2439,7 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
     if (excluded.has(item.name) || excludedTiers.has(item.tier)) return false;
     if (excludeEvents && eventOf(item)) return false;
     if (tradeableOnly && isUntradable(item)) return false;
-    if (normalized.avoidNegativeDefences && hasNegativeDefence(item)) return false;
+    // 0.42: "Avoid negative defences" nie wyrzuca już przedmiotów z ujemną obroną - pilnuje sumy obron buildu (rangeList)
     if (item.category === "weapon" && normalized.attackSpeeds.length > 0 && !normalized.attackSpeeds.includes(item.atkSpd)) return false;
     if (budget && !withinBudget(item, budget)) return false;
     if (onlyListed && marketStatus(item).state !== "listed") return false;
@@ -2245,7 +2472,6 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
       !excludedTiers.has(item.tier) &&
       !(excludeEvents && eventOf(item) && !(normalized.locked && normalized.locked[slotId] === item.name)) &&
       !(tradeableOnly && isUntradable(item) && !(normalized.locked && normalized.locked[slotId] === item.name)) &&
-      !(normalized.avoidNegativeDefences && hasNegativeDefence(item) && !(normalized.locked && normalized.locked[slotId] === item.name)) &&
       !(slotId === "weapon" && normalized.attackSpeeds.length > 0 && !normalized.attackSpeeds.includes(item.atkSpd) && !(normalized.locked && normalized.locked.weapon === item.name)) &&
       (!budget || withinBudget(item, budget)) &&
       (!onlyListed || marketStatus(item).state === "listed");
@@ -2287,7 +2513,7 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
   // Pozostałe cele drzewka (inne czary, main attack). Ich liniowe wagi dokładają kandydatów do wiązki i do
   // dopieszczania: zestaw zbudowany "pod Uproot" bywał mocniejszy w Blood Sorrow niż zestaw zbudowany pod sam
   // Blood Sorrow (testy: do +15-29%), bo liniowe wagi celu przy pustym zestawie źle przewidują, co się opłaci.
-  const altGoals = objective === "damage" ? damageGoalOptions(playerClass, level, treeSettings, items).map((entry) => entry.id).filter((id) => (Array.isArray(goal) ? !goal.includes(id) : id !== goal)).slice(0, DAMAGE_BEAM.altGoals) : [];
+  const altGoals = objective === "damage" && !customObjective ? damageGoalOptions(playerClass, level, treeSettings, items).map((entry) => entry.id).filter((id) => (Array.isArray(goal) ? !goal.includes(id) : id !== goal)).slice(0, DAMAGE_BEAM.altGoals) : [];
 
   // objective "ehp" służy do policzenia, ile EHP da się osiągnąć (zakres suwaka) i jako drugi przebieg, gdy
   // pierwszy (obrażenia) nie trafi w progi: wtedy najpierw szukamy czegokolwiek, co je spełnia.
@@ -2358,6 +2584,9 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
   const spdLimits = normalizeRange(spdRange);
   const spdFloor = spdLimits && spdLimits.min !== null ? spdLimits.min : null;
   const spdOk = (metrics) => inRange(metrics.walkSpeed, spdLimits);
+  // 0.42: zakresy statystyk (rangeList): dolne granice twarde jak minimum Walk Speed, górne łagodne do dokładnego etapu
+  const statOk = (metrics) => statRangesOk(metrics.rangeVals, rangeList);
+  const statLowerOk = (metrics) => rangeLower.length === 0 || statRangesLowerOk(metrics.rangeVals, rangeList);
   // 0.40: "Only builds with the checked speeds" - szybkość ataku całego buildu (broń + tiery z przedmiotów) musi być
   // zaznaczona; przedmioty z -X tierami nie zwalniają buildu poniżej wybranych szybkości. Twardy filtr jak minimum.
   const atkAllowed = normalized.attackSpeedsFinal && normalized.attackSpeeds.length > 0 ? new Set(normalized.attackSpeeds) : null;
@@ -2368,8 +2597,10 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
     (ehpCeil === null || metrics.ehp <= ehpCeil + 1e-9) &&
     (manaCeil === null || metrics.manaNet <= manaCeil + 1e-9) &&
     (!lifeLimits || lifeLimits.max === null || metrics.sustain <= lifeLimits.max + 1e-9) &&
-    (!spdLimits || spdLimits.max === null || metrics.walkSpeed <= spdLimits.max + 1e-9);
+    (!spdLimits || spdLimits.max === null || metrics.walkSpeed <= spdLimits.max + 1e-9) &&
+    statRangesUpperOk(metrics.rangeVals, rangeList);
   const upperMiss = (metrics) =>
+    statRangesMiss(metrics.rangeVals, rangeList, "upper") +
     (ehpCeil !== null && metrics.ehp > ehpCeil ? rangeMiss(metrics.ehp, ehpLimits, ehpScale) : 0) +
     (manaCeil !== null && metrics.manaNet > manaCeil ? rangeMiss(metrics.manaNet, manaLimits, RANGE_SCALE.mana) : 0) +
     (lifeLimits && lifeLimits.max !== null && metrics.sustain > lifeLimits.max ? rangeMiss(metrics.sustain, lifeLimits, RANGE_SCALE.life) : 0) +
@@ -2388,6 +2619,7 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
     } else if (cycleCfg.ids.length > 0 && manaFloor !== null && manaFloor > 0 && metrics.manaNet < manaFloor) miss += Math.min(1, (manaFloor - metrics.manaNet) / RANGE_SCALE.mana);
     if (manaCeil !== null && metrics.manaNet > manaCeil) miss += Math.min(1, rangeMiss(metrics.manaNet, manaLimits, RANGE_SCALE.mana));
     if (!spdOk(metrics)) miss += 0.5 + Math.min(1, rangeMiss(metrics.walkSpeed, spdLimits, RANGE_SCALE.spd));
+    if (!statOk(metrics)) miss += 0.5 + Math.min(1, statRangesMiss(metrics.rangeVals, rangeList));
     if (!atkOk(metrics)) miss += 1;
     if (budget && metrics.cost > budget) miss += metrics.cost / budget - 1;
     return miss;
@@ -2398,6 +2630,7 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
     (!lifeLimits || lifeLimits.min === null || metrics.sustain >= lifeLimits.min - 1e-9) &&
     (cycleCfg.ids.length === 0 || (metrics.cycleOk && (manaFloor === null || metrics.manaNet >= manaFloor - 1e-9))) &&
     (spdFloor === null || metrics.walkSpeed >= spdFloor - 1e-9) &&
+    statLowerOk(metrics) &&
     atkOk(metrics);
   // Przybliżone szukanie (wiązka, dopieszczanie, pary): górne granice zakresów tylko jako łagodna kara w wartości
   // zestawu - twardo liczą się dopiero w dokładnym etapie (exactOk). Twarda górna granica już tutaj spychała
@@ -2410,6 +2643,9 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
     (!budget || metrics.cost <= budget);
   // zestaw blisko minimum Walk Speed (albo pod nim): pule dopieszczania dostają też najszybsze przedmioty slotu
   const spdNear = (metrics) => spdFloor !== null && metrics.walkSpeed < spdFloor + 10;
+  // 0.42: staty z minimum, którego zestaw jeszcze nie ma (albo ma ledwo) + staty z "optimize" - ich przedmioty
+  // dostają miejsce w pulach dopieszczania i par (jak najszybsze przedmioty przy Walk Speed)
+  const statNearKeys = (metrics) => [...new Set([...statRangesNear(metrics.rangeVals, rangeList).map((range) => range.key), ...optimizeList.map((range) => range.key)])];
   // Wartość w wiązce: obrażenia × kary za niespełnione progi (twarde odcięcie dopiero na końcu, żeby wiązka
   // nie zgubiła zestawów, które dopiero z kolejnym slotem wchodzą w próg).
   // Jak daleko zaszła wiązka (1 = zestaw kompletny). Zestaw z dwoma założonymi slotami nie ma jeszcze prawa mieć
@@ -2437,6 +2673,11 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
     // Walk Speed poniżej minimum: łagodna kara rosnąca z postępem (kolejny przedmiot może ją jeszcze podnieść; kara
     // skalowana postępem granicy albo z wykładnikiem jak EHP gubiła lepsze zestawy - testy: -7%)
     if (spdFloor !== null && metrics.walkSpeed < spdFloor) factor *= Math.exp(-((spdFloor - metrics.walkSpeed) / RANGE_SCALE.spd) * progress);
+    // 0.42: staty poniżej minimum zakresu - tak samo łagodnie (kolejny przedmiot może jeszcze dobić)
+    if (rangeLower.length > 0) {
+      const under = statRangesMiss(metrics.rangeVals, rangeList, "lower");
+      if (under > 0) factor *= Math.exp(-under * progress);
+    }
     // szybkość ataku buildu spoza zaznaczonych: kara rośnie z postępem (kolejny przedmiot z +tierem może to naprawić)
     if (!atkOk(metrics)) factor *= 1 - 0.8 * progress;
     if (budget && metrics.cost > budget) factor *= Math.pow(budget / metrics.cost, 2);
@@ -2549,6 +2790,8 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
       if (needSustain) take("sustain", DAMAGE_BEAM.extraPerSlot);
       // minimum Walk Speed: najszybsze przedmioty slotu też są kandydatami (inaczej wiązka odrzuca je, zanim filtr je zobaczy)
       if (spdFloor !== null) take("spd", DAMAGE_BEAM.extraPerSlot);
+      // 0.42: minimum albo "optimize" statu z zakresów: przedmioty, które go najbardziej podnoszą
+      rangePoolKeys.forEach((key) => topBy(bySlot[slotId], (item) => itemRangeValue(item, key), customObjective ? DAMAGE_BEAM.perSlot : DAMAGE_BEAM.extraPerSlot).forEach((item) => pool.add(item)));
       (majorItemsBySlot[slotId] || []).forEach((item) => pool.add(item));
       candidates[slotId] = [...pool].map((item) => ({ item, damage: phase === "ehp" ? proxyScore(item, weights.ehp) : proxyScore(item, weights.damage), ehp: proxyScore(item, weights.ehp), mana: proxyScore(item, weights.mana), spd: item.ids.spd || 0 }));
     });
@@ -2579,6 +2822,15 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
             .sort((a, b) => b.entry.spd - a.entry.spd)
             .slice(0, 2)
             .forEach((row) => tried.push(row.entry));
+        // 0.42: to samo dla statów z zakresów poniżej minimum
+        rangeLower.forEach((range) => {
+          if (rangeValOf(state.metrics.rangeVals, range.key) >= range.min) return;
+          rough
+            .filter((row) => itemRangeValue(row.entry.item, range.key) > 0 && !tried.includes(row.entry))
+            .sort((a, b) => itemRangeValue(b.entry.item, range.key) - itemRangeValue(a.entry.item, range.key))
+            .slice(0, 2)
+            .forEach((row) => tried.push(row.entry));
+        });
         tried.forEach((entry) => {
           const items2 = entry ? [...state.items, entry.item] : state.items;
           const picks = entry ? { ...state.picks, [slotId]: entry.item } : state.picks;
@@ -2784,6 +3036,7 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
       if (cycleCfg.ids.length > 0) take("mana", weights.mana, Math.ceil((DAMAGE_BEAM.polishPool * repairing) / 2));
       if (needSustain) topBy(bySlot[slotId], sustainProxy, Math.ceil(DAMAGE_BEAM.polishPool / 2)).forEach((item) => pool.add(item));
       if (spdNear(candidate.metrics)) topBy(bySlot[slotId], (item) => item.ids.spd || 0, Math.ceil(DAMAGE_BEAM.polishPool / 2)).forEach((item) => pool.add(item));
+      statNearKeys(candidate.metrics).forEach((key) => topBy(bySlot[slotId], (item) => itemRangeValue(item, key), Math.ceil(DAMAGE_BEAM.polishPool / 2)).forEach((item) => pool.add(item)));
       (majorItemsBySlot[slotId] || []).forEach((item) => pool.add(item));
       if (candidate.picks[slotId]) pool.add(candidate.picks[slotId]);
       pools[slotId] = [...pool];
@@ -2863,6 +3116,7 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
       if (cycleCfg.ids.length > 0) take((item) => proxyScore(item, weights.mana), Math.ceil(DAMAGE_BEAM.pairPool / 2));
       if (needSustain) take(sustainProxy, Math.ceil(DAMAGE_BEAM.pairPool / 2));
       if (spdNear(start.metrics)) take((item) => item.ids.spd || 0, Math.ceil(DAMAGE_BEAM.pairPool / 2));
+      statNearKeys(start.metrics).forEach((key) => take((item) => itemRangeValue(item, key), Math.ceil(DAMAGE_BEAM.pairPool / 2)));
       (majorItemsBySlot[slotId] || []).forEach((item) => pool.add(item));
       pools[slotId] = [...pool];
     });
@@ -2904,6 +3158,7 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
     sustainOk(metrics) &&
     manaOk(metrics, cycleCfg) &&
     spdOk(metrics) &&
+    statOk(metrics) &&
     atkOk(metrics) &&
     (!budget || metrics.cost <= budget);
   // tylko dolne granice (skill pointy, EHP, dren many, minimum życia i Walk Speed, budżet) - optymistyczna ocena z wolnymi
@@ -2915,6 +3170,7 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
     (!lifeLimits || lifeLimits.min === null || metrics.sustain >= lifeLimits.min - 1e-9) &&
     (cycleCfg.ids.length === 0 || (metrics.cycleOk && (manaFloor === null || metrics.manaNet >= manaFloor - 1e-9))) &&
     (spdFloor === null || metrics.walkSpeed >= spdFloor - 1e-9) &&
+    statLowerOk(metrics) &&
     atkOk(metrics) &&
     (!budget || metrics.cost <= budget);
   const exactRank = (metrics) => (exactOk(metrics) ? 1e15 + metrics.damage : -shortfall(metrics));
@@ -3032,7 +3288,8 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
       (ehpCeil === null || metrics.ehp <= ehpCeil + 1e-9) &&
       manaOk(metrics, cycleCfg) &&
       sustainOk(metrics) &&
-      spdOk(metrics)
+      spdOk(metrics) &&
+      statOk(metrics)
     );
   };
   // względny zysk celu z jednego wolnego punktu (pierwsze 5 punktów najlepszej umiejętności zestawu startowego)
@@ -3090,6 +3347,13 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
         ...(spdLimits && spdLimits.max !== null && start.metrics.walkSpeed > spdLimits.max ? top(scored, (entry) => -entry.metrics.walkSpeed, PAIR_LIST / 2) : []),
         ...(manaCeil !== null && start.metrics.manaNet > manaCeil ? top(scored, (entry) => -entry.metrics.manaNet, PAIR_LIST / 2) : []),
         ...(lifeLimits && lifeLimits.max !== null && start.metrics.sustain > lifeLimits.max ? top(scored, (entry) => -entry.metrics.sustain, PAIR_LIST / 2) : []),
+        // 0.42: zakresy statystyk - z tej strony, gdzie zestawowi brakuje
+        ...rangeList.flatMap((range) => {
+          const now = rangeValOf(start.metrics.rangeVals, range.key);
+          if (range.min !== null && now < range.min + rangeStatScale(range.key) / 2) return top(scored, (entry) => rangeValOf(entry.metrics.rangeVals, range.key), PAIR_LIST / 2);
+          if (range.max !== null && now > range.max) return top(scored, (entry) => -rangeValOf(entry.metrics.rangeVals, range.key), PAIR_LIST / 2);
+          return [];
+        }),
       ];
       const chosen = repairing
         ? [
@@ -3285,7 +3549,7 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
   };
   // zadania w innych wątkach liczą się z ustawieniami tego szukania (pierwsze szukanie bez górnych granic zakresów
   // różni się od parametrów całego zlecenia)
-  const taskOverride = { cycle, lifeRange: lifeLimits, spdRange: spdLimits, minSustain, requireSustain, maxEhp: ehpCeil };
+  const taskOverride = { cycle, lifeRange: lifeLimits, spdRange: spdLimits, statRanges: rangeList, minSustain, requireSustain, maxEhp: ehpCeil };
   // Tryb zadania (wątek pomocniczy): bez wiązki, tylko jedno zadanie od podanego startu.
   if (task) {
     const start = unpackCandidate(task.start);
@@ -3436,7 +3700,7 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
   const spentSp = SKILLS.reduce((sum, skill) => sum + assignedSp[skill], 0);
   const finalMetrics = evaluateGoal(ctx, allItems, best.weapon, totalsSp, goal, cycleCfg);
   // prawdziwe obrażenia do pokazania; finalMetrics.damage = wartość, po której szukanie porównywało (z Walk Speed)
-  const finalDamage = ctx.speedValue > 0 && finalMetrics.rawDamage !== undefined ? finalMetrics.rawDamage : finalMetrics.damage;
+  const finalDamage = (ctx.speedValue > 0 || customObjective) && finalMetrics.rawDamage !== undefined ? finalMetrics.rawDamage : finalMetrics.damage;
   const spValid = spentSp <= ctx.available && exactSp.capOverflow === 0 && SKILLS.every((skill) => assignedSp[skill] <= MAX_ASSIGNED_PER_SKILL);
   const passed =
     spValid &&
@@ -3445,6 +3709,7 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
     manaOk(finalMetrics, cycleCfg) &&
     sustainOk(finalMetrics) &&
     spdOk(finalMetrics) &&
+    statOk(finalMetrics) &&
     atkOk(finalMetrics);
   const warnings = [];
   if (!spValid) warnings.push(`This set needs ${exactSp.total} skill points, but level ${level} gives ${ctx.available}.`);
@@ -3469,6 +3734,19 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
       `Nothing with these settings ${low ? "reaches" : "stays under"} ${bound > 0 ? "+" : bound < 0 ? "−" : ""}${Math.abs(bound)}% walk speed; the closest build has ${finalMetrics.walkSpeed > 0 ? "+" : finalMetrics.walkSpeed < 0 ? "−" : ""}${Math.abs(Math.round(finalMetrics.walkSpeed))}%. ${low ? "Lower the Walk Speed minimum" : "Raise the Walk Speed maximum"} or the other thresholds.`
     );
   }
+  // 0.42: zakresy statystyk, których nic nie spełnia (Custom stats, Total Mana, obrony z "Avoid negative defences")
+  rangeList.forEach((range) => {
+    const now = rangeValOf(finalMetrics.rangeVals, range.key);
+    if (inRange(now, range)) return;
+    const low = range.min !== null && now < range.min - 1e-9;
+    const label = rangeStatLabel(range.key);
+    const unit = (RANGE_STAT_BY_KEY.get(range.key) || {}).unit || "";
+    warnings.push(
+      range.auto
+        ? `Nothing with these settings keeps ${label} at 0 or above; the closest build has ${formatNumber(Math.round(now))}. Turn off "Avoid negative defences" or loosen other filters.`
+        : `Nothing with these settings ${low ? "reaches" : "stays under"} ${formatNumber(Math.round(low ? range.min : range.max))}${unit} ${label}; the closest build has ${formatNumber(Math.round(now))}${unit}. ${low ? "Lower the minimum" : "Raise the maximum"} or loosen other filters.`
+    );
+  });
   if (!atkOk(finalMetrics))
     warnings.push(
       `Nothing with these settings keeps the build's attack speed at ${normalized.attackSpeeds.map((speed) => ATTACK_SPEED_LABELS[speed]).join(" / ")}; the closest build attacks at ${ATTACK_SPEED_LABELS[finalMetrics.attackSpeed] || finalMetrics.attackSpeed} (items change the weapon's speed by tiers). Check more speeds or turn off "Only builds with the checked speeds".`
@@ -3493,6 +3771,7 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
       ["mana", cycleCfg.ids.length > 0 ? rangeMiss(finalMetrics.manaNet, manaLimits, RANGE_SCALE.mana) : 0],
       ["life recovery", rangeMiss(finalMetrics.sustain, lifeLimits, Math.max(RANGE_SCALE.life, lifeFloor))],
       ["walk speed", rangeMiss(finalMetrics.walkSpeed, spdLimits, RANGE_SCALE.spd)],
+      ...rangeList.map((range) => [rangeStatLabel(range.key), rangeMiss(rangeValOf(finalMetrics.rangeVals, range.key), range, rangeStatScale(range.key))]),
     ].filter(([, miss]) => miss > 1e-9);
     if (misses.length >= 2) {
       const worst = misses.reduce((top, entry) => (entry[1] > top[1] ? entry : top));
@@ -3539,6 +3818,10 @@ async function generateDamageBuildOnce({ playerClass, level, archetype = null, t
       lifeRange: lifeLimits,
       spdRange: spdLimits,
       walkSpeed: finalMetrics.walkSpeed,
+      // 0.42: zakresy statystyk tego szukania i wartości buildu (Why this build?, podmiany w Other picks, link)
+      statRanges: rangeList,
+      rangeVals: finalMetrics.rangeVals || {},
+      customObjective,
       attackSpeed: finalMetrics.attackSpeed || null,
       excludeEvents,
       tradeableOnly,
@@ -5999,7 +6282,8 @@ function buildScoreText(build, value) {
 // Ranking kandydatów w trybie "New": liczymy prawdziwe obrażenia celu z tym przedmiotem oraz to, czy build
 // dalej przechodzi filtry EHP i many.
 function damageAlternatives(build, slotId, limit, pool) {
-  const ctx = damageGoalContext(build.playerClass, build.level, build.treeSettings);
+  const statRangesNow = buildStatRanges(build);
+  const ctx = withRangeKeys(damageGoalContext(build.playerClass, build.level, build.treeSettings), statRangesNow);
   const cycle = build.metrics.cycle;
   const minEhp = build.metrics.minEhp || 0;
   const maxEhp = Number(build.metrics.maxEhp) > 0 ? build.metrics.maxEhp : null;
@@ -6034,7 +6318,8 @@ function damageAlternatives(build, slotId, limit, pool) {
         (maxEhp === null || metrics.ehp <= maxEhp + 1e-9) &&
         manaOk(metrics, cycle) &&
         sustainPasses({ ...metrics, requireSustain: build.metrics.requireSustain, minSustain: build.metrics.minSustain, lifeRange: build.metrics.lifeRange }) &&
-        speedPasses({ walkSpeed: metrics.walkSpeed, spdRange: build.metrics.spdRange });
+        speedPasses({ walkSpeed: metrics.walkSpeed, spdRange: build.metrics.spdRange }) &&
+        statRangesOk(metrics.rangeVals, statRangesNow);
       return {
         item,
         score: metrics.damage,
@@ -9380,7 +9665,7 @@ function goalKey(goal) {
 const DEFAULT_MANA_RANGE = { min: 0, max: 1 };
 const DEFAULT_LIFE_RANGE = { min: null, max: null };
 const DEFAULT_SPD_RANGE = { min: 0, max: null }; // 0.40: nie wolniej niż normalnie (wcześniej −20%)
-const DEFAULT_DAMAGE_FORM = { preset: "", goal: null, minEhp: null, maxEhp: null, cycle: "", cps: 3, steal: true, gain: true, noEvents: true, tradeable: false, freeSp: true, poison: false, rolls: "max", drain: DEFAULT_MANA_RANGE, lr: DEFAULT_LIFE_RANGE, spd: DEFAULT_SPD_RANGE, raidMana: 0 };
+const DEFAULT_DAMAGE_FORM = { preset: "", goal: null, minEhp: null, maxEhp: null, cycle: "", cps: 3, steal: true, gain: true, noEvents: true, tradeable: false, freeSp: true, poison: false, rolls: "max", drain: DEFAULT_MANA_RANGE, lr: DEFAULT_LIFE_RANGE, spd: DEFAULT_SPD_RANGE, raidMana: 0, stats: [] };
 // Para { min, max } z formularza; stare wartości liczbowe (0.35-0.36) przez fromNumber.
 function rangePair(value, fromNumber) {
   if (value && typeof value === "object") {
@@ -9401,6 +9686,8 @@ const formSpdPair = (form) => (form.spd === undefined ? { min: null, max: null }
 const formManaRange = (form) => normalizeRange(formManaPair(form));
 const formLifeRange = (form) => normalizeRange(formLifePair(form));
 const formSpdRange = (form) => normalizeRange(formSpdPair(form));
+// 0.42: Custom stats z formularza -> zakresy dla generatora
+const formStatRanges = (form) => normalizeStatRanges(form && form.stats);
 // Dopuszczalny dren (do podpowiedzi o manie z przedmiotów): -min, 999 = bez dolnej granicy.
 function drainOfRange(range) {
   return !range || range.min === null ? 999 : -range.min;
@@ -9411,6 +9698,8 @@ function migrateDamageForm(form) {
   out.drain = form && form.drain !== undefined ? formManaPair(out) : { min: 0, max: null };
   out.lr = form && (form.lr !== undefined || form.sustain) ? formLifePair(out) : { min: null, max: null };
   out.spd = form && form.spd !== undefined ? formSpdPair(out) : { min: null, max: null };
+  // 0.42: Custom stats - tylko wiersze ze znanym statem
+  out.stats = Array.isArray(form && form.stats) ? form.stats.filter((row) => row && RANGE_STAT_BY_KEY.has(row.key)).map((row) => ({ key: row.key, min: row.min ?? null, max: row.max ?? null, optimize: Boolean(row.optimize) })) : [];
   delete out.sustain;
   return out;
 }
@@ -9738,6 +10027,7 @@ function DamageForm({
             title="Walk Speed of the whole build (items, sets, ability tree) - the number in the summary. The default minimum (0%) keeps the search from builds slower than normal; Any = no condition."
           />
           <SpeedValueControl id="new-speed-value" options={options} onChange={onOptions} />
+          <CustomStatsControl id="new-stats" value={form.stats || []} onChange={(stats) => set({ stats })} build={shownBuild} />
         </fieldset>
       )}
 
@@ -10624,7 +10914,7 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
               [
                 ["No event items", "Skip limited-time festival items", form.noEvents !== false, () => set({ noEvents: !(form.noEvents !== false) })],
                 ["Tradeable only", "Only items you can buy on the Trade Market", Boolean(form.tradeable), () => set({ tradeable: !form.tradeable })],
-                ["Avoid negative defences", "No item with a negative elemental defence", normalized.avoidNegativeDefences, () => onOptions({ ...options, avoidNegativeDefences: !normalized.avoidNegativeDefences })],
+                ["Avoid negative defences", "No elemental defence of the whole build below 0", normalized.avoidNegativeDefences, () => onOptions({ ...options, avoidNegativeDefences: !normalized.avoidNegativeDefences })],
               ],
             ],
             [
@@ -10658,6 +10948,8 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
           <SectionBar wide />
           <RangeControl id="wiz-spd" kind="spd" level={level} heading value={formSpdPair(form)} onChange={(range) => set({ spd: range })} hint="Walk Speed of the whole build (items, sets, ability tree). The default minimum (0%) keeps the search from builds slower than normal; Any = no condition." />
           <SpeedValueControl id="wiz-speed-value" options={options} onChange={onOptions} />
+          <SectionBar wide />
+          <CustomStatsControl id="wiz-stats" heading value={form.stats || []} onChange={(stats) => set({ stats })} />
           <SectionBar wide />
           <div className="flex flex-col gap-2">
             <h3 className={SECTION_HEAD}>
@@ -10970,6 +11262,18 @@ function DamageSummary({ build }) {
           metrics.spdRange ? speedPasses(metrics) : null,
           `Walk Speed of the build${metrics.spdRange ? ` - the range asks for ${rangeValueText(metrics.spdRange, rangeUi("spd", build.level))}` : " (no walk speed condition)"}`
         )}
+      {(metrics.statRanges || [])
+        .filter((range) => !range.auto && metrics.rangeVals && Number.isFinite(metrics.rangeVals[range.key]))
+        .map((range) => (
+          <React.Fragment key={`stat-${range.key}`}>
+            {chip(
+              rangeStatLabel(range.key),
+              `${formatNumber(Math.round(metrics.rangeVals[range.key]))}${(RANGE_STAT_BY_KEY.get(range.key) || {}).unit || ""}`,
+              normalizeRange(range) ? statRangesOk(metrics.rangeVals, [range]) : null,
+              `Custom stat: ${statRangeText(range)}`
+            )}
+          </React.Fragment>
+        ))}
       {chip(
         "Skill points",
         build.skillPoints.free && SKILLS.some((skill) => build.skillPoints.free[skill] > 0)
@@ -11050,7 +11354,7 @@ function ItemFilterChecks({ options, onChange }) {
   const live = hasLiveData();
   return (
     <>
-      <CheckRow id="new-no-negdef" checked={normalized.avoidNegativeDefences} onChange={() => onChange({ ...options, avoidNegativeDefences: !normalized.avoidNegativeDefences })} label="Avoid negative defences" title="Skips armour, accessories and weapons with a negative elemental defence. Pinned items stay." />
+      <CheckRow id="new-no-negdef" checked={normalized.avoidNegativeDefences} onChange={() => onChange({ ...options, avoidNegativeDefences: !normalized.avoidNegativeDefences })} label="Avoid negative defences" title="Every elemental defence of the whole build stays at 0 or above. Items with a negative defence are still allowed when the rest of the set covers it (e.g. −100 Thunder with +500 Thunder elsewhere)." />
       <CheckRow
         id="new-live"
         disabled={!live}
@@ -11363,7 +11667,7 @@ function CustomStats({ options, onChange, archetype, weaponType, weaponCounts, l
 }
 
 // DRZEWKO UMIEJĘTNOŚCI
-// Dane: drzewka z gry w wersji 2.2.4.0 (atree.json Wynnbuildera: pozycje, koszty, wymagania), porównane z wiki
+// Dane: drzewka z gry w wersji 2.2.5.0 (atree.json Wynnbuildera: pozycje, koszty, wymagania), porównane z wiki
 // (wynncraft.wiki.gg). Zasady odblokowywania jak w grze/Wynnbuilderze: połączenie z odblokowanym rodzicem, wymagane
 // umiejętności, blokady, minimalna liczba węzłów archetypu i limit punktów (AP) zależny od poziomu.
 const TREE_NODE_COLORS = {
@@ -11721,7 +12025,7 @@ function BuildInfoPanel({ playerClass, archetype, build, stats, treeSettings, on
         <p className="max-w-4xl text-sm text-zinc-300">{combo.summary}</p>
         <p className="text-xs text-zinc-500">
           Archetype focus: {ARCHETYPES[archetype].focus}. Spell names, costs and damage below come from your ability tree
-          {selected.size === 0 ? " (no nodes picked yet — base spells)" : ` (${selected.size} nodes picked)`}; the ability names are from the game's tree data (2.2.4.0).
+          {selected.size === 0 ? " (no nodes picked yet — base spells)" : ` (${selected.size} nodes picked)`}; the ability names are from the game's tree data (2.2.5.0).
         </p>
       </div>
 
@@ -11938,6 +12242,107 @@ function SpeedValueControl({ id, options, onChange, heading = false }) {
         ))}
       </select>
       <p className="text-xs text-zinc-500">{value > 0 ? `${choice.hint.charAt(0).toUpperCase()}${choice.hint.slice(1)}, counted up to +${SPEED_VALUE_CAP}%.` : "Walk speed only through the range above."}</p>
+    </div>
+  );
+}
+
+// 0.42: pole "Custom stats" (feedback z Discorda): dowolne staty buildu z minimum / maksimum i opcją "optimize".
+// value: [{ key, min, max, optimize }]; puste pole liczby = bez granicy z tej strony. shown: wartości pokazanego
+// buildu ({ key: liczba }) - podpowiedź "now: …" przy każdym wierszu.
+function CustomStatsControl({ id, value, onChange, allowOptimize = true, build = null, heading = false }) {
+  const rows = Array.isArray(value) ? value : [];
+  const keyList = rows.map((row) => row.key).join("|");
+  const shown = useMemo(() => {
+    if (!build || !build.slots || rows.length === 0) return null;
+    try {
+      const stats = computeBuildStats(build, build.treeSettings || null).stats;
+      return Object.fromEntries(rows.map((row) => [row.key, rangeStatValue(stats, row.key)]));
+    } catch (error) {
+      return null;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [build, keyList]);
+  const used = new Set(rows.map((row) => row.key));
+  const update = (index, patch) => onChange(rows.map((row, i) => (i === index ? { ...row, ...patch } : row)));
+  const remove = (index) => onChange(rows.filter((row, i) => i !== index));
+  const numberOrNull = (text) => (text === "" || text === "-" || !Number.isFinite(Number(text)) ? null : Number(text));
+  const optimizing = rows.some((row) => row.optimize);
+  return (
+    <div className="flex flex-col gap-1.5">
+      <label htmlFor={`${id}-add`} className={heading ? SECTION_HEAD : "text-xs text-zinc-300"}>
+        Custom stats
+      </label>
+      {rows.map((row, index) => {
+        const entry = RANGE_STAT_BY_KEY.get(row.key);
+        if (!entry) return null;
+        const now = shown && Number.isFinite(shown[row.key]) ? shown[row.key] : null;
+        return (
+          <div key={row.key} className="flex flex-col gap-1 rounded border border-zinc-700/70 p-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-bold text-zinc-100">{entry.label}</span>
+              <button type="button" className="text-xs text-zinc-400 hover:text-zinc-100" onClick={() => remove(index)} aria-label={`Remove ${entry.label}`} title="Remove this stat">
+                ✕
+              </button>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <input
+                type="number"
+                inputMode="decimal"
+                className="mc-input w-full min-w-0"
+                placeholder="min: any"
+                aria-label={`${entry.label} minimum`}
+                value={row.min === null || row.min === undefined ? "" : row.min}
+                onChange={(event) => update(index, { min: numberOrNull(event.target.value) })}
+              />
+              <span className="text-xs text-zinc-500">to</span>
+              <input
+                type="number"
+                inputMode="decimal"
+                className="mc-input w-full min-w-0"
+                placeholder="max: any"
+                aria-label={`${entry.label} maximum`}
+                value={row.max === null || row.max === undefined ? "" : row.max}
+                onChange={(event) => update(index, { max: numberOrNull(event.target.value) })}
+              />
+              {entry.unit ? <span className="text-xs text-zinc-500">{entry.unit.trim()}</span> : null}
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              {allowOptimize ? (
+                <label className="flex items-center gap-1.5 text-xs text-zinc-300" title="Pick the build with the most of this stat (inside the min/max) instead of the most damage. Damage only breaks ties.">
+                  <input type="checkbox" checked={Boolean(row.optimize)} onChange={() => update(index, { optimize: !row.optimize })} />
+                  Optimize{entry.invert ? " (lower is better)" : ""}
+                </label>
+              ) : (
+                <span />
+              )}
+              {now !== null && <span className="text-xs text-zinc-500">now: {formatNumber(Math.round(now))}{entry.unit}</span>}
+            </div>
+          </div>
+        );
+      })}
+      <select
+        id={`${id}-add`}
+        value=""
+        onChange={(event) => {
+          if (event.target.value) onChange([...rows, { key: event.target.value, min: null, max: null, optimize: false }]);
+        }}
+        className="mc-input w-full"
+        title="Add any stat of the whole build (the number in the summary) with a minimum, a maximum, or both."
+      >
+        <option value="">+ Add a stat…</option>
+        {RANGE_STAT_CATALOG.filter((entry) => !used.has(entry.key)).map((entry) => (
+          <option key={entry.key} value={entry.key}>
+            {entry.label}
+          </option>
+        ))}
+      </select>
+      <p className="text-xs text-zinc-500">
+        {rows.length === 0
+          ? "Any stat of the whole build with a min and/or max, e.g. XP Bonus for a leveling set or Total Mana."
+          : optimizing
+            ? "Optimize on: the build with the most of the checked stats wins (damage only breaks ties)."
+            : "Only builds inside these ranges; empty field = no limit on that side."}
+      </p>
     </div>
   );
 }
@@ -12304,7 +12709,7 @@ const SITE_SOURCES = [
   [
     "Wynnbuilder",
     "https://wynnbuilder.github.io/",
-    "item and ability tree data, damage formulas, the 16×16 item sprites and ability tree textures (GPL-3.0); tomes and aspects data (2.2.4.0), major ID descriptions and effects (majid.json), powder and damage calculations, the build link format for import and export",
+    "item and ability tree data, damage formulas, the 16×16 item sprites and ability tree textures (GPL-3.0); tomes and aspects data (2.2.5.0), major ID descriptions and effects (majid.json), powder and damage calculations, the build link format for import and export",
   ],
   ["Build Solver (rawfish69)", "https://rawfish69.github.io/build-solver/", "the model for the Build Solver tab"],
   ["Wynncraft Wiki", "https://wynncraft.wiki.gg/", "weapon DPS, identification rolls, ability trees, powders, class portraits and festival item lists; skill points, tomes, aspects, raid and dungeon levels, version history"],
@@ -12634,7 +13039,7 @@ function WelcomeDialogBody() {
             </a>
             .
           </p>
-          <p>Numbers use game version 2.2.4 data. Results are suggestions, not guarantees - always check a build before you buy items for it.</p>
+          <p>Numbers use game version 2.2.5 data. Results are suggestions, not guarantees - always check a build before you buy items for it.</p>
           <div className="flex flex-col gap-2">
             <h3 className="wbr-welcome-sub">Sources used</h3>
             <ul className="flex flex-col gap-2 text-sm">
@@ -12953,14 +13358,14 @@ function buildItemPool(build, slotId) {
     if ((options.excluded || []).includes(item.name) || (options.excludedTiers || []).includes(item.tier)) return false;
     if (build.metrics.excludeEvents && eventOf(item)) return false;
     if (build.metrics.tradeableOnly && isUntradable(item)) return false;
-    if (options.avoidNegativeDefences && hasNegativeDefence(item)) return false;
     if (slot.type === "weapon" && options.attackSpeeds.length > 0 && !options.attackSpeeds.includes(item.atkSpd)) return false;
     return true;
   });
 }
 
 function explainBuild(build) {
-  const ctx = damageGoalContext(build.playerClass, build.level, build.treeSettings);
+  const statRangesNow = buildStatRanges(build);
+  const ctx = withRangeKeys(damageGoalContext(build.playerClass, build.level, build.treeSettings), statRangesNow);
   const cycle = build.metrics.cycle;
   const minEhp = build.metrics.minEhp || 0;
   const free = build.skillPoints.free || null;
@@ -12981,6 +13386,7 @@ function explainBuild(build) {
     if (!manaOk(metrics, cycle)) fails.push(`mana ${metrics.manaNet.toFixed(1)}/s for the cycle`);
     if (!sustainPasses({ ...metrics, requireSustain: build.metrics.requireSustain, minSustain: build.metrics.minSustain, lifeRange: build.metrics.lifeRange })) fails.push(`life recovery ${metrics.sustain.toFixed(1)} HP/s`);
     if (!speedPasses({ walkSpeed: metrics.walkSpeed, spdRange: build.metrics.spdRange })) fails.push(`walk speed ${Math.round(metrics.walkSpeed)}%`);
+    statRangeFails(metrics.rangeVals, statRangesNow).forEach((text) => fails.push(text));
     return { metrics, fails };
   };
   const base = measure(picks);
@@ -13697,6 +14103,8 @@ function WhyBuildDialogBody({ build, onClose }) {
               <WhyRow label="Mana: spell cycle" value={m.cycle.ids.length ? `${cycleText(m.cycle.ids)} at ${m.cycle.cps} clicks/s${m.cycle.steal ? ", Mana Steal from main attacks (M)" : ""}${m.cycle.gain ? ", ability mana counted" : ""}, balance ${rangeValueText(manaRangeOf(m.cycle), rangeUi("mana", build.level))}` : "no cycle"} />
               <WhyRow label="Life recovery" value={lifeRangeOf(m) ? rangeValueText(lifeRangeOf(m), rangeUi("life", build.level)) : m.requireSustain ? "more than 0 HP/s" : "any"} />
               <WhyRow label="Walk Speed" value={m.spdRange ? rangeValueText(m.spdRange, rangeUi("spd", build.level)) : "any"} />
+              {(m.statRanges || []).some((range) => !range.auto) && <WhyRow label="Custom stats" value={m.statRanges.filter((range) => !range.auto).map(statRangeText).join(", ")} />}
+              {(m.statRanges || []).some((range) => range.auto) && <WhyRow label="Defences" value="every elemental defence of the build ≥ 0" />}
               <WhyRow
                 label="Items"
                 value={[m.excludeEvents ? "no limited-time event items" : null, m.tradeableOnly ? "tradeable only" : null, options.attackSpeeds.length ? `weapon speed ${options.attackSpeeds.map((speed) => ATTACK_SPEED_LABELS[speed]).join("/")}` : null, options.avoidNegativeDefences ? "no negative defences" : null, (options.excludedTiers || []).length ? `no ${options.excludedTiers.join("/")}` : null].filter(Boolean).join(" · ") || "every item up to your level"}
@@ -16802,6 +17210,8 @@ function shareSettingsData({ form, options, rank }) {
     tp: f.treePreset || null,
     sv: o.speedValue,
     ms: o.majorSliders,
+    // 0.42: Custom stats [key, min, max, optimize]
+    cs: (f.stats || []).map((row) => [row.key, row.min ?? null, row.max ?? null, row.optimize ? 1 : 0]),
   };
 }
 let shareDefaultsCache = null;
@@ -16846,6 +17256,7 @@ function decodeShareSettings(code) {
     drain: pairToRange(data.m),
     lr: pairToRange(data.l),
     spd: pairToRange(data.w),
+    stats: Array.isArray(data.cs) ? data.cs.filter((row) => Array.isArray(row)).map((row) => ({ key: row[0], min: Number.isFinite(row[1]) ? row[1] : null, max: Number.isFinite(row[2]) ? row[2] : null, optimize: row[3] === 1 })) : [],
     raidMana: Math.max(0, Math.min(30, Number(data.a) || 0)),
     rolls: flag(0, false) ? "avg" : "max",
     poison: flag(1, false),
@@ -17004,6 +17415,8 @@ function optimizerSpec(ws, params, extra = {}) {
     requireSustain: params.life === undefined && Boolean(params.sustain),
     lifeRange: params.life !== undefined ? normalizeRange(params.life) : null,
     spdRange: params.spd !== undefined ? normalizeRange(params.spd) : null,
+    // 0.42: Custom stats (tylko zakresy; "optimize" działa w generatorze) + "Avoid negative defences" z sumy obron buildu
+    statRanges: combineStatRanges((Array.isArray(params.stats) ? params.stats : []).map((range) => ({ ...range, optimize: false })), Boolean(params.negDef)),
     filters: {
       avoidNegativeDefences: Boolean(params.negDef),
       attackSpeeds: params.speeds || [],
@@ -17054,7 +17467,6 @@ function optCandidates(spec, slotId) {
     if (slot.type === "weapon" ? item.type !== weaponType : item.type !== slot.type) return false;
     if (spec.filters.noEvents && eventOf(item)) return false;
     if (spec.filters.tradeableOnly && isUntradable(item)) return false;
-    if (spec.filters.avoidNegativeDefences && hasNegativeDefence(item)) return false;
     if (allowed && !allowed.has(item.name)) return false;
     if (slot.type === "weapon" && spec.filters.attackSpeeds.length > 0 && !spec.filters.attackSpeeds.includes(item.atkSpd)) return false;
     // 0.40: pełne przeszukanie bez przedmiotów z major ID (ich efektów nie widzą granice); każdy z nich dostaje potem
@@ -17106,7 +17518,7 @@ function optEvaluate(opt, items, weapon, bar = null, exact = false) {
   if (sp.total > available) return null;
   if (SKILLS.some((skill) => (sp.assigned[skill] || 0) > MAX_ASSIGNED_PER_SKILL)) return null;
   if (activeSets(items).some((set) => set.illegal)) return null;
-  const ok = (metrics) => rangesOk(metrics, opt.cycleActive ? cycle : null, spec.lifeRange, spec.spdRange, spec.requireSustain);
+  const ok = (metrics) => rangesOk(metrics, opt.cycleActive ? cycle : null, spec.lifeRange, spec.spdRange, spec.requireSustain, spec.statRanges);
   let metrics = evaluateGoal(opt.ctx, items, weapon, sp.totals, spec.goal, cycle);
   delete metrics.stats;
   let extra = Object.fromEntries(SKILLS.map((skill) => [skill, 0]));
@@ -17118,7 +17530,7 @@ function optEvaluate(opt, items, weapon, bar = null, exact = false) {
       const top = evaluateGoal(opt.ctx, items, weapon, optimistic, spec.goal, cycle);
       if (top.damage <= bar + OPT_GAIN_EPS) return { below: true };
     }
-    const rank = (m) => (ok(m) ? 1e15 + m.damage : -rangesMiss(m, opt.cycleActive ? cycle : null, spec.lifeRange, spec.spdRange, spec.requireSustain));
+    const rank = (m) => (ok(m) ? 1e15 + m.damage : -rangesMiss(m, opt.cycleActive ? cycle : null, spec.lifeRange, spec.spdRange, spec.requireSustain, spec.statRanges));
     const allocated = allocateFreeSkillPoints(opt.ctx, items, weapon, sp, spec.goal, cycle, rank);
     metrics = allocated.metrics;
     delete metrics.stats;
@@ -17167,8 +17579,15 @@ function optRanges(weapon) {
 }
 // Wektor porównania przedmiotu: każda używana statystyka w kierunku "więcej = lepiej", bonusy SP, minus wymagania,
 // HP, zakresy obrażeń broni. a dominuje b, gdy a >= b na każdej pozycji (i żadne nie jest w secie / z major ID).
-function optVector(item, keys, hpMatters, twoSidedSkills = null) {
+function optVector(item, keys, hpMatters, twoSidedSkills = null, statRanges = null) {
   const values = [];
+  // 0.42: staty z zakresów: z samym minimum więcej = lepiej; z maksimum - tylko równe wartości (w obie strony)
+  (statRanges || []).forEach((range) => {
+    itemRangeParts(item, range.key).forEach((part) => {
+      values.push(part);
+      if (range.max !== null) values.push(-part);
+    });
+  });
   keys.forEach(([key, dir, twoSided]) => {
     values.push((item.ids[key] || 0) * dir);
     if (twoSided) values.push(-(item.ids[key] || 0) * dir);
@@ -17192,9 +17611,9 @@ function optDominates(a, b, va, vb) {
 
 // Odrzucanie zdominowanych w puli slotu. Pierścienie: przedmiot wypada dopiero, gdy ma dwóch "lepszych" (albo jeden
 // lepszy, który można nosić podwójnie), bo para potrzebuje dwóch pierścieni.
-function optPrune(pool, dirs, hpMatters, rings = false, twoSidedSkills = null) {
+function optPrune(pool, dirs, hpMatters, rings = false, twoSidedSkills = null, statRanges = null) {
   const keys = [...dirs].filter(([key, entry]) => entry.dir && !SKILLS.includes(key)).map(([key, entry]) => [key, entry.dir, Boolean(entry.twoSided)]);
-  const vectors = pool.map((item) => optVector(item, keys, hpMatters, twoSidedSkills));
+  const vectors = pool.map((item) => optVector(item, keys, hpMatters, twoSidedSkills, statRanges));
   const keep = [];
   pool.forEach((item, index) => {
     let dominators = 0;
@@ -17267,7 +17686,7 @@ function optContext(spec, treeIds, emptySlots, fixedPicks = {}) {
   if (OPT_CONTEXT_CACHE.has(key)) return OPT_CONTEXT_CACHE.get(key);
   const cycle = normalizeCycle(spec.cycle);
   const treeSettings = optTreeSettings(spec, treeIds);
-  const ctx = damageGoalContext(spec.playerClass, spec.level, treeSettings);
+  const ctx = withRangeKeys(damageGoalContext(spec.playerClass, spec.level, treeSettings), spec.statRanges);
   const fixedItems = [];
   spec.fixed.forEach((entry) => {
     if (emptySlots.includes(entry.slotId)) return;
@@ -17320,8 +17739,15 @@ function optContext(spec, treeIds, emptySlots, fixedPicks = {}) {
     rawSizes[slotId] = rawPools[slotId].length;
     const rings = slotId === "ring1" || slotId === "ring2";
     // górna granica many: więcej INT (tańsze czary) może ją przekroczyć, więc bonus INT porównujemy w obie strony
-    const twoSidedSkills = opt.cycleActive && cycle.mana && cycle.mana.max !== null ? new Set(["int"]) : null;
-    const pruned = optPrune(rawPools[slotId], dirs, hpMatters, rings, twoSidedSkills);
+    const twoSidedSkills = new Set();
+    if (opt.cycleActive && cycle.mana && cycle.mana.max !== null) twoSidedSkills.add("int");
+    // 0.42: górna granica statu z zakresów, który jest skill pointem (albo Total Mana przez Intelligence)
+    (spec.statRanges || []).forEach((range) => {
+      if (range.max === null) return;
+      if (SKILLS.includes(range.key)) twoSidedSkills.add(range.key);
+      if (range.key === "totalMana") twoSidedSkills.add("int");
+    });
+    const pruned = optPrune(rawPools[slotId], dirs, hpMatters, rings, twoSidedSkills.size > 0 ? twoSidedSkills : null, spec.statRanges);
     pools[slotId] = pruned.map((item) => ({ item, proxy: slotId === "weapon" ? 0 : proxy(item) })).sort((a, b) => b.proxy - a.proxy).map((entry) => entry.item);
   });
   if (pools.weapon) {
@@ -18006,7 +18432,7 @@ function optFillTree(spec, items, weapon, skillTotals, seed = spec.treeIds) {
   const valueOf = (ids) => {
     const key = [...ids].sort((a, b) => a - b).join(",");
     if (!cache.has(key)) {
-      const ctx = damageGoalContext(spec.playerClass, spec.level, optTreeSettings(spec, ids));
+      const ctx = withRangeKeys(damageGoalContext(spec.playerClass, spec.level, optTreeSettings(spec, ids)), spec.statRanges);
       cache.set(key, evaluateGoal(ctx, items, weapon, skillTotals, spec.goal, cycle).damage);
     }
     return cache.get(key);
@@ -18115,6 +18541,7 @@ async function optTaskQuick({ spec, treeIds, emptySlots }) {
       requireSustain: spec.requireSustain,
       lifeRange: spec.lifeRange || null,
       spdRange: spec.spdRange || null,
+      statRanges: (spec.statRanges || []).filter((range) => !range.auto),
       options: { ...DEFAULT_OPTIONS, locked, attackSpeeds: spec.filters.attackSpeeds, avoidNegativeDefences: spec.filters.avoidNegativeDefences },
       items: spec.filters.allowedNames ? pool.filter((item) => own.has(item.name) || spec.filters.allowedNames.includes(item.name)) : pool,
       powders,
@@ -18201,13 +18628,13 @@ function optTaskFinish({ spec, treeIds, emptySlots, picks, searchMode = "full", 
     const tomes = tomesOf(state.tomes);
     const all = [...state.items, ...tomes];
     const sp = optWithPlayerFree(computeSkillPoints(all, true), state.free || spec.playerFree);
-    const ctx = damageGoalContext(spec.playerClass, level, optTreeSettings(spec, state.tree, state.aspects));
+    const ctx = withRangeKeys(damageGoalContext(spec.playerClass, level, optTreeSettings(spec, state.tree, state.aspects)), spec.statRanges);
     if (!state.weapon) return { metrics: null, sp, extra: null, ctx };
     let metrics = evaluateGoal(ctx, all, state.weapon, sp.totals, spec.goal, cycle);
     let extra = null;
     if (allocate && ctx.available - sp.total > 0 && sp.capOverflow === 0) {
-      const ok = (m) => rangesOk(m, cycle, spec.lifeRange, spec.spdRange, spec.requireSustain);
-      const rank = (m) => (ok(m) ? 1e15 + m.damage : -rangesMiss(m, cycle, spec.lifeRange, spec.spdRange, spec.requireSustain));
+      const ok = (m) => rangesOk(m, cycle, spec.lifeRange, spec.spdRange, spec.requireSustain, spec.statRanges);
+      const rank = (m) => (ok(m) ? 1e15 + m.damage : -rangesMiss(m, cycle, spec.lifeRange, spec.spdRange, spec.requireSustain, spec.statRanges));
       const allocated = allocateFreeSkillPoints(ctx, all, state.weapon, sp, spec.goal, cycle, rank);
       metrics = allocated.metrics;
       extra = allocated.extra;
@@ -18371,7 +18798,7 @@ function optTaskFinish({ spec, treeIds, emptySlots, picks, searchMode = "full", 
   // --- rekomendacje zamian przedmiotów gracza (reszta buildu bez zmian) ---
   if (spec.scope.swaps && state.weapon) {
     const tomes = tomesOf(state.tomes);
-    const ctx = damageGoalContext(spec.playerClass, level, optTreeSettings(spec, state.tree, state.aspects));
+    const ctx = withRangeKeys(damageGoalContext(spec.playerClass, level, optTreeSettings(spec, state.tree, state.aspects)), spec.statRanges);
     const opt = { spec, cycle, ctx, cycleActive: cycle.ids.length > 0 };
     const current = optEvaluate(opt, [...state.items, ...tomes], state.weapon, null, true);
     const currentValue = current && current.value !== undefined ? current.value : null;
@@ -19497,6 +19924,8 @@ const DEFAULT_OPT_PARAMS = {
   mana: DEFAULT_MANA_RANGE,
   life: DEFAULT_LIFE_RANGE,
   spd: DEFAULT_SPD_RANGE,
+  // 0.42: Custom stats (tylko min/max) - [{ key, min, max }]
+  stats: [],
   negDef: false,
   listed: false,
   speeds: [],
@@ -19521,6 +19950,7 @@ function migrateOptParams(raw) {
   if (raw.mana === undefined) out.mana = rangeFromDrain(raw.drain);
   if (raw.life === undefined) out.life = raw.sustain ? { min: 1, max: null } : { min: null, max: null };
   if (raw.spd === undefined) out.spd = { min: null, max: null };
+  out.stats = Array.isArray(raw.stats) ? raw.stats.filter((row) => row && RANGE_STAT_BY_KEY.has(row.key)).map((row) => ({ key: row.key, min: row.min ?? null, max: row.max ?? null, optimize: false })) : [];
   delete out.drain;
   delete out.sustain;
   return out;
@@ -19785,6 +20215,7 @@ function OptimizeDialogBody({ ws, gaps, params, onParams, onStart, onClose, run,
               />
               <RangeControl id="opt-life" kind="life" level={ws.level || 120} value={params.life || { min: null, max: null }} onChange={(range) => set({ life: range })} hint={lifeRangeHint(params.life, 0)} compact />
               <RangeControl id="opt-spd" kind="spd" level={ws.level || 120} value={params.spd || { min: null, max: null }} onChange={(range) => set({ spd: range })} hint="Walk Speed of the whole build; the default −20% minimum keeps the search from slow builds." compact />
+              <CustomStatsControl id="opt-stats" value={params.stats || []} onChange={(stats) => set({ stats })} allowOptimize={false} />
             </div>
             {weaponEmpty && (
               <div className="flex flex-col gap-2">
@@ -21938,6 +22369,7 @@ export default function BuildRecommender() {
           (generated.metrics.rollPercent || 100) !== (damageForm.rolls === "avg" ? 50 : 100) ||
           !sameRange(lifeRangeOf(generated.metrics), formLifeRange(damageForm)) ||
           !sameRange(generated.metrics.spdRange || null, formSpdRange(damageForm)) ||
+          JSON.stringify((generated.metrics.statRanges || []).filter((range) => !range.auto)) !== JSON.stringify(combineStatRanges(formStatRanges(damageForm), false)) ||
           Boolean(generated.metrics.excludeEvents) !== (damageForm.noEvents !== false) ||
           Boolean(generated.metrics.tradeableOnly) !== Boolean(damageForm.tradeable) ||
           (generated.metrics.spendFreeSkillPoints !== false) !== (damageForm.freeSp !== false) ||
@@ -22004,6 +22436,7 @@ export default function BuildRecommender() {
       rollPercent: damageForm.rolls === "avg" ? 50 : 100,
       lifeRange: formLifeRange(damageForm),
       spdRange: formSpdRange(damageForm),
+      statRanges: formStatRanges(damageForm),
       maxEhp: damageMaxEhp,
       excludeEvents: damageForm.noEvents !== false,
       tradeableOnly: Boolean(damageForm.tradeable),
@@ -22931,7 +23364,7 @@ export default function BuildRecommender() {
                   <p className="text-sm text-zinc-400">
                     {build.mode === "damage" ? (
                       <>
-                        Damage first · <span className="tabular-nums font-bold text-amber-400">{formatNumber(Math.round(build.metrics.damage))}</span> {build.goal === DAMAGE_GOAL_MAIN ? "main attack DPS" : isCycleGoal(build.goal) ? `${build.goalName} DPS` : Array.isArray(build.goal) ? `${build.goalName} (sum of one cast each)` : `per ${build.goalName} hit`} · from{" "}
+                        {build.metrics.customObjective ? `${(build.metrics.statRanges || []).filter((range) => range.optimize).map((range) => rangeStatLabel(range.key)).join(" + ")} first (Custom stats) · damage` : "Damage first"} · <span className="tabular-nums font-bold text-amber-400">{formatNumber(Math.round(build.metrics.damage))}</span> {build.goal === DAMAGE_GOAL_MAIN ? "main attack DPS" : isCycleGoal(build.goal) ? `${build.goalName} DPS` : Array.isArray(build.goal) ? `${build.goalName} (sum of one cast each)` : `per ${build.goalName} hit`} · from{" "}
                       </>
                     ) : (
                       <>
@@ -23159,6 +23592,16 @@ export default function BuildRecommender() {
 // interfejs - testy nie mają własnej kopii wzorów. Dodatkowy eksport obok komponentu wyłącza tylko Fast Refresh
 // tego pliku w `npm run dev` (po zapisie strona przeładowuje się w całości).
 export const __engine = {
+  // 0.42: zakresy statystyk (Custom stats, Total Mana, obrony z "Avoid negative defences")
+  RANGE_STAT_CATALOG,
+  DERIVED_RANGE_STATS,
+  normalizeStatRanges,
+  combineStatRanges,
+  rangeStatValue,
+  itemRangeValue,
+  statRangesOk,
+  buildStatRanges,
+  statRangeText,
   majorEntriesFor,
   majorIdStatus,
   majorIdName,

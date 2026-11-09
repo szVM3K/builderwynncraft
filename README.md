@@ -107,6 +107,7 @@ that version, used by "Open in Wynnbuilder").
 Ability-tree node effects (bonuses, toggles, sliders, spells) for a new data version:
 
 ```bash
+npm run update-trees -- 2.2.5.0         # tree layout (nodes, positions, costs, requirements) for a new version
 npm run update-tree-effects             # atree.json for the version recorded in src/ability-trees.json
 npm run update-tree-effects -- 2.2.4.0  # a specific version
 npm run update-guide-trees               # re-check the guide builds' trees against the new tree data
@@ -396,6 +397,64 @@ behaviour). All 30 default builds pass, with no warnings.
   damage-first search; what is left over is left over because it was free.
 - **Time.** When the *Any* build doesn't fit, the default run takes a median 1.2-1.3× as long (0.6-4.7× on a
   2-core machine running both shards at once).
+
+### Custom stats, whole-build defences, game data 2.2.5 (0.42.0)
+
+Three requests from the Discord feedback, built as **one** mechanism - a range on any stat of the *whole build*,
+like the Walk Speed slider - plus the game data update.
+
+**Avoid negative defences = the build's totals.** The box used to throw away every item with a negative elemental
+defence, which removed many good items. Now it means: every elemental defence of the whole build (base + |base| × %,
+the same number as the defence table in the summary) stays at 0 or above. An item with −100 Thunder is fine when the
+rest of the set gives +500 Thunder. Same in the Optimizer, in Other picks and in "Why this build?".
+
+**Total Mana.** `100 + Max Mana + Intelligence bonus` (the "➜ Total Mana" line of the Damage panel) is a stat you can
+put a minimum on. Before, nothing protected it: an Arcanist without a spell cycle got a build with 78 mana.
+
+**Custom stats.** In *Must have* (and in the wizard's Extras step) **+ Add a stat…** adds any stat of the build -
+XP Bonus, Loot Bonus, Jump Height, Total Mana, Health, total elemental defences, skill points or any identification
+from the item card - with an optional minimum and maximum (empty field = no limit on that side). **Optimize** makes
+the search pick the build with the most of the checked stats instead of the most damage (damage only breaks ties):
+an XP set for levelling is *XP Bonus · Optimize*. The result shows each stat as a ✓/✗ chip, the header says
+"XP Bonus first (Custom stats)", and the stats travel in the share link (`cs`). The Optimizer has the same field
+with min/max only (its full search is exact for damage; see below).
+
+How it works (`RANGE_STAT_CATALOG`, `combineStatRanges`, `rangeStatValue` in `BuildRecommender.jsx`):
+- every searched set gets `metrics.rangeVals` for the stats in the ranges (computed in `evaluateGoal`, from the same
+  stats as the summary);
+- lower limits are hard filters from the first search on, upper limits are soft until the exact stage - exactly like
+  Walk Speed, mana and life (the search first runs without upper limits and only searches again when its result
+  breaks one);
+- candidate pools (beam, polishing, pairs) get the items that raise a stat whose minimum isn't reached yet;
+- "optimize" turns the search value into the weighted stat sum (`statObjective`), the real damage stays in
+  `rawDamage` and is what the page shows;
+- the Optimizer's full search keeps the stats in its dominance check (`optVector`), so dropping "worse in every
+  way" items stays exact - `tests/stat-ranges.test.js` compares it with every candidate of the raw pool;
+- a stat whose value wasn't computed counts as **not** in range (a missing value used to read as 0, so
+  "Walk Speed ≤ 0" passed at +28% - the test caught it).
+
+Adding a new derived stat: one entry in `DERIVED_RANGE_STATS` (`label`, `scale`, `value(stats)`, `item(item)`
+for candidate pools, `probes` for the linear item score) and, for the Optimizer, its parts in `itemRangeParts`.
+
+**Game data 2.2.5.0.** Items (5,414 → 5,468), ability trees, tomes and aspects, major IDs and the guide trees are
+from Wynnbuilder's 2.2.5.0 data. `update-tree-effects` only refreshes the effects of nodes already in the file, so
+a new script rebuilds the tree layout itself (nodes, positions, costs, requirements): `npm run update-trees -- 2.2.5.0`.
+In 2.2.5 Shaman got Totemic Hammer and Zealot's Bolts (Hymn of Hate is gone) and Mage got Runic Searing and Frost
+Dragon's Breath (Seance and Arctic Snake are gone). The rebuild also picked up Wynnbuilder's later fixes to 2.2.4
+(Blood Pact, Malediction, Pool of Rejuvenation, Ritualist descriptions) - Wynnbuilder corrects old versions in place.
+18 guide trees from The Ultimate Build Guide no longer fit the 2.2.5 trees and are no longer offered (46 remain).
+Not refreshed here: the limited-time event item list and the Wynnpool item weights (their sites weren't reachable
+from the build machine) - run `npm run update-event-items` and `npm run update-item-weights` locally.
+
+**Decision log**
+- 2026-11-09 · One "stat range" mechanism instead of three patches (negative defences, Total Mana, Custom stats) -
+  each future stat is one catalog entry. Walk Speed keeps its own, well-tested code for now.
+- 2026-11-09 · "Optimize" only in the generator; the Optimizer gets min/max only, because its bounds and dominance
+  pruning are proven for damage, not for an arbitrary stat sum.
+- 2026-11-09 · Avoid negative defences counts the build's totals (base + |base| × %), not single items - player
+  feedback: the old rule removed too many good items.
+- 2026-11-09 · Ability trees are rebuilt from Wynnbuilder data instead of keeping the old file - upstream fixes old
+  versions in place, so the old file was behind even for 2.2.4.
 
 ### Guides and About pages (0.41.1)
 
