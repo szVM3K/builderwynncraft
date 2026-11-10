@@ -398,6 +398,28 @@ behaviour). All 30 default builds pass, with no warnings.
 - **Time.** When the *Any* build doesn't fit, the default run takes a median 1.2-1.3× as long (0.6-4.7× on a
   2-core machine running both shards at once).
 
+### No ready-made spell cycles or guide trees (0.42.1)
+
+Player feedback on Discord (again): the ready-made spell cycles, their notes and the guide tree presets were
+misleading. The cycles and archetype notes (`ARCHETYPE_COMBOS`) were written without being checked in game - one even
+names a node that doesn't exist ("Cheaper War Scream") - so the page no longer shows them:
+- the wizard's Mana step has only "your own cycle" and "No mana filter" (no preset tiles, no "Presets from other
+  archetypes");
+- the archetype preview and Build info no longer show the archetype summary, the tips and "Spell cycles that fit …";
+- the "Guide trees" list (form and wizard) and the "＋ Add a guide tree" buttons are gone.
+
+What stays: the suggested tree for each archetype (the damage of spells is computed from a tree, so the page always
+needs one), your own tree, Copy / Paste tree with Wynnbuilder, the mana filter for a cycle **you** type, "Spells and
+click combos" (spell names, R/L clicks and costs straight from the tree data), and the Guide builds tab (full builds
+from The Ultimate Build Guide). The data (`ARCHETYPE_COMBOS`, `guide-trees.json`) stays in the repository - the
+suggested tree still uses the guide trees as references - and `tests/no-presets.test.js` checks that no screen shows
+it again.
+
+**Decision log**
+- 2026-11-10 · Ready-made spell cycles, archetype notes and guide tree presets removed from the page (players: misleading;
+  a cycle note named a node that doesn't exist). Option "remove" chosen over "label as examples". They can come back
+  only after a player who knows the archetype checks them.
+
 ### Custom stats, whole-build defences, game data 2.2.5 (0.42.0)
 
 Three requests from the Discord feedback, built as **one** mechanism - a range on any stat of the *whole build*,
