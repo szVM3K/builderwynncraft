@@ -9939,14 +9939,7 @@ function DamageForm({
               "Pick a preset; spells and their costs come from the tree."
             )}
           </p>
-          {onGuideTree && treePresetsFor(playerClass).length > 0 && (
-            <details className="text-xs" open={Boolean(form.treePreset)}>
-              <summary className="mc-link cursor-pointer">Guide trees ({treePresetsFor(playerClass, form.preset || null).length || treePresetsFor(playerClass).length})</summary>
-              <div className="mt-1.5">
-                <GuideTreePresets playerClass={playerClass} archetype={form.preset || null} apCap={apCap} selected={form.treePreset || null} onPick={onGuideTree} compact />
-              </div>
-            </details>
-          )}
+          {/* 0.42.1: gotowe drzewka ("Guide trees") usunięte - feedback graczy: wprowadzały w błąd */}
         </fieldset>
       )}
 
@@ -10402,25 +10395,11 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
   const cycleDigits = [...cycleText(parseCycle(form.cycle))];
   const preview = useMemo(() => (level && treeIds.length > 0 ? classPreview(playerClass, level, treeSettings) : null), [playerClass, level, treeIds, treeSettings]);
   const spells = preview ? preview.stats.spells : [];
-  const combos = preset && ARCHETYPE_COMBOS[preset] ? ARCHETYPE_COMBOS[preset].combos : [];
   const [customCycle, setCustomCycle] = useState(() => cycleText(parseCycle(form.cycle)));
   const cycleOf = (text) => cycleText(parseCycle(text));
-  const cyclePresets = (() => {
-    const list = combos.filter((entry) => /[1-4]/.test(entry.cycle)).map((entry) => ({ ...entry, source: null }));
-    const seen = new Set(list.map((entry) => cycleOf(entry.cycle)));
-    spells
-      .filter((spell) => spell.id >= 1 && spell.id <= 4 && spell.cost !== null && spell.cost !== undefined && spell.main && spell.main.type === "damage")
-      .forEach((spell) => {
-        const cycle = String(spell.id).repeat(3);
-        if (seen.has(cycle) || seen.has(String(spell.id))) return;
-        seen.add(cycle);
-        list.push({ name: `${spell.name} spam`, cycle, note: `Only ${spell.name}, cast again and again.`, source: null });
-      });
-    return list;
-  })();
-  const otherCyclePresets = classConfig.archetypes
-    .filter((arch) => arch !== preset && ARCHETYPE_COMBOS[arch])
-    .flatMap((arch) => ARCHETYPE_COMBOS[arch].combos.filter((entry) => /[1-4]/.test(entry.cycle)).map((entry) => ({ ...entry, source: arch })));
+  // 0.42.1: gotowe cykle usunięte (feedback graczy: błędne i mylące) - gracz wpisuje własny cykl
+  const cyclePresets = [];
+  const otherCyclePresets = [];
   const customMana = customCycle ? cycleMana(spells, parseCycle(customCycle), form.cps, form.gain, drainOfRange(formManaRange(form))) : null;
   const customSelected = cycleDigits.length > 0 && cycleDigits.join("") === customCycle && ![...cyclePresets, ...otherCyclePresets].some((entry) => cycleOf(entry.cycle) === customCycle);
   const renderCyclePreset = (entry) => {
@@ -10623,30 +10602,7 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
             <span className="text-xs text-zinc-400">Custom - pick abilities yourself</span>
             <span className="text-xs text-zinc-500">{treeIds.length > 0 && !preset ? `${treeIds.length} abilities chosen` : "Opens the Ability tree tab; your tree is used as soon as you come back"}</span>
           </WizardTile>
-          {onGuideTree && treePresetsFor(playerClass).length > 0 && (
-            <div className="sm:col-span-2 xl:col-span-4">
-              <GuideTreePresets
-                playerClass={playerClass}
-                archetype={preset || null}
-                apCap={apCap}
-                selected={treePreset}
-                onPick={(entry) => {
-                  setView("tree");
-                  onGuideTree(entry);
-                  setTreeShown(true);
-                }}
-              />
-            </div>
-          )}
-          {apiReady() && (
-            <div className="flex flex-wrap items-center gap-2 sm:col-span-2 xl:col-span-4">
-              <button type="button" className="mc-btn mc-btn-sm" onClick={() => setAddTree(true)} title="Share an ability tree: it's checked, then everyone sees it among the guide trees">
-                ＋ Add a guide tree
-              </button>
-              <span className="text-xs text-zinc-500">Share your tree with other players - it appears here after a check.</span>
-            </div>
-          )}
-          {addTree && <TreeSubmitDialog playerClass={playerClass} treeIds={treeIds} archetype={preset || null} onClose={() => setAddTree(false)} />}
+          {/* 0.42.1: gotowe drzewka i "Add a guide tree" usunięte (feedback graczy) */}
           {treeIds.length > 0 && (
             <div className="flex flex-col gap-2 sm:col-span-2 xl:col-span-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -10878,7 +10834,7 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
           </div>
 
           <div className="flex flex-col gap-2">
-            <h3 className={SECTION_HEAD}>{preset && combos.length > 0 ? `Presets for ${preset}` : "Presets"}</h3>
+            <h3 className={SECTION_HEAD}>No cycle</h3>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <WizardTile
                 selected={cycleDigits.length === 0}
@@ -10895,12 +10851,6 @@ function SetupWizard({ playerClass, onClassReset, rank, rankConfirmed, onRank, l
             </div>
           </div>
 
-          {otherCyclePresets.length > 0 && (
-            <details className="flex flex-col gap-1.5">
-              <summary className="mc-link cursor-pointer text-sm">Presets from other {playerClass} archetypes ({otherCyclePresets.length})</summary>
-              <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2">{otherCyclePresets.map(renderCyclePreset)}</div>
-            </details>
-          )}
 
         </div>
       )}
@@ -11076,7 +11026,7 @@ function ClassOverview({ playerClass, level, levelKnown, apCap, preset, treeIds,
     const result = classPreview(playerClass, level, settings);
     return result ? { ...result, ids } : null;
   }, [playerClass, arch, level, apCap, own, treeIds, treeSettings]);
-  const combo = ARCHETYPE_COMBOS[arch];
+  // 0.42.1: opisy, porady i gotowe cykle archetypów (ARCHETYPE_COMBOS) nie są pokazywane - feedback graczy
   const clicks = SPELL_CLICKS[playerClass] || SPELL_CLICKS.default;
   const names = CLASS_SPELL_NAMES[playerClass];
   const spells = preview ? preview.stats.spells : [];
@@ -11115,7 +11065,6 @@ function ClassOverview({ playerClass, level, levelKnown, apCap, preset, treeIds,
           </div>
         </div>
       </div>
-      {combo && <p className="text-sm text-zinc-300">{combo.summary}</p>}
 
       <div className="grid gap-3 lg:grid-cols-2">
         <div className="mc-slot flex flex-col gap-1.5 p-3">
@@ -11158,39 +11107,8 @@ function ClassOverview({ playerClass, level, levelKnown, apCap, preset, treeIds,
           <h3 className="mc-title text-xs uppercase">
             Spell cycles · {form.cps} clicks/s{form.gain ? " · ability mana counted" : ""}
           </h3>
-          <ul className="flex flex-col gap-2">
-            {(combo ? combo.combos : []).map((entry) => {
-              const digits = parseCycle(entry.cycle);
-              const hasSpell = digits.some((id) => id !== 0);
-              const mana = hasSpell ? cycleMana(spells, digits, form.cps, form.gain, drainOfRange(formManaRange(form))) : null;
-              const current = cycleText(typed) === cycleText(digits) && arch === preset;
-              return (
-                <li key={entry.name} className="flex flex-col gap-1">
-                  <div className="flex flex-wrap items-baseline justify-between gap-x-2">
-                    <span className="mc-gold text-sm font-bold">{entry.name}</span>
-                    {hasSpell && (
-                      <button type="button" className={`mc-btn mc-btn-sm ${current ? "mc-btn-on" : ""}`} onClick={() => onUseCycle(arch, cycleText(digits))} title="Use as the mana filter (and this archetype's tree)">
-                        {current ? "In use" : "Use"}
-                      </button>
-                    )}
-                  </div>
-                  <CycleSteps cycle={entry.cycle} playerClass={playerClass} spells={spells} />
-                  <span className="text-xs text-zinc-400">{entry.note}</span>
-                  <span className="text-xs text-zinc-500">
-                    {mana ? (
-                      <>
-                        {mana.used.toFixed(1)} mana/s{mana.gained > 0 ? ` − ${mana.gained.toFixed(1)} from abilities` : ""} → {need(mana)}
-                      </>
-                    ) : !hasSpell ? (
-                      "Main attacks only: no mana filter."
-                    ) : (
-                      "A spell of this cycle isn't in the tree yet."
-                    )}
-                  </span>
-                </li>
-              );
-            })}
-          </ul>
+          {/* 0.42.1: gotowe cykle usunięte; tu tylko cykl wpisany przez gracza */}
+          {!typedMana && <p className="text-xs text-zinc-500">Type your own spell cycle (1-4 = spells, M = main attack) in the Mana settings to see whether this tree can pay for it.</p>}
           {typedMana && (
             <div className="mc-well flex flex-col gap-1.5 p-2">
               <span className="text-xs font-bold text-zinc-200">Your cycle</span>
@@ -11202,13 +11120,6 @@ function ClassOverview({ playerClass, level, levelKnown, apCap, preset, treeIds,
           )}
         </div>
       </div>
-      {combo && combo.tips && combo.tips.length > 0 && (
-        <ul className="flex flex-col gap-0.5 text-xs text-zinc-400">
-          {combo.tips.map((tip) => (
-            <li key={tip}>• {tip}</li>
-          ))}
-        </ul>
-      )}
     </section>
   );
 }
@@ -11980,7 +11891,6 @@ function archetypeSpellNodes(playerClass, archetype) {
 }
 
 function BuildInfoPanel({ playerClass, archetype, build, stats, treeSettings, onOpenTree }) {
-  const combo = ARCHETYPE_COMBOS[archetype];
   const clicks = SPELL_CLICKS[playerClass] || SPELL_CLICKS.default;
   const names = CLASS_SPELL_NAMES[playerClass];
   const tree = TREE_INDEX[playerClass];
@@ -12022,7 +11932,6 @@ function BuildInfoPanel({ playerClass, archetype, build, stats, treeSettings, on
         <h2 className="mc-title text-lg">
           Build info · {playerClass} {archetype}
         </h2>
-        <p className="max-w-4xl text-sm text-zinc-300">{combo.summary}</p>
         <p className="text-xs text-zinc-500">
           Archetype focus: {ARCHETYPES[archetype].focus}. Spell names, costs and damage below come from your ability tree
           {selected.size === 0 ? " (no nodes picked yet — base spells)" : ` (${selected.size} nodes picked)`}; the ability names are from the game's tree data (2.2.5.0).
@@ -12098,62 +12007,6 @@ function BuildInfoPanel({ playerClass, archetype, build, stats, treeSettings, on
           </ul>
           <p className="text-xs text-zinc-500">From the tree data: each {archetype} ability that mentions the spell. ✓ = in your tree; hover for the description.</p>
         </div>
-      </div>
-
-      <div className="mc-slot flex flex-col gap-3 p-3">
-        <h3 className="mc-title text-xs uppercase">Spell cycles that fit {archetype}</h3>
-        <ul className="flex flex-col gap-3">
-          {combo.combos.map((entry) => {
-            const cycle = cycleStats(entry.cycle);
-            const sustainable = cycle.cost === 0 || cycle.regained >= cycle.cost;
-            return (
-              <li key={entry.name} className="flex flex-col gap-1">
-                <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 text-sm">
-                  <span className="mc-gold">{entry.name}</span>
-                  <span className="text-xs text-zinc-500">
-                    cycle <span className="tabular-nums text-zinc-200">{entry.cycle}</span> — type the digits into the Spell cycle calculator (Damage panel)
-                  </span>
-                </div>
-                <div className="flex flex-wrap items-center gap-1 text-xs">
-                  {cycle.steps.map((step, index) => (
-                    <span key={index} className="flex items-center gap-1">
-                      {index > 0 && <span className="text-zinc-600">→</span>}
-                      <span className="mc-slot px-1.5 py-0.5" style={ts({ color: step.color })} title={step.cost ? `${step.cost.toFixed(1)} mana` : undefined}>
-                        {step.label}
-                        <span className="text-zinc-500"> {step.combo}</span>
-                      </span>
-                    </span>
-                  ))}
-                </div>
-                <p className="text-xs text-zinc-400">{entry.note}</p>
-                {cycle.cost > 0 && (
-                  <p className="text-xs text-zinc-500">
-                    One cycle: <span className="tabular-nums text-zinc-200">{cycle.cost.toFixed(1)}</span> mana in {cycle.seconds.toFixed(1)} s; you regain{" "}
-                    <span className="tabular-nums text-zinc-200">{cycle.regained.toFixed(1)}</span> in that time
-                    {stats.manaSteal > 0 ? ` (+${(stats.manaSteal / 3).toFixed(1)}/s Mana Steal while hitting)` : ""} —{" "}
-                    <span style={ts({ color: sustainable ? "#55FF55" : "#FFAA00" })}>
-                      {sustainable
-                        ? "sustainable without stopping"
-                        : Number.isFinite(cycle.every)
-                          ? `sustainable once every ${cycle.every.toFixed(1)} s; add Mana Regen / Steal or cheaper spells to go faster`
-                          : "not sustainable without Mana Regen"}
-                    </span>
-                  </p>
-                )}
-              </li>
-            );
-          })}
-        </ul>
-        <ul className="flex flex-col gap-0.5 text-sm text-zinc-300">
-          {combo.tips.map((tip) => (
-            <li key={tip}>• {tip}</li>
-          ))}
-          <li>
-            • Skill points: {build.profile.skills.map((skill) => SKILL_LABELS[skill]).join(", ") || "any"}; weapon elements:{" "}
-            {build.profile.elements.map((element) => ELEMENT_STYLE[element].label).join(", ") || "any"}. Guide order for spell builds: mana sustain, then damage, then
-            health and healing.
-          </li>
-        </ul>
       </div>
 
       <PowderPanel build={build} stats={stats} standalone />
@@ -12824,9 +12677,8 @@ function InfoDialogBody({ onClose }) {
             <ol className="wbr-info-list">
               <li>{hl("Class, rank, level.")} The rank lends ability points earlier; items above your level are left out, and skill and ability points come from the level.</li>
               <li>
-                {hl("Ability tree.")} Pick an archetype (its suggested tree for your AP), a {hl("guide tree")} (the trees of The Ultimate Build Guide, named the way players
-                call them - Generalist, Bolt Hybrid, Upperbash; search by name or weapon) or your own tree in the Ability tree tab. Spells, their damage and mana costs come
-                from the tree.
+                {hl("Ability tree.")} Pick an archetype (its suggested tree for your AP) or build your own tree in the Ability tree tab (or paste one from Wynnbuilder).
+                Spells, their damage and mana costs come from the tree.
               </li>
               <li>{hl("Maximise.")} One spell (one cast), the main attack (damage per second), several spells at once (their sum), or the whole cycle (its damage per second).</li>
               <li>{hl("Effective HP.")} The EHP range (minimum, optional maximum), in 2% steps of the most your level can reach. Builds outside it are thrown away.</li>
@@ -15132,22 +14984,8 @@ function AbilityTree({ playerClass, level, rank, selected, fullPoints = 0, onCha
           >
             Reset tree
           </button>
-          {apiReady() && (
-            <button type="button" onClick={() => setAddTree(true)} className="mc-btn mc-btn-sm" title="Share this tree: give it a name, it's checked, then everyone sees it among the guide trees">
-              ＋ Add a guide tree
-            </button>
-          )}
         </div>
       </div>
-      {addTree && (
-        <TreeSubmitDialog
-          playerClass={playerClass}
-          treeIds={[...resolved.reachable]}
-          archetype={buildArchetype || null}
-          currentLabel="This tree"
-          onClose={() => setAddTree(false)}
-        />
-      )}
       {pasteOpen && (
         <div className="mc-slot flex flex-wrap items-center gap-2 px-3 py-2 text-sm">
           <label htmlFor="tree-code" className="text-zinc-300">
